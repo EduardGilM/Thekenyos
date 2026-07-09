@@ -36,6 +36,42 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+def _prefer_nvidia_gl() -> None:
+    """On Linux hybrid-graphics machines, render the OpenGL viewer on the NVIDIA
+    GPU rather than the integrated one; otherwise the GL window falls back to slow
+    CPU copies every frame. Only acts when an NVIDIA GPU is present and the user
+    hasn't set these already, so it is a no-op on non-NVIDIA / non-Linux systems
+    and never overrides an explicit choice. Must run before any GL context is
+    created (i.e. before importing the viewer)."""
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.get("__NV_PRIME_RENDER_OFFLOAD") or \
+       os.environ.get("__GLX_VENDOR_LIBRARY_NAME"):
+        return
+    import glob
+    has_nvidia = bool(glob.glob("/dev/nvidia[0-9]*")) or \
+        os.path.isdir("/proc/driver/nvidia/gpus")
+    if not has_nvidia:
+        import shutil, subprocess
+        if shutil.which("nvidia-smi"):
+            try:
+                has_nvidia = subprocess.run(
+                    ["nvidia-smi", "-L"], capture_output=True, timeout=5
+                ).returncode == 0
+            except Exception:
+                has_nvidia = False
+    if has_nvidia:
+        os.environ["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+        os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+        print("[grow_tree] NVIDIA GPU detected; preferring it for OpenGL "
+              "rendering (PRIME offload). First run is slower while Warp compiles "
+              "its CUDA kernels and the robot asset downloads; later runs are cached.",
+              file=sys.stderr)
+
+
+_prefer_nvidia_gl()
+
 import warp as wp
 import newton
 

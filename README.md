@@ -71,9 +71,12 @@ NumPy/SciPy/Matplotlib/Pandas/Pillow.
 **Requirements.** An NVIDIA GPU with CUDA is required (Newton/Warp are
 CUDA-only). Everything here was developed on an 8 GB RTX 2000 Ada laptop; smaller
 scenes run comfortably, and batch size scales with VRAM. On hybrid-graphics
-laptops, launch the GL window on the NVIDIA GPU
-(`__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia`), or the viewer
-falls back to slow CPU copies each frame.
+laptops the GL window must render on the NVIDIA GPU, or it falls back to slow CPU
+copies each frame; `grow_tree.py` detects an NVIDIA GPU on Linux and sets
+`__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` for you (export them
+yourself to override). **The first run is slower:** Warp compiles its CUDA kernels
+and the robot asset is downloaded on first launch, then both are cached, so a
+second run is much faster — judge speed on the second run.
 
 ---
 
