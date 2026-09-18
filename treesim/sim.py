@@ -52,6 +52,7 @@ def _make_solver(name, model, *, collisions, iterations, ls_iterations,
         # the stationary-basket retention regression.
         algo_i = {"cg": 1, "newton": 2}.get(str(algo).lower(), 1)
         return newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
+                                           use_mujoco_cpu=model.device.is_cpu,
                                            use_mujoco_contacts=native_contacts if collisions else True,
                                            solver=algo_i,
                                            nconmax=nconmax if collisions else None,
@@ -315,8 +316,47 @@ class Sim:
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
             if self.kiwi_damage is not None:
-                self.solver.update_contacts(self.contacts, self.state_0)
+                if self.model.device.is_cpu:
+                    self._cpu_contacts()
+                else:
+                    self.solver.update_contacts(self.contacts, self.state_0)
                 self.kiwi_damage.apply(self.contacts, self.sim_dt)
+
+    def _cpu_contacts(self):
+        """Newton 1.3 does not expose CPU contacts; copy MuJoCo's solved loads.
+
+        Single-world adapter, with body-local contact points for the viewer.
+        It shares the same damage/oracle kernels as the GPU path.
+        """
+        import mujoco
+        from .builder import _qrot, _qconj
+        m, d, c = self.solver.mj_model, self.solver.mj_data, self.contacts
+        if self.model.world_count != 1 or d.ncon > c.rigid_contact_max:
+            raise RuntimeError('CPU contact adapter requires one world within contact capacity')
+        mapping = self.solver.mjc_geom_to_newton_shape.numpy()[0]
+        if any(w.number for w in d.warning):
+            raise RuntimeError('MuJoCo CPU numerical warning')
+        count = d.ncon
+        c.rigid_contact_count.assign(np.array([count], np.int32))
+        arrays = [c.rigid_contact_shape0, c.rigid_contact_shape1, c.rigid_contact_normal,
+                  c.force, c.rigid_contact_point0, c.rigid_contact_point1]
+        values = [a.numpy() for a in arrays]
+        poses, bodies = self.state_0.body_q.numpy(), self.model.shape_body.numpy()
+        force = np.zeros(6)
+        for i in range(count):
+            contact = d.contact[i]
+            shapes = mapping[contact.geom]
+            if np.any(shapes < 0): raise RuntimeError('Unmapped native contact shape')
+            values[0][i], values[1][i] = shapes
+            frame = contact.frame.reshape(3,3)
+            values[2][i] = frame[0]
+            mujoco.mj_contactForce(m, d, i, force)
+            values[3][i,:3], values[3][i,3:] = frame.T@force[:3], frame.T@force[3:]
+            for side, shape in enumerate(shapes):
+                point = contact.pos + (side-.5)*contact.dist*frame[0]
+                body = bodies[shape]
+                values[4+side][i] = point if body < 0 else _qrot(_qconj(poses[body,3:]), point-poses[body,:3])
+        for array, value in zip(arrays, values): array.assign(value)
 
     def step(self):
         if self._graph is not None:

@@ -23,7 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 spot = ["onnxruntime==1.30.0"]
-rl = ["gymnasium==1.3.0"]
+rl = ["gymnasium==1.3.0", "stable-baselines3==2.9.0", "torch==2.10.0"]
 
 [project.urls]
 Homepage = "https://github.com/EduardGilM/Thekenyos"

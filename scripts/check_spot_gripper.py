@@ -17,7 +17,12 @@ import numpy as np
 from treesim.kiwi_material import XUXIANG, damage_increment
 
 
-def scene(asset, dt, rigid=False, torque=.3):
+def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0.):
+    from scipy.spatial.transform import Rotation
+    position = np.array([.195, -.005, .24]) + np.asarray(offset_mm)/1000
+    rotation = Rotation.from_euler('z', tilt_deg, degrees=True) * Rotation.from_euler('x', 90, degrees=True)
+    xyzw = rotation.as_quat()
+    pose = dict(pos=' '.join(map(str,position)), quat=' '.join(map(str,xyzw[[3,0,1,2]])))
     urdf = ET.parse(asset/'spot_with_arm.urdf').getroot()
     root = ET.fromstring(f'''<mujoco model="Spot jaw contact bench">
       <compiler angle="radian"/>
@@ -57,11 +62,11 @@ def scene(asset, dt, rigid=False, torque=.3):
                 else: attrs.update(group='3',rgba='.3 .32 .35 1')
                 ET.SubElement(body,'geom',**attrs)
     if rigid:
-        fruit=ET.SubElement(world,'body',name='kiwi',pos='.195 -.005 .24',quat='.70710678 .70710678 0 0')
+        fruit=ET.SubElement(world,'body',name='kiwi',**pose)
         ET.SubElement(fruit,'freejoint')
         ET.SubElement(fruit,'geom',name='kiwi',type='ellipsoid',size='.027 .027 .036',mass='.09',rgba='.45 .29 .11 1')
     else:
-        flex=ET.SubElement(world,'flexcomp',name='kiwi',type='ellipsoid',dim='3',count='7 7 7',spacing='.009 .009 .012',pos='.195 -.005 .24',quat='.70710678 .70710678 0 0',mass='.09',radius='.0003',rgba='.45 .29 .11 1')
+        flex=ET.SubElement(world,'flexcomp',name='kiwi',type='ellipsoid',dim='3',count='7 7 7',spacing='.009 .009 .012',**pose,mass='.09',radius='.0003',rgba='.45 .29 .11 1')
         ET.SubElement(flex,'elasticity',young=str(XUXIANG['flesh'].young),poisson=str(XUXIANG['flesh'].poisson),damping='.00001')
         ET.SubElement(flex,'contact',selfcollide='none',internal='false',condim='3',friction='.44 .005 .0001',solref='.004 1',solimp='.95 .99 .001')
     return ET.tostring(root,encoding='unicode')
@@ -69,7 +74,7 @@ def scene(asset, dt, rigid=False, torque=.3):
 
 def run(args):
     out=args.output; out.mkdir(parents=True,exist_ok=True)
-    xml=scene(args.relic.resolve()/'source/relic/relic/assets/spot',args.timestep,args.rigid,args.torque)
+    xml=scene(args.relic.resolve()/'source/relic/relic/assets/spot',args.timestep,args.rigid,args.torque,args.offset_mm,args.tilt_deg)
     (out/'scene.xml').write_text(xml)
     m=mujoco.MjModel.from_xml_string(xml); d=mujoco.MjData(m)
     d.qpos[0]=-1.; d.ctrl[0]=-1.; mujoco.mj_forward(m,d)
@@ -100,6 +105,7 @@ def run(args):
         font=ImageFont.truetype('DejaVuSans.ttf',24)
         args.video.parent.mkdir(parents=True,exist_ok=True)
         encoder=subprocess.Popen(['ffmpeg','-y','-loglevel','error','-f','rawvideo','-pix_fmt','rgb24','-s','1280x720','-r','15','-i','-','-r','30','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(args.video)],stdin=subprocess.PIPE)
+    hold_samples=bilateral_samples=0
     rows=[]; force=np.zeros(6); damage=0.; peak=np.zeros(2); next_sample=next_frame=0.; held=[]
     try:
         for step in range(round(4/args.timestep)):
@@ -144,7 +150,10 @@ def run(args):
             if t>=next_progress:
                 print(f'{t:.1f} s: {phase}, forces={loads.round(2)}, compression={strain:.4f}',flush=True)
                 next_progress+=.5
-            if 1.7<t<2.7: held.append(float(np.linalg.norm(center-restcenter)))
+            if 1.7<t<2.7:
+                held.append(float(np.linalg.norm(center-restcenter)))
+                hold_samples += 1
+                bilateral_samples += int(min(loads) > .1)
             if t>=next_sample:
                 rows.append(dict(time_s=t,phase=phase,jaw_rad=float(d.qpos[0]),torque_Nm=float(d.actuator_force[0]),fixed_force_N=loads[0],moving_force_N=loads[1],center_z_m=center[2],compression_proxy=strain,damage_proxy=damage,shape_rms_error_m=shape_error,ground_contact=ground))
                 next_sample+=.01
@@ -164,6 +173,8 @@ def run(args):
         if renderer: renderer.close()
     metrics = dict(
         rigid=args.rigid, timestep_s=args.timestep, torque_limit_Nm=args.torque,
+        offset_mm=list(args.offset_mm), tilt_deg=args.tilt_deg,
+        hold_bilateral_fraction=bilateral_samples/max(hold_samples,1),
         peak_jaw_force_N=peak.tolist(), max_hold_displacement_m=max(held),
         hold_tolerance_m=.02, hold_window_s=[1.7, 2.7],
         final_center_z_m=float(center[2]), damage_proxy=damage,
@@ -195,7 +206,11 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--relic',required=True,type=Path); p.add_argument('--output',type=Path,default=Path('output/spot-gripper'))
     p.add_argument('--video',type=Path); p.add_argument('--rigid',action='store_true'); p.add_argument('--check',action='store_true')
+    p.add_argument('--offset-mm',type=float,nargs=3,default=(0.,0.,0.))
+    p.add_argument('--tilt-deg',type=float,default=0.)
     p.add_argument('--timestep',type=float,default=.00001); p.add_argument('--torque',type=float,default=.3)
     a=p.parse_args()
     if not np.isfinite([a.timestep,a.torque]).all() or not 0<a.timestep<=.001 or not 0<a.torque<=15.32: p.error('Invalid timestep or jaw torque')
+    if not np.isfinite([*a.offset_mm,a.tilt_deg]).all() or max(map(abs,a.offset_mm))>10 or abs(a.tilt_deg)>30:
+        p.error('Pose bounds: offsets up to 10 mm, tilt up to 30 degrees')
     run(a)

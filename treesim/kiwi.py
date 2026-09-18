@@ -110,8 +110,8 @@ class KiwiField(AppleField):
             starts.append(wp.transform_point(wp.transform(wp.vec3(*poses[parent,:3]), wp.quat(*poses[parent,3:])), wp.vec3(*offset)))
             ends.append(wp.transform_point(wp.transform(wp.vec3(*poses[fruit,:3]), wp.quat(*poses[fruit,3:])), wp.vec3(0., 0., float(half))))
         viewer.log_lines('kiwi stems',
-                         wp.array(starts, dtype=wp.vec3) if starts else None,
-                         wp.array(ends, dtype=wp.vec3) if ends else None,
+                         wp.array(starts, dtype=wp.vec3, device=viewer.device) if starts else None,
+                         wp.array(ends, dtype=wp.vec3, device=viewer.device) if ends else None,
                          colors=(.35, .55, .16), width=.003, hidden=not starts)
 
     def hold(self, i, hand_body):

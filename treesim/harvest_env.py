@@ -4,7 +4,7 @@ One native-contact physics step per oracle sample avoids losing brief failures.
 Reset rebuilds solver state for correctness; this is intentionally not a fast
 batched training implementation. The deformable contact bench remains separate.
 """
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import gymnasium as gym
@@ -23,8 +23,9 @@ from .basket import CENTER, SIZE
 class SpotHarvestEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array'], 'render_fps': 50}
 
-    def __init__(self, relic, *, task=None, render_mode=None, physics_hz=1000):
+    def __init__(self, relic, *, task=None, render_mode=None, physics_hz=1000, device=None):
         self.relic = Path(relic).resolve()
+        self.device = device
         if render_mode not in (None, 'rgb_array'):
             raise ValueError('Use render_mode=None or rgb_array')
         if physics_hz not in (1000, 2000):
@@ -47,6 +48,7 @@ class SpotHarvestEnv(gym.Env):
             raise ValueError('Reset options are not supported')
         self.close()
         cfg = TreeConfig.compliant('pergola')
+        if self.device is not None: cfg.device = self.device
         cfg.seed = int(self.np_random.integers(0, 2**30))
         cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 1
@@ -153,11 +155,22 @@ class SpotHarvestEnv(gym.Env):
         if self.viewer is None:
             import newton.viewer as V
             import warp as wp
-            self.viewer = V.ViewerGL(headless=True); self.viewer.set_model(self.sim.model)
+            self.viewer = V.ViewerGL(headless=True)
+            # Newton's GL viewer requires GPU-backed render buffers on this stack.
+            # Mirror CPU physics poses; this model is never stepped.
+            render_model = self.sim.model
+            if render_model.device.is_cpu:
+                cfg = replace(self.sim.tree.config, device='cuda:0')
+                render_model = builder.build(cfg, self.sim.tree.skeleton).model
+                if render_model.body_label != self.sim.model.body_label:
+                    raise RuntimeError('Render/physics body ordering differs')
+            self._render_state = render_model.state()
+            self.viewer.set_model(render_model)
             base = self.base_pose[:3]
             self.viewer.set_camera(pos=wp.vec3(*(base+[3.2,3.2,2.])), yaw=-135., pitch=-24.)
         self.viewer.begin_frame(self.sim.sim_time)
-        self.viewer.log_state(self.sim.state_0)
+        self._render_state.body_q.assign(self.sim.state_0.body_q.numpy())
+        self.viewer.log_state(self._render_state)
         self.sim.apples.render(self.viewer, self.sim.state_0)
         self.viewer.end_frame()
         return self.viewer.get_frame().numpy().copy()
@@ -166,6 +179,7 @@ class SpotHarvestEnv(gym.Env):
         if self.viewer is not None:
             self.viewer.close()
         self.viewer = None
+        self._render_state = None
         if self.sim is not None:
             self.sim.robot_controller = None
         self.controller = self.observer = self.oracle = None

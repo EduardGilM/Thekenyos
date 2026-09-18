@@ -18,10 +18,11 @@ from treesim.harvest_task import TaskDefinition
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--relic',required=True,type=Path)
 p.add_argument('--video',type=Path)
+p.add_argument('--device', default=None)
 p.add_argument('--physics-hz',type=int,default=1000)
 p.add_argument('--output',type=Path,default=Path('output/harvest-env-check.json'))
 a=p.parse_args()
-e=gym.make('Thekenyos/SpotHarvest-v0', relic=a.relic,physics_hz=a.physics_hz,
+e=gym.make('Thekenyos/SpotHarvest-v0', relic=a.relic,physics_hz=a.physics_hz,device=a.device,
            render_mode='rgb_array' if a.video else None).unwrapped
 check_env(e,skip_render_check=True)
 o,_=e.reset(seed=42)
@@ -105,7 +106,7 @@ finally:
     e.close()
 
 # Integration fault injection: a real external load, not a fake detached flag.
-e=SpotHarvestEnv(a.relic,task=TaskDefinition(guidance_weight=0.),physics_hz=a.physics_hz)
+e=SpotHarvestEnv(a.relic,task=TaskDefinition(guidance_weight=0.),physics_hz=a.physics_hz,device=a.device)
 e.reset(seed=42)
 e.sim.set_external_force(e.observer.body,force=(30,0,-50))
 for i in range(150):
@@ -127,7 +128,7 @@ from treesim.basket import CENTER, WALL
 from treesim.harvest_task import rotation
 fixture_outcomes = {}
 for destination in ('ground', 'basket'):
-    e=SpotHarvestEnv(a.relic,task=TaskDefinition(guidance_weight=0.),physics_hz=a.physics_hz)
+    e=SpotHarvestEnv(a.relic,task=TaskDefinition(guidance_weight=0.),physics_hz=a.physics_hz,device=a.device)
     e.reset(seed=42)
     e.sim.set_external_force(e.observer.body,force=(0,0,-50))
     e.step(np.zeros(7))
@@ -154,7 +155,7 @@ for destination in ('ground', 'basket'):
 
 # Inject one transient overload in the real observer stream; ensure the wrapper
 # evaluates every physics step, rather than losing it at the policy boundary.
-e=SpotHarvestEnv(a.relic,physics_hz=a.physics_hz); e.reset(seed=42)
+e=SpotHarvestEnv(a.relic,physics_hz=a.physics_hz,device=a.device); e.reset(seed=42)
 observe=e.observer.observe
 samples=[0]
 def spike(work):
@@ -166,13 +167,13 @@ _,_,done,_,spike_info=e.step(np.zeros(7))
 assert done and spike_info['outcome']=='jaw_overload' and samples[0]==3
 assert spike_info['elapsed_s']<.02
 e.close()
-e=SpotHarvestEnv(a.relic,task=TaskDefinition(time_limit_s=.03),physics_hz=a.physics_hz); e.reset(seed=42)
+e=SpotHarvestEnv(a.relic,task=TaskDefinition(time_limit_s=.03),physics_hz=a.physics_hz,device=a.device); e.reset(seed=42)
 e.step(np.zeros(7)); _,_,done,cut,timeout_info=e.step(np.zeros(7))
 assert done and not cut and timeout_info['outcome']=='timeout'
 e.close()
 metrics=dict(passed=True,gymnasium_check=True,seeded_reset=True,seeded_step_drift=repeat_drift,fixed_base=True,
              actuator_work_J=work,all_body_fk_error_m=kinematic_error, max_canopy_anchor_gap_m=max_anchor_gap, max_tip_sag_m=max_tip_sag,forced_loss=info['outcome'],
-             transient_overload_detected_at_s=spike_info['elapsed_s'],physics_hz=a.physics_hz,
+             transient_overload_detected_at_s=spike_info['elapsed_s'],physics_hz=a.physics_hz,device=a.device,
              timeout_is_task_failure=True,fixture_outcomes=fixture_outcomes,policy_trained=False,fruit_model='rigid surrogate')
 a.output.parent.mkdir(parents=True,exist_ok=True)
 a.output.write_text(json.dumps(metrics,indent=2)+'\n'); print(json.dumps(metrics,indent=2))

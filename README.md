@@ -25,7 +25,7 @@ coordination, maturity perception and automatic unloading come later.
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
 | Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
 | RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
-| RL training | **No harvesting policy trained yet.** Walking uses an existing policy; no optimizer is integrated |
+| RL training | Short local reach/grasp PPO pilot completed; zero stable grasps on 8 held-out seeds. No full harvesting policy |
 
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
 bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
@@ -331,8 +331,8 @@ the flex benchmark without further contact and mesh-resolution checks.
 
 1. Fit compression/hold/release and impact tests to one cultivar and harvest
    condition. Add layered, viscoelastic/plastic response without mixing datasets.
-2. Validate rigid/deformable contact transfer across grasp poses, then connect
-   an optimizer to the [fixed-base environment](docs/harvest-task.md).
+2. Resolve rigid/deformable contact disagreement and improve force-aware approach
+   in the [local PPO pilot](docs/harvest-task.md#local-reachgrasp-pilot) before longer training.
 3. Train locomotion over 0–6 kg payload and arm configurations; compare against
    the existing policy on matched seeds, spills, tracking and falls.
 4. Train reach, grip, detach and deposit, then integrate a full harvesting task.

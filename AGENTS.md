@@ -68,6 +68,11 @@ comparison; keep failed torque cases visible. Policy changes require matched-see
 tracking/fall/spill comparisons. A video does not
 replace numerical checks; metrics do not replace visual inspection.
 
+For the reach/grasp pilot, retain matched-seed untrained/trained evaluations
+with guidance off. Keep failed contact cases and native crashes in the report;
+model disagreement permits only a labelled diagnostic rigid pilot. CPU contact
+adapter changes require `check_harvest_env.py --device cpu` at both timesteps.
+
 Show the user a video when a useful visual milestone is ready. Label scripted
 motions, pretrained inference and learned behaviour accurately. Report what
 passed, what failed and what remains untested. Do not claim task completion

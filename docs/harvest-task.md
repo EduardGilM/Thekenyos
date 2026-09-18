@@ -39,7 +39,7 @@ and attachment state belong to the evaluator or privileged critic; do not
 silently expose them as deployable sensors. `SimHarvestObserver` reads simulator
 state, actual native contact forces and full-ellipsoid containment. Its caller
 selects the actual pad bodies and TCP offset. It is a measurement bridge. `SpotHarvestEnv` supplies the Gymnasium interface;
-a policy optimizer is not implemented.
+a separate short PPO pilot is implemented in `scripts/train_reach_grasp.py`.
 
 ## Guidance that can be removed
 
@@ -153,3 +153,75 @@ checks cover the Gymnasium API, seeded reset, action validation, fixed chassis,
 kinematics, a physically forced loss, a one-substep overload, timeout and a
 ground-drop and basket-settling fixtures. These fixtures initialize an already
 detached fruit at known positions; it is not evidence of a successful robot transfer.
+
+
+## Local reach/grasp pilot
+
+`ReachGraspEnv` is a separate four-second curriculum. An IK solve initializes
+an **open** hand about 10 cm from the target; it provides no actions or
+imitation data. PPO controls the same seven joints under the existing effort
+limits. Stable bilateral contact, low relative motion and continued attachment
+are required for grasp success. Drops, force limits, damage and collisions
+remain substep failures. This stage does not detach or collect fruit.
+
+Training adds removable distance-progress guidance. Evaluation sets its weight
+to zero and compares the untrained and trained policies on the same eight
+held-out seeds. These are privileged simulation observations and rigid fruit;
+failed contact transfer restricts this to a diagnostic learning experiment.
+
+For the small pilot, `device='cpu'` selects native MuJoCo through Newton. A
+single-world adapter reads solved native contact forces into the existing
+oracle/damage path. CPU physics runs at 1 kHz. Rendering mirrors physical body
+poses into GPU render buffers, without stepping that visual model.
+
+```bash
+# CPU PyTorch avoids installing a second CUDA runtime for this small MLP.
+python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e '.[rl]'
+python scripts/check_gripper_transfer.py --relic ../relic
+python scripts/check_harvest_env.py --relic ../relic --device cpu
+python scripts/check_harvest_env.py --relic ../relic --device cpu --physics-hz 2000
+python scripts/train_reach_grasp.py --relic ../relic --steps 8192 \
+  --contact-report output/contact-transfer/summary.json \
+  --video output/reach-grasp-pilot.mp4
+```
+
+Use `--evaluate-only` to evaluate saved checkpoints without training again.
+Keep the same output directory and evaluation seed count. Checkpoints and
+results remain under `output/reach-grasp-pilot`; no weights are redistributed.
+Contact screening failures remain in the report. The trainer refuses numerical
+failures in the rigid benchmark, but explicitly permits a **diagnostic rigid
+pilot** when rigid/deformable transfer fails. This is not a production gate pass.
+
+### Results, 19 September 2026
+
+13 contact cases cover centred fruit, ±4 mm offsets, 15° tilt, two torque
+settings and three half-timestep checks. At 0.3 N·m, centred rigid fruit fails
+the hold/release check while deformable fruit passes. At −4 mm the result
+reverses: deformable displacement exceeds the engineering 20 mm tolerance.
+The tilted deformable fruit stays in bilateral contact but moves 23.73 mm
+(23.76 mm at half timestep). These are not equivalent contact models.
+One initial +4 mm native flex run segfaulted; repeats at 10 and 5 µs completed.
+The cause remains unresolved. Successful reruns do not establish robustness.
+
+The PPO pilot completed 8,192 steps and 160 optimizer epochs, with no teacher
+actions. On eight held-out seeds with guidance disabled:
+
+| Metric | Untrained | Trained |
+|---|---:|---:|
+| Stable grasp successes | 0/8 | 0/8 |
+| Mean closest TCP distance | 10.02 cm | 6.23 cm |
+| Jaw-force limit failures | 0 | 7 |
+| Fruit drops | 0 | 1 |
+| Timeouts | 8 | 0 |
+
+A repeated evaluation kept zero successes and seven force-limit failures, but
+the remaining seed ended in a forbidden collision instead of a drop. Contact
+outcomes after impact are sensitive to small numerical differences; do not
+claim exact trajectory repeatability from this screen.
+
+The learned policy moves closer but pushes into one jaw; it has not learned a
+safe grasp. Keep the failed checkpoint as evidence. Improve contact behaviour
+and force-aware approach control before scaling training. Neither force limits
+nor damage proxies establish absence of bruising. The first trained-evaluation
+video shows seed 1000, not a selected successful episode.
