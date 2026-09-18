@@ -147,12 +147,12 @@ def camera_pose(frame, n_frames, floor):
     """
     t = frame / max(n_frames - 1, 1)
     s = 0.5 - 0.5 * math.cos(math.pi * t)
-    x_look = 0.05 + 0.45 * s
-    y_look = -1.60 + 2.80 * s
-    look = np.array([x_look, y_look, floor.ground_z(x_look, y_look) + 0.22])
-    azimuth = 108.0 - 18.0 * s
-    elevation = -42.0 + 8.0 * s
-    distance = 6.4 - 1.6 * s
+    x_look = 0.05 + 0.30 * s
+    y_look = -1.60 + 1.70 * s
+    look = np.array([x_look, y_look, floor.ground_z(x_look, y_look) + 0.18])
+    azimuth = 108.0 - 14.0 * s
+    elevation = -46.0
+    distance = 6.3 - 0.4 * s
     return look, distance, azimuth, elevation
 
 
