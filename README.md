@@ -22,13 +22,14 @@ coordination, maturity perception and automatic unloading come later.
 | Stems | Axial/bending stiffness derived from measured stalk dimensions; irreversible load-triggered detachment |
 | Damage | Persistent contact/strain **proxy**, with negative increments available as reward terms |
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
+| Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
 | RL training | **Not implemented here yet.** Walking uses an existing policy; penalties do not retrain it |
 
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
 bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
 Neither model is a validated predictor of bruising. Layered skin/core,
 viscoelastic/plastic constitutive laws, calibrated wet friction and
-angle/torque-dependent abscission remain open work. Research ranges are not
+calibrated angle/torque-dependent abscission remain open work. Research ranges are not
 interchangeable across cultivars and test conditions.
 
 ## Install
@@ -126,9 +127,10 @@ known source inconsistencies and missing measurements.
   the actual basket liner and other fruit remain uncalibrated.
 - **Stems:** beam stiffness derives from `EA/L` and `3EI/L³`. The attachment is
   at the fruit surface, so forces act with a moment arm and react on the cane.
-  An implicit spring approximation supports small timesteps. Pooled detachment
-  forces are sampled; the threshold is conditioned to support static weight.
-  This is not a measured angle-conditioned fracture law.
+  An implicit spring approximation supports small timesteps. A Fang2023 Hayward
+  mean-force proxy sets the tensile break threshold by fruit–stem angle. Some
+  points are approximate figure readings; interpolation and fracture dynamics
+  remain uncalibrated. It does not prescribe a robot picking trajectory.
 - **GPU damage:** native MuJoCo contact forces feed a Hertz equivalent-patch
   estimate of pressure and indentation. A persistent score uses a 5% strain
   reference and 0.26 MPa flesh stress reference, with an **assumed** one-second
@@ -149,6 +151,9 @@ python -m unittest discover -s tests -v
 python scripts/check_loose_fruit.py
 python scripts/check_loose_fruit.py --timestep .0005
 python scripts/check_kiwi_physics.py
+python scripts/check_detachment_angles.py
+python scripts/check_detachment_angles.py --timestep .0005
+python scripts/check_harvest_observer.py --relic ../relic
 python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --frames 300 --no-render --metrics output/walk-check.json
 ```
@@ -167,11 +172,13 @@ real-fruit calibration or evidence that a harvesting policy has been trained.
 
 | Check | Result |
 |---|---|
-| Unit/integration suite | 8 tests passed in the Linux environment |
+| Unit/integration suite | 15 tests passed in the Linux environment |
 | Stationary basket, 60 fruit | Zero spills over 5 s at both 1 ms and 0.5 ms physics steps |
 | Loaded walking | 12 s, 2.83 m travelled, 7.6° maximum tilt, zero spills, zero canopy detachments |
 | Deliberate 400 N·m roll disturbance | 36 fruit spilled; total spill penalty −36 |
-| Stem/drop regression | Attached at rest; detached under a 20 N pull; landed without tunnelling |
+| Angle fixture, 60° / 120° / 180° | 5.99 / 21.39 / 36.59 N at 1 ms; under 0.07 N change at 0.5 ms |
+| Spot observer | Read-only measurement; actual ground contact and forced-drop failure detected |
+| Stem/drop regression | Attached at rest; detached under a 50 N pull (updated angle model); landed without tunnelling |
 | Original apple / pergola smoke runs | 60 / 120 frames completed |
 | Native 3% timestep refinement | 10 µs vs 5 µs: force difference 0.069%; strain difference 0.00046 percentage points |
 | Native 10% commanded squeeze | 8.72% measured compression, 71.38 N per pad, no solver warnings; damage proxy saturated |
@@ -184,7 +191,8 @@ a guarantee of unbruised real fruit. Outputs are generated under `output/`.
 
 1. Fit compression/hold/release and impact tests to one cultivar and harvest
    condition. Add layered, viscoelastic/plastic response without mixing datasets.
-2. Validate the actual Spot jaw contact and a stem angle/torque break law.
+2. Integrate the [task contract](docs/harvest-task.md) with arm actuation and
+   substep event capture; validate actual Spot jaw contact and torque failure.
 3. Train locomotion over 0–6 kg payload and arm configurations; compare against
    the existing policy on matched seeds, spills, tracking and falls.
 4. Train reach, grip, detach and deposit, then integrate a full harvesting task.
@@ -197,6 +205,7 @@ only after the native material and contact benchmarks agree with measurements.
 |---|---|
 | `treesim/pergola.py` | Procedural structure and fruit placement |
 | `treesim/kiwi_material.py` | Source-backed constants, geometry sampler, damage helper |
+| `treesim/harvest_task.py` | Task contract, privileged oracle and simulator measurement bridge |
 | `treesim/kiwi.py` | Stem dynamics and GPU contact damage diagnostics |
 | `treesim/basket.py` | Mounted basket, loose payload, spill events |
 | `treesim/spot.py` | URDF import, observation mapping, policy and PD control |

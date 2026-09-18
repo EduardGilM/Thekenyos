@@ -372,6 +372,7 @@ class FoliageParams:
 # --------------------------------------------------------------------------- #
 @dataclass
 class FruitParams:
+    kiwi_strength_scale: float = 1.0   # Hayward curve multiplier; 1 = paper mean proxy.
     enabled: bool = False
     min_order: int = 2                  # apples grow on >=2-year-old wood (spurs), outer canopy
     prob_per_spur: float = 0.35         # chance an eligible spur bears fruit

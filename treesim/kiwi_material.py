@@ -28,8 +28,6 @@ STEM_AREA = np.pi * STEM_DIAMETER**2 / 4
 STEM_I = np.pi * STEM_DIAMETER**4 / 64
 STEM_AXIAL = STEM_YOUNG * STEM_AREA / STEM_LENGTH
 STEM_BENDING = 3 * STEM_YOUNG * STEM_I / STEM_LENGTH**3
-# Mu2020 pooled forces. Uniform sampling is engineering domain randomization.
-DETACH_RANGE = (1.08, 12.25)
 RUBBER_STATIC_RANGE = (.38, .51)
 # Unknown actual liner/fruit contacts; deliberately not attributed to rubber.
 FRUIT_FRICTION = .6
@@ -63,3 +61,35 @@ def damage_increment(strain, stress, dt, damage):
         raise ValueError('dt must be finite and positive')
     excess = np.maximum(np.asarray(strain)/.05-1, 0) + np.maximum(np.asarray(stress)/.26e6-1, 0)
     return np.minimum(1., np.asarray(damage) + dt*excess)
+
+
+# Fang2023, Fig.7 / sections 3.2-3.3, Hayward, six fruit per angle, 9 mm/s.
+# 60 and 160 degree means are explicit in the text. Other values are coarse
+# visual digitizations of the green mean crosses (~1 N reading precision),
+# NOT the box medians or raw sample measurements. Piecewise-linear response
+# and clamping outside 60..180 degrees are modelling choices.
+HAYWARD_FSA_DEG = np.array([60., 80., 100., 120., 140., 160., 180.])
+HAYWARD_FDF_N = np.array([5.98, 6.3, 13.8, 21.3, 30.7, 40.27, 36.5])
+
+
+def detachment_force(fsa_deg, strength_scale=1.):
+    if not np.isfinite(fsa_deg).all() or np.any(np.asarray(fsa_deg) < 0) or np.any(np.asarray(fsa_deg) > 180):
+        raise ValueError('Fruit-stem angle must be finite and in [0, 180] degrees')
+    if not np.isfinite(strength_scale) or strength_scale <= 0:
+        raise ValueError('Strength scale must be finite and positive')
+    return np.interp(fsa_deg, HAYWARD_FSA_DEG, HAYWARD_FDF_N)*strength_scale
+
+
+def fruit_stem_angle(fruit_tip_axis, stem_to_anchor):
+    """Fang FSA: vectors from fruit-stem junction toward fruit tip and anchor.
+
+    Straight hanging fruit is 180 degrees; rotating the whole assembly together
+    must not change this angle. A zero-length stem has no defined angle.
+    """
+    a, b = np.asarray(fruit_tip_axis, float), np.asarray(stem_to_anchor, float)
+    if a.shape != (3,) or b.shape != (3,) or not np.isfinite([a,b]).all():
+        raise ValueError('Expected two finite 3D vectors')
+    denom = np.linalg.norm(a)*np.linalg.norm(b)
+    if denom < 1e-12:
+        raise ValueError('Angle is undefined for zero-length vectors')
+    return float(np.degrees(np.arccos(np.clip(np.dot(a,b)/denom, -1, 1))))

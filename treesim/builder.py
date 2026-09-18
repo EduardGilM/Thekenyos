@@ -575,7 +575,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             half_height = getattr(ap, "half_height", 0.0)
             volume = (4.0 / 3.0) * np.pi * ap.radius ** 3 + 2 * half_height * np.pi * ap.radius ** 2
             if kiwi:
-                from .kiwi_material import STEM_LENGTH, DETACH_RANGE, FRUIT_FRICTION, RESTITUTION
+                from .kiwi_material import STEM_LENGTH, HAYWARD_FDF_N, FRUIT_FRICTION, RESTITUTION
                 volume = 4*np.pi*np.prod(ap.radii)/3
             acfg = builder.ShapeConfig(
                 density=float(ap.mass/volume if kiwi else max(fr.mass/volume, 50.)), mu=FRUIT_FRICTION if kiwi else 1.0,
@@ -631,7 +631,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             ap_parent.append(pbody)
             ap_offset.append([float(off[0]), float(off[1]), float(off[2])])
             ap_drop.append(float(drop))
-            ap_detach.append(float(apple_rng.uniform(*(DETACH_RANGE if kiwi else fr.detach_force))))
+            ap_detach.append(float(HAYWARD_FDF_N[-1]*fr.kiwi_strength_scale if kiwi else apple_rng.uniform(*fr.detach_force)))
 
     # --- optional RidgebackFranka mobile manipulator (one per env; identical
     #     in every env so the worlds stay homogeneous and keep batching) ------- #

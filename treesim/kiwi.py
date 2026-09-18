@@ -1,12 +1,11 @@
 """Free kiwi dynamics with stem-site beam forces and irreversible break state.
 
-Stem stiffness derives from He2024 Hayward. Abscission is a sampled force
-proxy (Mu2020 pooled measurements); angle-conditioned fracture and torsion
-are not calibrated. No artificial hand attachment is used for kiwi.
+Stem stiffness derives from He2024 Hayward. Abscission uses a Fang2023 Hayward angle-conditioned mean-force proxy.
+Interpolation, large-angle beam response and fracture dynamics are uncalibrated. No artificial hand attachment is used for kiwi.
 """
 import numpy as np
 import warp as wp
-from .kiwi_material import STEM_LENGTH, STEM_AXIAL, STEM_BENDING, STEM_YOUNG, STEM_I
+from .kiwi_material import STEM_LENGTH, STEM_AXIAL, STEM_BENDING, STEM_YOUNG, STEM_I, HAYWARD_FSA_DEG, HAYWARD_FDF_N
 from .fruit import AppleField
 
 
@@ -15,7 +14,10 @@ def stem_force(q: wp.array(dtype=wp.transform), qd: wp.array(dtype=wp.spatial_ve
                com: wp.array(dtype=wp.vec3), mass: wp.array(dtype=float),
                fruit: wp.array(dtype=int), parent: wp.array(dtype=int),
                offset: wp.array(dtype=wp.vec3), axis: wp.array(dtype=wp.vec3),
-               half: wp.array(dtype=float), strength: wp.array(dtype=float),
+               half: wp.array(dtype=float), scale: float,
+               angles: wp.array(dtype=float), means: wp.array(dtype=float),
+               angle_out: wp.array(dtype=float), threshold_out: wp.array(dtype=float),
+               break_load: wp.array(dtype=float),
                broken: wp.array(dtype=int), load: wp.array(dtype=float),
                dt: float, ka: float, kb: float, kr: float,
                force: wp.array(dtype=wp.spatial_vector)):
@@ -45,9 +47,26 @@ def stem_force(q: wp.array(dtype=wp.transform), qd: wp.array(dtype=wp.spatial_ve
     vt = velocity-speed*up
     ft = -(kb*(transverse+dt*vt)+cb*vt)/(1.+dt*cb/mass[a]+dt*dt*kb/mass[a])
     f = fa*up+ft
-    load[i] = wp.length(f)
-    # Actual spring load catches contact-induced pulls and canopy acceleration.
-    if load[i] > strength[i]:
+    stem_delta = anchor-site
+    stem_dir = up
+    if wp.length(stem_delta) > 1.e-8:
+        stem_dir = wp.normalize(stem_delta)
+    fruit_up = wp.transform_vector(q[a], wp.vec3(0., 0., 1.))
+    angle = wp.acos(wp.clamp(wp.dot(-fruit_up, stem_dir), -1., 1.))*180./wp.pi
+    limit = means[0]
+    for j in range(1, 7):
+        if angle >= angles[j]:
+            limit = means[j]
+        elif angle > angles[j-1]:
+            u = (angle-angles[j-1])/(angles[j]-angles[j-1])
+            limit = (1.-u)*means[j-1]+u*means[j]
+    threshold_out[i] = limit*scale
+    angle_out[i] = angle
+    # The fixture measured tensile load along the stem. Compression must not
+    # trigger the tensile abscission rule; shear/torsional failure is unknown.
+    load[i] = wp.max(wp.dot(f, stem_dir), 0.)
+    if load[i] > threshold_out[i]:
+        break_load[i] = load[i]
         broken[i] = 1
         return
     fruit_up = wp.transform_vector(q[a], wp.vec3(0., 0., 1.))
@@ -69,11 +88,15 @@ class KiwiField(AppleField):
         self.axis = wp.array(directions, dtype=wp.vec3, device=self.dev)
         half = np.asarray(tree.apple_data['hang_drop'])-STEM_LENGTH
         self.half = wp.array(half.astype(np.float32), device=self.dev)
-        # A harvest-ready attached fruit must support its own weight. This
-        # conditioning is an engineering assumption, not a source distribution.
-        mass = tree.model.body_mass.numpy()[tree.apple_data['apple_body']]
-        self.detach_force = np.maximum(self.detach_force, 1.25*mass*9.81)
-        self.strength = wp.array(self.detach_force.astype(np.float32), device=self.dev)
+        self.scale = float(tree.config.fruit.kiwi_strength_scale)
+        if not np.isfinite(self.scale) or self.scale <= 0:
+            raise ValueError('kiwi_strength_scale must be finite and positive')
+        self.angles = wp.array(HAYWARD_FSA_DEG.astype(np.float32), device=self.dev)
+        self.means = wp.array(HAYWARD_FDF_N.astype(np.float32), device=self.dev)
+        self.fsa = wp.full(self.n, 180., device=self.dev)
+        self.threshold = wp.full(self.n, float(HAYWARD_FDF_N[-1]*self.scale), device=self.dev)
+        self.detach_force = self.threshold.numpy()
+        self.break_load = wp.zeros(self.n, device=self.dev)
 
     def hold(self, i, hand_body):
         raise RuntimeError('Kiwi grasping requires physical pad contact; no grip-assist spring')
@@ -82,7 +105,7 @@ class KiwiField(AppleField):
         wp.launch(stem_force, dim=self.n,
             inputs=[state.body_q, state.body_qd, self.model.body_com, self.model.body_mass,
                     self.apple_body, self.parent_body, self.offset, self.axis, self.half,
-                    self.strength, self._flag, self._tension, self.dt,
+                    self.scale, self.angles, self.means, self.fsa, self.threshold, self.break_load, self._flag, self._tension, self.dt,
                     float(STEM_AXIAL), float(STEM_BENDING), float(STEM_YOUNG*STEM_I/STEM_LENGTH), state.body_f],
             device=self.dev)
 
@@ -91,6 +114,7 @@ class KiwiField(AppleField):
         count = int(np.count_nonzero(flags & ~self.detached))
         self.detached[:] = flags
         self.broken_count = int(flags.sum())
+        self.detach_force = self.threshold.numpy()
         return count
 
 
