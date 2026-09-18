@@ -218,6 +218,14 @@ class PhysicsParams:
     terrain_amplitude: float = 0.03    # max bump height [m] (orchard alley ~1-3 cm)
     terrain_wavelength: float = 1.8    # dominant bump size [m]
     terrain_extent: float = 14.0       # half-extent of the field [m]
+    # Kiwi orchard heightfield (pergola only). Sampled per episode; not soil.
+    orchard_ground: bool = False
+    orchard_slope_deg: tuple = (-4.0, 4.0)
+    orchard_ground_noise_m: tuple = (0.0, 0.04)
+    orchard_rut_depth_m: tuple = (0.0, 0.08)
+    orchard_rut_width_m: tuple = (0.20, 0.60)
+    orchard_friction: tuple = (0.6, 1.3)
+    orchard_extent_m: float = 15.0     # half-extent [m]; MuJoCo sketch size 15 15
     # Soft velocity limiter (anti-blowup): bodies faster than this get a strong
     # braking force (inactive below the caps, so normal physics is untouched).
     # This is what stops a pick-clamp-scale yank on a 5 g twig (the viewer
@@ -465,6 +473,7 @@ class RobotParams:
     """
     enabled: bool = False
     position: tuple = (2.4, 0.0)       # base spawn in the env's local frame [m]
+    spawn_height_m: float = 0.65       # floating-base z [m]; orchard ground adds hfield z
     kind: str = "ridgeback"
     relic_path: str = ""              # External RELIC checkout (research license).
     basket: bool = False
@@ -540,6 +549,8 @@ class TreeConfig:
             c.lsystem.n = n
         c.deformable = False
         c.physics.model = StiffnessModel.RIGID
+        if preset_name == "pergola":
+            c.physics.orchard_ground = True
         return c
 
     @classmethod
@@ -549,4 +560,6 @@ class TreeConfig:
             c.lsystem.n = n
         c.deformable = True
         c.physics.model = StiffnessModel.BEAM
+        if preset_name == "pergola":
+            c.physics.orchard_ground = True
         return c

@@ -126,6 +126,7 @@ def make_config(args) -> TreeConfig:
         cfg.foliage.min_order_for_leaves = 2
         cfg.foliage.leaf_length = 0.22
         cfg.foliage.leaf_width = 0.17
+        cfg.physics.orchard_ground = not args.no_orchard_ground
 
     cfg.physics.terrain = args.terrain
     cfg.physics.terrain_amplitude = args.terrain_amplitude
@@ -219,6 +220,8 @@ def parse_args():
     t.add_argument("--terrain-amplitude", type=float, default=0.05,
                    help="max bump height [m] (default 0.05; keep < ~0.08 or the "
                         "robot chassis visibly clips through crests)")
+    t.add_argument("--no-orchard-ground", action="store_true",
+                   help="pergola only: skip the seeded pasillo/surco heightfield")
 
     r = p.add_argument_group("render/sim")
     r.add_argument("--viewer", default="gl", choices=["gl", "rtx", "usd", "null"],

@@ -54,13 +54,17 @@ def main():
     p.add_argument('--headless', action='store_true')
     p.add_argument('--closeup', action='store_true', help='Follow Spot for basket inspection')
     p.add_argument('--no-render', action='store_true')
+    p.add_argument('--no-orchard-ground', action='store_true',
+                   help='flat plane instead of the seeded pasillo/surco heightfield')
     args = p.parse_args()
     if not np.isfinite(args.spill_torque) or args.frames <= 0 or args.substeps <= 0 or args.substeps % 2 or (args.video and args.no_render):
         p.error('Use positive --frames and enable rendering for --video')
     cfg = TreeConfig.compliant('pergola')
     cfg.seed = args.seed
+    cfg.physics.orchard_ground = not args.no_orchard_ground
     cfg.robot.enabled, cfg.robot.kind, cfg.robot.relic_path = True, 'spot', str(args.relic)
-    cfg.robot.position, cfg.robot.yaw = (-.65, 0.), math.pi / 2
+    from treesim.orchard_ground import nearest_aisle_x_m
+    cfg.robot.position, cfg.robot.yaw = (nearest_aisle_x_m(-.65), 0.), math.pi / 2
     if args.payload is not None and not args.basket:
         p.error('--payload requires --basket')
     cfg.robot.basket, cfg.robot.basket_mass = args.basket, args.basket_mass
@@ -182,7 +186,8 @@ def main():
                    spill_reward_total=spill.total_penalty if spill else 0., spill_test=args.spill_test, spill_torque_Nm=args.spill_torque if args.spill_test else 0.,
                    detached_canopy_fruit=sim.apples.broken_count if sim.apples else 0,
                    fruit_contact_damage=sim.kiwi_damage.metrics() if sim.kiwi_damage else None,
-                   basket_min_sampled_gap_m=basket_min_gap if np.isfinite(basket_min_gap) else None)
+                   basket_min_sampled_gap_m=basket_min_gap if np.isfinite(basket_min_gap) else None,
+                   orchard_ground=tree.orchard_ground)
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
     args.metrics.write_text(json.dumps(metrics, indent=2)+'\n')
     print(json.dumps(metrics, indent=2))

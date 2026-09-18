@@ -15,6 +15,7 @@ coordination, maturity perception and automatic unloading come later.
 | Component | Current implementation |
 |---|---|
 | Pergola | Seeded 3 × 4 m bay, posts, wires, compliant canes and hanging fruit |
+| Orchard ground | Seeded 30 × 30 m heightfield: pasillo/surco/pasillo along x, slope, ruts, noise |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -75,8 +76,10 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
 ```
 
 The scene is built programmatically in Python; it is not a hand-authored pergola
-XML. Change geometry in `treesim/pergola.py`. The native compression bench
-writes its own generated MuJoCo XML to its output directory.
+XML. Change geometry in `treesim/pergola.py`. Kiwi/pergola runs place the farm on
+a seeded orchard heightfield (`treesim/orchard_ground.py`); `--no-orchard-ground`
+restores a flat plane. The native compression bench writes its own generated
+MuJoCo XML to its output directory.
 
 ### Spot with a loaded basket
 
@@ -86,7 +89,9 @@ python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --metrics output/spot-basket.json
 ```
 
-Omit `--payload` to sample 0–6 kg using `--payload-seed`. The arm holds its ready
+Spot spawns on an aisle, not a furrow. The oval route is still scripted and may
+cross a surco. `--no-orchard-ground` disables the heightfield. Omit `--payload`
+to sample 0–6 kg using `--payload-seed`. The arm holds its ready
 pose; random arm poses and payload-aware locomotion retraining are not complete.
 For a numerical run, replace the video options with `--no-render`.
 
@@ -137,10 +142,13 @@ known source inconsistencies and missing measurements.
 - **Native flex:** actual elastic deformation and compression/release forces;
   homogeneous tissue, numerical damping, strain-based damage proxy. No physical
   peel rupture, plastic set or fitted relaxation law is claimed.
-- **Contacts:** the kiwi scene uses native MuJoCo contacts. The earlier Newton
-  collision path allowed a fruit to escape a stationary basket. Planar Spot
-  lower-leg collision hulls receive 1 mm thickness for native compatibility;
-  the original body inertia is retained.
+- **Contacts:** the kiwi scene uses native MuJoCo contacts, including a
+  heightfield geom (half-extent 15 m, sampled friction, small torsional/rolling
+  from the MuJoCo sketch). Heightfield friction is **not** soil physics and is
+  **not** the unknown wet/liner pair. The earlier Newton collision path allowed
+  a fruit to escape a stationary basket. Planar Spot lower-leg collision hulls
+  receive 1 mm thickness for native compatibility; the original body inertia is
+  retained.
 
 ## Validate a change
 
@@ -168,6 +176,7 @@ real-fruit calibration or evidence that a harvesting policy has been trained.
 | Check | Result |
 |---|---|
 | Unit/integration suite | 8 tests passed in the Linux environment |
+| Orchard heightfield (CPU) | Seeded pasillo/surco profile, aisle spawn and episode ranges |
 | Stationary basket, 60 fruit | Zero spills over 5 s at both 1 ms and 0.5 ms physics steps |
 | Loaded walking | 12 s, 2.83 m travelled, 7.6° maximum tilt, zero spills, zero canopy detachments |
 | Deliberate 400 N·m roll disturbance | 36 fruit spilled; total spill penalty −36 |
@@ -196,6 +205,7 @@ only after the native material and contact benchmarks agree with measurements.
 | Path | Purpose |
 |---|---|
 | `treesim/pergola.py` | Procedural structure and fruit placement |
+| `treesim/orchard_ground.py` | Seeded pasillo/surco heightfield for kiwi/pergola |
 | `treesim/kiwi_material.py` | Source-backed constants, geometry sampler, damage helper |
 | `treesim/kiwi.py` | Stem dynamics and GPU contact damage diagnostics |
 | `treesim/basket.py` | Mounted basket, loose payload, spill events |

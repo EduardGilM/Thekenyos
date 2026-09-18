@@ -12,6 +12,13 @@ from .config import FruitParams
 from .lsystem import _frame_to_quat
 from .skeleton import Segment, TreeSkeleton
 
+# One 3 x 4 m bay. Posts sit at x = ±1.5 m; this x-span is the row pitch used
+# by the orchard heightfield so furrows line up with the existing farm.
+BAY_X_M = 3.0
+BAY_Y_M = 4.0
+POST_X0_M = -0.5 * BAY_X_M
+WIRE_SPACING_M = 0.5
+
 
 @dataclass
 class KiwiPlacement:
@@ -53,23 +60,26 @@ def generate(height: float = 1.6, seed: int = 0) -> TreeSkeleton:
         return idx
 
     # One rooted, connected fixed frame avoids closed kinematic loops.
-    root = add(-1, [-1.5, -2., height], 0.045, 0, start=[-1.5, -2., 0.])
+    x0, x1 = POST_X0_M, POST_X0_M + BAY_X_M
+    y0, y1 = -2.0, 2.0
+    n_posts_x = int(round(BAY_X_M / WIRE_SPACING_M)) + 1
+    root = add(-1, [x0, y0, height], 0.045, 0, start=[x0, y0, 0.])
     beam = root
-    for xi, x in enumerate(np.linspace(-1.5, 1.5, 7)):
+    for xi, x in enumerate(np.linspace(x0, x1, n_posts_x)):
         if xi:
-            beam = add(beam, [x, -2., height], 0.025, 0)
+            beam = add(beam, [x, y0, height], 0.025, 0)
         wire = beam
-        for yi, y in enumerate(np.linspace(-1.5, 2., 8)):
+        for yi, y in enumerate(np.linspace(-1.5, y1, 8)):
             wire = add(wire, [x, y, height], 0.004, 1)
             # Each cane occupies its own grid cell, preventing overlapping
             # fruit pairs on adjacent wires.
-            if xi < 6:
+            if xi < n_posts_x - 1:
                 length = rng.uniform(0.34, 0.44)
                 end = np.array([x + length, y + rng.uniform(-0.06, 0.0), height])
                 add(wire, end, rng.uniform(0.006, 0.009), 2)
-        if xi in (0, 6):
-            add(wire, [x, 2., 0.], 0.045, 0)
-    add(beam, [1.5, -2., 0.], 0.045, 0)
+        if xi in (0, n_posts_x - 1):
+            add(wire, [x, y1, 0.], 0.045, 0)
+    add(beam, [x1, y0, 0.], 0.045, 0)
     return TreeSkeleton(segments)
 
 

@@ -89,6 +89,7 @@ class TreeModel:
 
     robot_data: dict = field(default=None)             # RidgebackFranka maps (per env, tiled)
     terrain_height: object = None                       # callable (x, y) -> ground z, or None
+    orchard_ground: dict = None                         # sampled kiwi orchard hfield metrics
     env_pitch: tuple = None                             # (px, py) display-grid pitch [m]
     env_cols: int = 1                                   # display-grid columns
 
@@ -265,6 +266,12 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     rng = np.random.default_rng(config.seed)
     builder = newton.ModelBuilder()
     builder.gravity = config.physics.gravity   # along -up (Z)
+
+    orchard_field = None
+    if (not _sub and config.lsystem.kind == "pergola"
+            and getattr(config.physics, "orchard_ground", False)):
+        from .orchard_ground import generate as generate_orchard_ground
+        orchard_field = generate_orchard_ground(config.physics, config.seed)
 
     # collision_group = -1: branches collide with the ground and with *external*
     # positive-group objects (e.g. a robot arm) but NOT with each other.  Tree
@@ -641,6 +648,11 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             if num_envs != 1 or _sub:
                 raise ValueError("Spot currently supports one environment")
             from . import spot as _robot
+            if orchard_field is not None:
+                x, y = map(float, config.robot.position)
+                x = orchard_field.nearest_aisle_x_m(x)
+                config.robot.position = (x, y)
+                config.robot.spawn_height_m = orchard_field.spawn_height_m(x, y)
         else:
             from . import robot as _robot
         robot_maps = _robot.build_robot(builder, config.robot)
@@ -680,10 +692,20 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         aabbs.append(env_aabb)      # DR headroom: union over the perturbed skeletons
     env_pitch, env_cols, env_rows = _env_grid(aabbs, num_envs)
     terrain_fn = None
-    if num_envs == 1:
-        builder.add_ground_plane()
+    orchard_metrics = orchard_field.metrics() if orchard_field is not None else None
+
+    def _place_ground(target):
+        nonlocal terrain_fn
+        if orchard_field is not None:
+            from .orchard_ground import add_heightfield
+            terrain_fn = add_heightfield(target, orchard_field)
+            return
+        target.add_ground_plane()
         if getattr(config.physics, "terrain", False):
-            terrain_fn = _add_terrain(builder, config.physics, config.seed)
+            terrain_fn = _add_terrain(target, config.physics, config.seed)
+
+    if num_envs == 1:
+        _place_ground(builder)
         model = builder.finalize(device=config.device)
     else:
         main = newton.ModelBuilder()
@@ -692,10 +714,14 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         # better conditioning, and the one global terrain/ground is then valid
         # for every env).  The viewer spreads them on the display grid.
         main.replicate(builder, world_count=num_envs)
-        main.add_ground_plane()
-        if getattr(config.physics, "terrain", False):
-            terrain_fn = _add_terrain(main, config.physics, config.seed,
-                                      pitch=env_pitch, grid=(env_cols, env_rows))
+        if orchard_field is not None:
+            from .orchard_ground import add_heightfield
+            terrain_fn = add_heightfield(main, orchard_field)
+        else:
+            main.add_ground_plane()
+            if getattr(config.physics, "terrain", False):
+                terrain_fn = _add_terrain(main, config.physics, config.seed,
+                                          pitch=env_pitch, grid=(env_cols, env_rows))
         model = main.finalize(device=config.device)
 
     # per-env body/joint counts (ground is global, adds neither), for offsetting
@@ -772,6 +798,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         apple_data=apple_data,
         robot_data=robot_data,
         terrain_height=terrain_fn,
+        orchard_ground=orchard_metrics,
         env_pitch=env_pitch, env_cols=env_cols,
         brk_joint_id=_tile_idx(brk_jid, njpe),
         brk_parent_body=_tile_idx(brk_parent, nbpe),
@@ -901,6 +928,7 @@ def _assemble_dr(config: TreeConfig, base_skeleton: TreeSkeleton, subs,
         apple_data=apple_data,
         robot_data=robot_data,
         terrain_height=terrain_fn,
+        orchard_ground=None,
         env_pitch=env_pitch, env_cols=env_cols,
         brk_joint_id=brk_joint_id,
         brk_parent_body=cat_i("brk_parent", body_off),

@@ -28,8 +28,11 @@ for _ in range(175):
 q = sim.body_q_np()
 assert np.isfinite(q).all()
 assert q[body,2] < height-.5, 'Detached kiwi did not fall'
-assert -.01 < q[body,2] < .1, 'Kiwi passed through ground'
+ground = sim.tree.terrain_height
+z_ground = float(ground(q[body,0], q[body,1])) if callable(ground) else 0.
+assert z_ground-.02 < q[body,2] < z_ground+.12, f'Kiwi missed orchard ground: z={q[body,2]} ground={z_ground}'
 metrics = dict(attached_at_rest=True, detached_after_pull=True, final_height_m=float(q[body,2]),
+               ground_height_m=z_ground, orchard_ground=sim.tree.orchard_ground,
                strength_N=float(sim.apples.detach_force[0]), **sim.kiwi_damage.metrics())
 assert max(metrics['peak_force_N']) > 0, 'Contact load was not measured'
 print(json.dumps(metrics, indent=2))
