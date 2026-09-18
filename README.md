@@ -299,6 +299,17 @@ solver robot poses match forward kinematics in the check. The existing free-base
 locomotion path still moves Spot (0.104 m in a 1.5 s smoke run). All 15 existing
 tests pass. No end-to-end successful pick or trained harvesting policy is claimed.
 
+The canopy regression now checks every joint connection, fixed supports and
+free-tip sag throughout the scripted arm test, and compares forward kinematics
+for all bodies. Seeded reset remains exact. GPU step repeatability is bounded
+separately: 10 µm position, 1e-4 quaternion components, 1 mm/s linear velocity
+and 1 mrad/s joint velocity; measured drift is saved in the JSON output. These
+are numerical regression tolerances, not physical calibration accuracy.
+The supported-canopy check passed at 1 and 0.5 ms: maximum tip sag 2.24 mm,
+maximum attachment gap 2.21 µm, no unintended fruit detachment. The merged
+terrain/physics suite has 22 passing tests and one expected CPU-host check
+skipped on the NVIDIA workstation.
+
 ### Spot jaw benchmark, 19 September 2026
 
 | Model / torque | Result in this fixture |

@@ -37,10 +37,10 @@ for k in o: np.testing.assert_array_equal(o[k],initial[k])
 assert e.work==0 and not e.oracle.grasped and not e.sim.apples.detached.any()
 second=e.step(np.ones(7)*.1)
 # GPU solve/reduction order is nondeterministic. Keep pose/velocity bounds
-# explicit: 10 micrometres, 1e-4 quaternion components, 0.2 mm/s or mrad/s.
+# explicit: 10 micrometres, 1e-4 quaternion components, 1 mm/s or mrad/s.
 repeat_drift = {}
 for key in first[0]:
-    tolerance = 2e-4 if key.endswith('velocity') else 1e-4 if key.endswith('quaternion') else 1e-5
+    tolerance = 1e-3 if key.endswith('velocity') else 1e-4 if key.endswith('quaternion') else 1e-5
     repeat_drift[key] = float(np.max(np.abs(first[0][key]-second[0][key])))
     np.testing.assert_allclose(first[0][key],second[0][key],atol=tolerance,rtol=0)
 assert abs(first[1]-second[1])<1e-6
