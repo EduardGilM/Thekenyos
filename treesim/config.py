@@ -87,7 +87,7 @@ class LSystemParams:
     # gravimorphic droop (branches arch downward).  Ranges are sampled
     # per-seed so every tree is different but plausible.
     # ------------------------------------------------------------------ #
-    kind: str = "ternary"                       # "ternary" | "apple" | "pergola"
+    kind: str = "ternary"                       # "ternary" | "apple" | "pergola" | "vineyard"
     # A trained central-leader tree carries several tiers of 3-5 scaffolds
     # (~8-15 total); the sim's fewer, longer primary limbs stand in for those
     # tiers [NMSU H-333; PSU Extension apple training].
@@ -109,6 +109,15 @@ class LSystemParams:
     ap_leader_decay: float = 0.82               # leader weakening per tier
     ap_form_droop_bias: tuple = (0.6, 1.6)      # global droop multiplier (upright..weeping)
 
+    # ------------------------------------------------------------------ #
+    # VSP vineyard layout (used when ``kind == "vineyard"``).
+    # ``target_height`` doubles as the cordon (fruiting-wire) height.
+    # ------------------------------------------------------------------ #
+    vy_rows: int = 1                            # trellis rows
+    vy_row_length: float = 6.0                  # row extent along x [m]
+    vy_row_spacing: float = 2.4                 # alley width between rows [m]
+    vy_vine_spacing: float = 1.5                # vine spacing along the row [m]
+
 
 def preset(name: str) -> LSystemParams:
     """Return one of the four ABoP ternary classes (Ta..Td).
@@ -125,12 +134,14 @@ def preset(name: str) -> LSystemParams:
     }
     if name == "pergola":
         return LSystemParams(kind="pergola", target_height=1.6)
+    if name == "vineyard":
+        return LSystemParams(kind="vineyard", target_height=2.3, vy_rows=2, vy_row_length=12.0)
     if name == "apple":
         # central-leader apple tree; ``n`` is the max branch order (recursion depth)
         return LSystemParams(kind="apple", n=4, target_height=2.6, base_radius=0.055,
                              tip_radius=0.004, pipe_beta=2.2)
     if name not in table:
-        raise ValueError(f"unknown preset {name!r}; choose from {sorted(table) + ['apple', 'pergola']}")
+        raise ValueError(f"unknown preset {name!r}; choose from {sorted(table) + ['apple', 'pergola', 'vineyard']}")
     a, d1, d2, lr, vr, n = table[name]
     return LSystemParams(a=a, d1=d1, d2=d2, lr=lr, vr=vr, n=n)
 

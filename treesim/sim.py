@@ -84,6 +84,8 @@ class Sim:
         # Detached kiwi must still hit the basket/ground in a default demo.
         if tree.config.lsystem.kind == "pergola":
             collisions = True
+        if tree.config.lsystem.kind == "vineyard":
+            collisions = True
         self.collisions = collisions
 
         # aerodynamic drag + soft ground (see PhysicsParams); applied every substep
@@ -124,7 +126,7 @@ class Sim:
         self.solver = _make_solver(base_solver, self.model, collisions=collisions,
                                    iterations=iterations, ls_iterations=ls_iterations,
                                    nconmax=self.contact_capacity,
-                                   native_contacts=tree.config.lsystem.kind == "pergola",
+                                   native_contacts=tree.config.lsystem.kind in ("pergola", "vineyard"),
                                    algo=getattr(ph, "mj_solver", "cg"))
         self.state_0, self.state_1 = tree.state_pair()
         self.control = self.model.control()
@@ -137,6 +139,14 @@ class Sim:
                 soft_contact_max=0, device=self.model.device, requested_attributes={'force'})
             from .kiwi import ContactDamage
             self.kiwi_damage = ContactDamage(tree)
+        self.grape_contact = None
+        if tree.config.lsystem.kind == "vineyard" and collisions:
+            if base_solver != "mujoco":
+                raise ValueError('Vineyard cluster contacts require the MuJoCo solver')
+            self.contacts = newton.Contacts(rigid_contact_max=self.contact_capacity,
+                soft_contact_max=0, device=self.model.device, requested_attributes={'force'})
+            from .grape import ClusterContact
+            self.grape_contact = ClusterContact(tree)
         # host-side pose cache shared across all callers (e.g. every env's
         # picker): body_q/joint_q are copied to the host at most ONCE per step,
         # so N pickers cost one device->host sync per frame, not N.
@@ -184,6 +194,11 @@ class Sim:
             if tree.config.lsystem.kind == "pergola":
                 from .kiwi import KiwiField
                 self.apples = KiwiField(tree, self.sim_dt)
+                # Real contacts and gravity, without the legacy apple ground/drag proxy.
+                self._drag_body_count = min(tree.apple_bodies)
+            elif tree.config.lsystem.kind == "vineyard":
+                from .grape import GrapeField
+                self.apples = GrapeField(tree, self.sim_dt)
                 # Real contacts and gravity, without the legacy apple ground/drag proxy.
                 self._drag_body_count = min(tree.apple_bodies)
             else:
@@ -317,6 +332,9 @@ class Sim:
             if self.kiwi_damage is not None:
                 self.solver.update_contacts(self.contacts, self.state_0)
                 self.kiwi_damage.apply(self.contacts, self.sim_dt)
+            if self.grape_contact is not None:
+                self.solver.update_contacts(self.contacts, self.state_0)
+                self.grape_contact.apply(self.contacts, self.sim_dt)
 
     def step(self):
         if self._graph is not None:
@@ -329,6 +347,8 @@ class Sim:
             self.apples.update(self.state_0)    # flag over-pulled apples; tether kernel drops them
         if self.kiwi_damage is not None:
             self.kiwi_damage.update()
+        if self.grape_contact is not None:
+            self.grape_contact.update()
         self.sim_time += self.frame_dt
         self._host_step += 1        # invalidates the shared host pose cache below
 

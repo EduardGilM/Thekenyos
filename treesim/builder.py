@@ -86,6 +86,7 @@ class TreeModel:
     leaf_bodies: list = field(default_factory=list)   # body indices of leaves
     apple_bodies: list = field(default_factory=list)  # body indices of apples
     apple_data: dict = field(default=None)            # AppleField arrays (free-body apples)
+    grape_data: dict = field(default=None)            # vineyard: per-cluster peduncle geometry
 
     robot_data: dict = field(default=None)             # RidgebackFranka maps (per env, tiled)
     terrain_height: object = None                       # callable (x, y) -> ground z, or None
@@ -312,11 +313,20 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         col = _wood_color(seg.order, max_order, wood_tint)
         colors.append(col)
         # capsule axis = local +Z; centre at L/2 so body origin is the proximal end
+        cfg = wood if r >= TWIG_R else twig
+        if config.lsystem.kind == "vineyard" and seg.mean_radius < 0.04:
+            # wires / cordon arms / trunks / shoots never collide: clusters
+            # legitimately drape across them at spawn (a shoot pierces its own
+            # cluster's top), and a rest-pose contact impulse on a 25 mm arm
+            # would snap the peduncle.  Posts (5 cm) still collide.
+            cfg = builder.ShapeConfig(
+                density=config.physics.wood_density, mu=0.7, restitution=0.0,
+                collision_group=0, ke=600.0, kd=40.0)
         builder.add_shape_capsule(
             body,
             xform=wp.transform(p=wp.vec3(0.0, 0.0, L * 0.5), q=wp.quat_identity()),
             radius=r, half_height=L * 0.5,
-            cfg=(wood if r >= TWIG_R else twig), color=col,
+            cfg=cfg, color=col,
         )
 
     deformable = config.deformable and config.physics.model != StiffnessModel.RIGID
@@ -409,7 +419,8 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         pxform = wp.transform(p=wp.vec3(0.0, 0.0, max(parent.length, 1e-3)), q=_wq(q_rel))
         cxform = wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity())
 
-        if not deformable or (config.lsystem.kind == "pergola" and seg.order < 2):
+        if not deformable or (config.lsystem.kind == "pergola" and seg.order < 2) \
+                or (config.lsystem.kind == "vineyard" and seg.order < 2):
             jid = builder.add_joint_fixed(parent=pbody, child=cbody,
                                           parent_xform=pxform, child_xform=cxform)
             all_joint_ids.append(jid)
@@ -481,8 +492,13 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     # leaf its own body on a compliant petiole so it flutters (much heavier:
     # hundreds of extra bodies).
     leaf_bodies: list[int] = []
+    if config.lsystem.kind == "vineyard":
+        from .vineyard import build_ground
+        build_ground(builder, config)
     if config.foliage.enabled:
         from . import foliage as _foliage
+        if config.lsystem.kind == "vineyard":
+            from . import vineyard as _foliage
         fp = config.foliage
         leaf_col = tuple(getattr(fp, "leaf_color", (0.18, 0.42, 0.12)))
         placements = (leaf_placements if leaf_placements is not None
@@ -559,19 +575,30 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     ap_offset: list[list[float]] = []
     ap_drop: list[float] = []
     ap_detach: list[float] = []
-    if config.fruit.enabled and (deformable or config.lsystem.kind == "pergola"):
+    grape_meta = {"peduncle_diameter": [], "peduncle_length": [], "radii": []}
+    if config.fruit.enabled and (deformable or config.lsystem.kind == "pergola"
+                                 or config.lsystem.kind == "vineyard"):
         from . import fruit as _fruit
         fr = config.fruit
         apple_rng = np.random.default_rng(config.seed + 99)
         if config.lsystem.kind == "pergola":
             from .pergola import place_fruit
+        elif config.lsystem.kind == "vineyard":
+            from .vineyard import place_fruit
         else:
             place_fruit = _fruit.place_apples
         _aplace = (apple_placements if apple_placements is not None
                    else place_fruit(skeleton, fr, seed=config.seed))
+        grape = config.lsystem.kind == "vineyard"
+        if grape:
+            from . import grape as _grape
+            _grape.build_clusters(builder, skeleton, seg_to_body, config, _aplace,
+                                  apple_rng, apple_jids, apple_bodies, colors,
+                                  ap_parent, ap_offset, ap_drop, ap_detach,
+                                  grape_meta)
         kiwi = config.lsystem.kind == "pergola"
         slide = not kiwi and getattr(fr, "joint", "slide") == "slide"
-        for ap in _aplace:
+        for ap in ([] if grape else _aplace):
             half_height = getattr(ap, "half_height", 0.0)
             volume = (4.0 / 3.0) * np.pi * ap.radius ** 3 + 2 * half_height * np.pi * ap.radius ** 2
             if kiwi:
@@ -727,6 +754,13 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             hang_drop=_tile_rep(np.asarray(ap_drop, dtype=np.float32)),
             detach_force=_tile_rep(np.asarray(ap_detach, dtype=np.float32)),
         )
+    grape_data = None
+    if apple_bodies and config.lsystem.kind == "vineyard":
+        grape_data = dict(
+            peduncle_diameter=_tile_rep(np.asarray(grape_meta["peduncle_diameter"], dtype=np.float32)),
+            peduncle_length=_tile_rep(np.asarray(grape_meta["peduncle_length"], dtype=np.float32)),
+            radii=_tile_rep(np.asarray(grape_meta["radii"], dtype=np.float32)),
+        )
 
     robot_data = None
     if robot_maps is not None and config.robot.kind == "spot":
@@ -770,6 +804,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         leaf_bodies=_tile_idx(leaf_bodies, nbpe).tolist(),
         apple_bodies=apple_bodies_all,
         apple_data=apple_data,
+        grape_data=grape_data,
         robot_data=robot_data,
         terrain_height=terrain_fn,
         env_pitch=env_pitch, env_cols=env_cols,
@@ -1114,6 +1149,8 @@ def generate_and_build(config: TreeConfig, max_bodies: int = 4000,
     import os
     if config.lsystem.kind == "pergola" and randomize_envs:
         raise ValueError("pergola uses seeded layouts; apple-specific --randomize-envs is unsupported")
+    if config.lsystem.kind == "vineyard" and randomize_envs:
+        raise ValueError("vineyard uses seeded layouts; apple-specific --randomize-envs is unsupported")
     num_envs = max(int(num_envs), 1)
     base = lsystem.generate(config.lsystem, seed=config.seed)
     if num_envs == 1 or not randomize_envs:

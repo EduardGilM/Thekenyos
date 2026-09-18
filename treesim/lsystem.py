@@ -148,6 +148,12 @@ def generate(params: LSystemParams, seed: int = 0) -> TreeSkeleton:
     if params.kind == "pergola":
         from .pergola import generate as generate_pergola
         return generate_pergola(height=params.target_height, seed=seed)
+    if params.kind == "vineyard":
+        from .vineyard import generate as generate_vineyard
+        return generate_vineyard(rows=params.vy_rows, row_length=params.vy_row_length,
+                                 row_spacing=params.vy_row_spacing,
+                                 vine_spacing=params.vy_vine_spacing,
+                                 cordon_height=params.target_height, seed=seed)
     if params.kind == "apple":
         skel = grow_apple(params, seed)
     else:

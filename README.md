@@ -112,6 +112,128 @@ forces before changing it. The pads are ideal parallel surfaces, not Spot's
 actual gripper. Zero gravity isolates compression; geometry recovery does not
 clear the persistent damage proxy.
 
+### Vineyard (table grapes)
+
+An overhead grape arbor: two support rows around a clear 2.4 m aisle, a
+12 m long canopy at 2.3 m, dense lobed leaves and hanging dark grape bunches.
+The default has 80 tapered clusters, each rendered as individual berries;
+`--no-foliage` exposes the support structure. `--rows` requires at least two
+support rows; `--canopy-height` (alias `--cordon-height`) accepts 1.8–3 m.
+Ground cover is visual only; the collision ground remains flat.
+Each cluster is one rigid free body — a **hidden ellipsoid collision proxy**
+plus massless visual rachis and berries — tethered to its shoot by a peduncle
+beam (`treesim/grape.py`, stiffness from the assumed modulus in
+`treesim/grape_material.py`). A load past the sampled detach strength breaks
+the peduncle; `GrapeField.cut(i)` severs it directly for scripted harvesting.
+`ClusterContact` reports per-cluster peak contact force with a single-berry
+rupture threshold applied to whole-cluster force — a proxy, not a measured
+cluster limit. Source and assumption notes: `docs/grape-material-evidence.md`.
+
+```bash
+python scripts/grow_vineyard.py --viewer null --frames 60 --device cpu
+python scripts/grow_vineyard.py --viewer gl --device cpu --robot \
+  --row-length 6 --clusters 16 --robot-x -2.5
+python scripts/grow_vineyard.py --viewer null --frames 120 --cut-demo 40 \
+  --metrics output/vineyard.json --device cpu
+python -m unittest tests.test_vineyard -v
+```
+
+#### Using the vineyard with a robot
+
+Run these commands **from the repository root**, after installing and activating
+`kiwi-pergola` as described in **Install** above. If using an existing local
+virtual environment instead, replace `python` with `.venv/bin/python`.
+**The vineyard workflow below is intended for CPU use; no NVIDIA GPU or CUDA
+driver is required.** Always pass `--device cpu`: the launcher otherwise defaults
+to CUDA. Start with the smaller 6 m vineyard and 16 clusters used below rather
+than the full 12 m / 80-cluster scene. CPU execution may be slower than real time;
+the simulation's 60 Hz clock is not a promise of 60 wall-clock frames per second.
+The first RidgebackFranka launch may download the Franka assets and compile CPU
+kernels, so it needs network access if those assets are not cached.
+
+**Interactive driving (Ridgeback base + Franka arm):**
+
+```bash
+python scripts/grow_vineyard.py --robot --robot-kind ridgeback \
+  --device cpu --viewer gl --seed 42 --row-length 6 --clusters 16 --robot-x -2.5
+```
+
+This opens a smaller 6 m vineyard with foliage and 16 clusters. The spawn
+override puts the robot inside the entrance, ahead of the initial camera.
+Without overrides it starts 1.5 m before the row entrance (x = -4.5 m for this
+6 m layout), potentially behind the initial camera. The default heading is
+along +x, down the aisle. For custom positioning, use `--robot-x` and
+`--robot-y` in metres and `--robot-yaw` in radians; keep the base clear of posts.
+
+Focus the scene rather than a UI input field before using these controls:
+
+| Control | Action |
+|---|---|
+| W / S | Command forward / backward motion |
+| A / D | Command left / right turns |
+| Release W/S/A/D | Command zero base velocity |
+| Arrow keys, Q / E, mouse | Move the viewer camera (not the robot) |
+| Space | Pause / resume simulation |
+| Close window or Ctrl-C | End the run and finish writing metrics/video |
+
+The arm holds its home pose. **This is a base-driving environment, not an
+implemented grape-picking policy:** no arm/gripper keyboard controls, grape
+perception, cutting tool, automatic grasping or collection sequence are wired
+into this launcher. The default 2.3 m canopy is a layout choice, not a guarantee
+that every bunch is reachable. Although `--no-robot-camera` is accepted, this
+launcher does not currently create a wrist-camera image panel.
+
+**Headless robot smoke test and simulated stem cut:**
+
+```bash
+python scripts/grow_vineyard.py --robot --device cpu --viewer null \
+  --seed 42 --row-length 6 --clusters 16 --frames 120 --cut-demo 40 \
+  --metrics output/vineyard-robot-check.json
+```
+
+With no keyboard input, the Ridgeback receives zero drive commands; this checks
+scene initialization and stepping, not navigation. `--cut-demo 40` severs cluster
+0's stem at frame 40 regardless of the robot's position. It demonstrates a
+released cluster falling, **not a successful robot harvest**. Metrics contain
+the detached count and per-cluster contact-force diagnostics, not pick/place
+success or validated berry damage. Omit `--cut-demo` to check attachment at rest.
+
+**Record a preview with the robot:**
+
+```bash
+python scripts/grow_vineyard.py --robot --device cpu --viewer gl --headless \
+  --seed 42 --row-length 6 --clusters 16 --robot-x -2.5 --frames 120 \
+  --snapshot output/vineyard-robot.png --video output/vineyard-robot.mp4 \
+  --metrics output/vineyard-robot.json
+```
+
+Recording requires `ffmpeg`; screenshots require Pillow (both are in the pinned
+environment). `--device cpu` selects CPU physics, not the rendering backend.
+GL rendering still needs a working OpenGL/display setup (integrated graphics or
+a compatible software renderer), even with `--headless`; use `--viewer null`
+for display-free physics checks and to avoid rendering/encoding overhead. The snapshot
+is taken at frame 30, so request at least 30 frames. `--frames` limits null, USD
+and headless GL runs; an interactive GL window runs until closed. The current
+encoder writes every rendered frame at 30 fps while physics runs at 60 steps per
+simulated second, so the video is not a real-time timing benchmark. Generated
+outputs belong in `output/` and should not be committed.
+
+**Layout and performance:** keep the same `--seed` for repeatable geometry.
+Use `--clusters 16 --row-length 6` for a smaller CPU scene; `--no-foliage` helps
+inspect the structure. `--rows` counts support rows (minimum 2), `--row-spacing`
+sets their separation (minimum 1.5 m), and `--canopy-height` sets the overhead
+height (1.8–3 m). Run `python scripts/grow_vineyard.py --help` for all options.
+The robot and clusters collide with posts and the ground; thin vineyard wood
+and leaves are non-colliding, and bunch collisions use a hidden ellipsoid rather
+than individual berries. Do not treat this as a full canopy-contact benchmark.
+
+**Spot status:** `--robot --robot-kind spot --relic-path /path/to/relic` selects
+the external Spot assets described in **External Spot assets** above. This path
+is experimental and has not been validated in the vineyard. The launcher creates
+the Spot controller but does not call its gait-policy `update(command)` method;
+the Ridgeback WASD controls do not apply to Spot. Do not use this option as a
+working Spot walking/harvesting example without integrating that control loop.
+
 ## Physics and evidence
 
 Read [the evidence table](docs/kiwi-material-evidence.md) before changing a
