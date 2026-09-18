@@ -25,7 +25,7 @@ def build_robot(builder, params):
     asset = Path(params.relic_path).resolve() / "source/relic/relic/assets/spot"
     constants = runpy.run_path(str(asset / "constants.py"))
     nb, nj, ns = builder.body_count, builder.joint_count, builder.shape_count
-    builder.add_urdf(str(asset / "spot_with_arm.urdf"), floating=True,
+    builder.add_urdf(str(asset / "spot_with_arm.urdf"), floating=not params.fixed_base,
                      xform=wp.transform(wp.vec3(*params.position, 0.65),
                                         wp.quat_from_axis_angle(wp.vec3(0, 0, 1), params.yaw)),
                      enable_self_collisions=True, joint_ordering="dfs")
@@ -113,8 +113,7 @@ def _pd(q: wp.array(dtype=float), qd: wp.array(dtype=float),
 
 
 class SpotController:
-    def __init__(self, sim):
-        import onnxruntime as ort
+    def __init__(self, sim, *, locomotion=True):
         self.sim = sim
         self.data = sim.tree.robot_data
         c = self.data["constants"]
@@ -127,11 +126,14 @@ class SpotController:
         self.obs_home = np.array([self.home[n] for n in OBS_JOINTS])
         self.targets = np.array([self.home[n] for n in self.names], dtype=np.float32)
         self.last_action = np.zeros(12, dtype=np.float32)
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = opts.inter_op_num_threads = 1
-        self.policy = ort.InferenceSession(str(Path(self.data["asset"]) / "pretrained/policy.onnx"),
-                                          sess_options=opts, providers=["CPUExecutionProvider"])
-        self.input_name = self.policy.get_inputs()[0].name
+        self.policy = None
+        if locomotion:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = opts.inter_op_num_threads = 1
+            self.policy = ort.InferenceSession(str(Path(self.data["asset"]) / "pretrained/policy.onnx"),
+                                              sess_options=opts, providers=["CPUExecutionProvider"])
+            self.input_name = self.policy.get_inputs()[0].name
         self.device = sim.model.device
         self.target = wp.array(self.targets, device=self.device)
         self.buffers = [wp.array(self.qids, dtype=int, device=self.device),
@@ -143,6 +145,8 @@ class SpotController:
         sim.robot_controller = self
 
     def update(self, command):
+        if self.policy is None:
+            raise RuntimeError('Locomotion policy was disabled for this controller')
         state = self.sim.state_0
         pose = state.body_q.numpy()[self.data["chassis"]]
         velocity = state.body_qd.numpy()[self.data["chassis"]]

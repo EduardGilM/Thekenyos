@@ -23,7 +23,8 @@ coordination, maturity perception and automatic unloading come later.
 | Damage | Persistent contact/strain **proxy**, with negative increments available as reward terms |
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
 | Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
-| RL training | **Not implemented here yet.** Walking uses an existing policy; penalties do not retrain it |
+| RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
+| RL training | **No harvesting policy trained yet.** Walking uses an existing policy; no optimizer is integrated |
 
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
 bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
@@ -155,6 +156,14 @@ uses a 20 mm displacement tolerance during 1.7–2.7 s, no early ground contact,
 bilateral contact during the run and contact-free release
 to the floor. Test results apply to this one initial pose and fruit geometry.
 
+### Fixed-base harvesting environment
+
+See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
+The chassis is fixed; the agent controls six arm joints and the jaw. Physics
+and failure checks run at every substep. This uses rigid orchard fruit and is
+a control/reward integration milestone, not validated material transfer from
+the deformable bench.
+
 ## Physics and evidence
 
 Read [the evidence table](docs/kiwi-material-evidence.md) before changing a
@@ -229,6 +238,17 @@ The 10% command differs from tissue strain because the pads also have compliant
 contact. The native 3% case records zero strain-based damage proxy; that is not
 a guarantee of unbruised real fruit. Outputs are generated under `output/`.
 
+### Fixed-base environment validation, 19 September 2026
+
+The Gymnasium API, reset identity, bounded seeded step repeatability, fixed
+chassis, action validation, joint targets, transient overload, finite-horizon
+timeout, physical forced loss, ground-drop fixture and basket-settling fixture
+pass at both 1 and 0.5 ms. The transient test injects one observation spike to
+check sampling; the loss and settling fixtures use actual contacts. Native
+solver robot poses match forward kinematics in the check. The existing free-base
+locomotion path still moves Spot (0.104 m in a 1.5 s smoke run). All 15 existing
+tests pass. No end-to-end successful pick or trained harvesting policy is claimed.
+
 ### Spot jaw benchmark, 19 September 2026
 
 | Model / torque | Result in this fixture |
@@ -250,8 +270,8 @@ the flex benchmark without further contact and mesh-resolution checks.
 
 1. Fit compression/hold/release and impact tests to one cultivar and harvest
    condition. Add layered, viscoelastic/plastic response without mixing datasets.
-2. Integrate the [task contract](docs/harvest-task.md) with arm actuation and
-   substep event capture; validate actual Spot jaw contact and torque failure.
+2. Validate rigid/deformable contact transfer across grasp poses, then connect
+   an optimizer to the [fixed-base environment](docs/harvest-task.md).
 3. Train locomotion over 0–6 kg payload and arm configurations; compare against
    the existing policy on matched seeds, spills, tracking and falls.
 4. Train reach, grip, detach and deposit, then integrate a full harvesting task.

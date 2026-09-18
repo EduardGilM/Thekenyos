@@ -37,8 +37,10 @@ physical outcomes; it must not enforce a paper angle or a grasp sequence.
 Keep optional guidance separate from the persistent task objective and evaluate
 with guidance disabled. An evaluator is not an action teacher. Any future
 imitation must use physically verified demonstrations and permit divergence.
-The measurement bridge samples frame-end contacts; a training adapter must
-capture transient failures and force peaks at physics substeps.
+The generic measurement bridge samples contacts when called. The Gymnasium
+adapter uses one physics substep per call and evaluates failures immediately.
+Preserve this behavior when batching or adding CUDA graphs. RL interface changes
+require `scripts/check_harvest_env.py` with the external RELIC assets.
 
 ## Implementation
 

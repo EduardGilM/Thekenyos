@@ -187,7 +187,7 @@ class SimHarvestObserver:
     synthetic grasp flag, contact, force, detachment or containment is supplied.
     Actuator work is passed from the control loop's substep energy integral.
     """
-    def __init__(self, sim, fruit_index, tcp_body, tcp_offset, pad_bodies):
+    def __init__(self, sim, fruit_index, tcp_body, tcp_offset, pad_bodies, arm_bodies=()):
         if sim.kiwi_damage is None or not sim.tree.robot_data or not sim.tree.robot_data.get('basket'):
             raise ValueError('Observer requires kiwi contacts and a robot basket')
         if len(set(pad_bodies)) != 2 or not 0 <= fruit_index < len(sim.tree.apple_bodies):
@@ -196,6 +196,7 @@ class SimHarvestObserver:
         self.body = sim.tree.apple_bodies[fruit_index]
         self.tcp_body, self.offset = tcp_body, np.asarray(tcp_offset, float)
         self.pads = tuple(pad_bodies)
+        self.arm_bodies = set(arm_bodies)
         if self.offset.shape != (3,) or not np.isfinite(self.offset).all():
             raise ValueError('TCP offset must be a finite 3-vector')
         for body in (tcp_body, *pad_bodies):
@@ -228,12 +229,15 @@ class SimHarvestObserver:
         force = contacts.force.numpy()[:count,:3]
         jaw = np.zeros(2)
         ground, basket_contact, forbidden = False, False, False
+        forbidden_arm_load = 0.
         for a,b,f,n in zip(s0,s1,force,normals):
             load = abs(float(np.dot(f,n)))
             if load < .01:
                 continue
             ba, bb = self.shape_body[a], self.shape_body[b]
             if self.body not in (ba,bb):
+                if ba in self.arm_bodies or bb in self.arm_bodies:
+                    forbidden_arm_load += load
                 continue
             other, other_shape = (bb,b) if ba == self.body else (ba,a)
             if other in self.pads:
@@ -261,4 +265,4 @@ class SimHarvestObserver:
             float(np.linalg.norm(v[self.body,:3]-basket_v)), ground,
             float(sim.kiwi_damage.damage.numpy()[self.body]), float(sim.apples.fsa.numpy()[self.index]),
             float(sim.apples._tension.numpy()[self.index]), float(sim.apples.threshold.numpy()[self.index]),
-            actuator_work_J, int(others.sum()+self.spills.spilled.sum()), forbidden)
+            actuator_work_J, int(others.sum()+self.spills.spilled.sum()), forbidden or forbidden_arm_load > 2.)

@@ -475,6 +475,7 @@ class RobotParams:
     enabled: bool = False
     position: tuple = (2.4, 0.0)       # base spawn in the env's local frame [m]
     kind: str = "ridgeback"
+    fixed_base: bool = False          # Spot manipulation fixture; walking remains free.
     relic_path: str = ""              # External RELIC checkout (research license).
     basket: bool = False
     basket_mass: float = 1.2           # Prototype assumption, excluding fruit [kg].
