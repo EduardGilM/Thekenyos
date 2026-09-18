@@ -14,7 +14,7 @@ coordination, maturity perception and automatic unloading come later.
 
 | Component | Current implementation |
 |---|---|
-| Pergola | Seeded 3 × 4 m bay, posts, wires, compliant canes and hanging fruit |
+| Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, compliant canes and hanging fruit |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -76,7 +76,12 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
 ```
 
 The scene is built programmatically in Python; it is not a hand-authored pergola
-XML. Change geometry in `treesim/pergola.py`. The native compression bench
+XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
+4.3 hectares. Use `--pergola-rows`, `--pergola-columns`, and
+`--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
+enabled by default for this preset, while `--foliage-density 0` disables it.
+Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
+the plantation). Change geometry in `treesim/pergola.py`. The native compression bench
 writes its own generated MuJoCo XML to its output directory.
 
 ### Spot with a loaded basket
