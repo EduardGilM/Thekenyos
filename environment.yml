@@ -1,0 +1,15 @@
+name: kiwi-pergola
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg
+  - pip:
+      # Match the upstream pixi.lock GPU runtime.
+      - warp-lang==1.14.0
+      - mujoco==3.8.1
+      - mujoco-warp==3.8.1
+      - onnxruntime==1.30.0
+      - -e .

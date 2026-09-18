@@ -115,6 +115,17 @@ def make_config(args) -> TreeConfig:
 
     cfg.fruit.enabled = args.apples
     cfg.fruit.max_count = args.apple_count
+    if args.preset == "pergola":
+        cfg.lsystem.target_height = args.canopy_height
+        cfg.fruit.enabled = True
+        # Initial geometry/material assumptions; stem mechanics remain the
+        # upstream proxy until measured kiwi data is fitted.
+        # Kiwi geometry/mass/stem length are selected by the material sampler.
+        cfg.fruit.joint = "free"
+        cfg.fruit.colors = ((0.39, 0.27, 0.12), (0.48, 0.34, 0.17))
+        cfg.foliage.min_order_for_leaves = 2
+        cfg.foliage.leaf_length = 0.22
+        cfg.foliage.leaf_width = 0.17
 
     cfg.physics.terrain = args.terrain
     cfg.physics.terrain_amplitude = args.terrain_amplitude
@@ -143,8 +154,10 @@ def make_viewer(args):
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_argument_group("tree")
-    g.add_argument("--preset", default="apple", choices=["ta", "tb", "tc", "td", "apple"],
-                   help="apple = stochastic apple tree (default); ta-td = ABoP ternary classes")
+    g.add_argument("--preset", default="apple", choices=["ta", "tb", "tc", "td", "apple", "pergola"],
+                   help="apple = default; pergola = hanging kiwis; ta-td = ABoP ternary classes")
+    g.add_argument("--canopy-height", type=float, default=1.6,
+                   help="pergola support/cane centreline height above level ground [m]")
     g.add_argument("--depth", "-n", type=int, default=-1,
                    help="recursion depth (-1 = preset default; apple~4, ternary~5)")
     g.add_argument("--mode", default="deformable", choices=["rigid", "deformable"])
@@ -174,7 +187,7 @@ def parse_args():
     ap = p.add_argument_group("fruit")
     ap.add_argument("--apples", action="store_true",
                     help="spawn apples on spurs; they detach when pulled hard enough")
-    ap.add_argument("--apple-count", type=int, default=40,
+    ap.add_argument("--apple-count", "--fruit-count", type=int, default=40,
                     help="how many apples (each is a free body and is the MAIN sim cost; "
                          "foliage and --break are nearly free). ~60 = lush/slow, ~20 = fast")
 
@@ -260,7 +273,13 @@ def parse_args():
                         "ground already lands falling debris, so usually leave this OFF)")
     r.add_argument("--device", default=None)
     r.add_argument("--max-bodies", type=int, default=60000)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.preset == "pergola":
+        if args.auto:
+            p.error("--auto uses the apple sphere detector; pergola autonomy is not implemented")
+        if args.randomize_envs or args.distinct_geometry:
+            p.error("pergola uses --seed; apple-specific batched geometry randomization is unsupported")
+    return args
 
 
 def main():
@@ -293,7 +312,7 @@ def main():
     solver = args.solver
     if solver == "auto":
         solver = "mujoco"
-    collisions = args.collisions
+    collisions = args.collisions or args.preset == "pergola"
     if args.robot and not collisions:
         # the robot should push through the canopy, not ghost through it.
         # Collision groups keep this affordable: tree/apples are -1 (never
@@ -338,7 +357,7 @@ def main():
                               yaw=float(math.degrees(math.atan2(d[1], d[0]))))
         else:
             viewer.set_camera(pos=wp.vec3(2.2 * h, 2.2 * h, 1.1 * h),
-                              pitch=-15.0, yaw=135.0)
+                              pitch=-15.0, yaw=-135.0)
     except Exception:
         pass
 

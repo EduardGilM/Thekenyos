@@ -1,7 +1,7 @@
 [project]
 name = "orchardbench"
 version = "0.1.0"
-description = "A physically-grounded, GPU-parallel apple-orchard simulation benchmark for agricultural robotics (NVIDIA Newton / MuJoCo-Warp)."
+description = "Thekenyos: kiwi pergola harvesting research with Spot, Newton and MuJoCo, based on OrchardBench."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "Apache-2.0" }
@@ -21,8 +21,11 @@ dependencies = [
     "tabulate>=0.9",     # pretty result tables (optional, graceful fallback)
 ]
 
+[project.optional-dependencies]
+spot = ["onnxruntime==1.30.0"]
+
 [project.urls]
-Homepage = "https://example.org/orchardbench"  # TODO: final project page
+Homepage = "https://github.com/EduardGilM/Thekenyos"
 
 [build-system]
 requires = ["hatchling"]

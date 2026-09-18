@@ -1,0 +1,80 @@
+# Working on Thekenyos
+
+## Objective and current scope
+
+Build a reproducible kiwi-harvesting simulation: one Spot with one arm, a 1.6 m
+pergola and a rear basket carrying 0–6 kg. All fruit starts harvestable. Preserve
+OrchardBench's existing apple workflows. Multi-robot coordination and automatic
+unloading are later work.
+
+Read README.md, then the files affected by the task. For material changes read
+docs/kiwi-material-evidence.md. Check git status before editing; preserve work
+already present. State a short plan before substantial implementation.
+
+## Correctness rules
+
+- Separate measured values, fitted values, engineering assumptions and unknowns.
+  Keep source, units, cultivar and test conditions with material parameters.
+- Do not describe rigid contacts as deformable tissue, an elastic recovery as
+  absence of bruising, a damage proxy as a validated predictor, or inference as
+  training. Do not invent a safe gripper force from a tissue stress value.
+- Preserve separate free fruit bodies, mass, inertia, rotation and collisions.
+  Do not make basket fruit visual ballast or glue it to the robot to hide spills.
+- Basket geometry must attach to the chassis and contribute the intended mass
+  and inertia. The liner is a simplified collision surface, not the visual vents.
+- A stem must transmit load at its attachment site. Apply equal/opposite forces
+  and moment arms. Detachment must respond to physical contact as well as pulls.
+- Damage and spill state must be irreversible within an episode. Penalize a
+  newly spilled fruit once. Report damage rewards separately from spill rewards.
+- Unknown wet/liner friction, creep weights, plastic response and detachment
+  torque must remain explicit calibration gaps. Do not sample unrelated source
+  extremes as if they form one measured distribution.
+
+## Implementation
+
+Use the smallest change that meets the task. Reuse the existing runtime and
+libraries. Keep the original apple path isolated from kiwi-specific mechanics.
+Prefer seeded generators and machine-readable metrics. Include units in names
+and output fields. Validate finite inputs and physical ranges.
+
+The tested stack is environment.yml: Python 3.12, Newton 1.3.0, Warp 1.14.0,
+MuJoCo/MuJoCo-Warp 3.8.1. Do not independently upgrade these. RELIC stays in an
+external pinned checkout; do not vendor its assets or weights.
+
+Newton uses xyzw quaternions. Body spatial velocities/forces store linear
+components first, angular components second. Body wrenches reference the COM.
+CUDA graphs use persistent device buffers; avoid replacing arrays inside a
+captured loop. Validate buffer swaps if changing substep counts.
+
+## Validation and delivery
+
+Run the affected checks in README.md. Material changes require native
+compression/release results and timestep sensitivity. Contact changes require
+stationary retention, falls/ground contact and adversarial spill tests. Policy
+changes require matched-seed tracking/fall/spill comparisons. A video does not
+replace numerical checks; metrics do not replace visual inspection.
+
+Show the user a video when a useful visual milestone is ready. Label scripted
+motions, pretrained inference and learned behaviour accurately. Report what
+passed, what failed and what remains untested. Do not claim task completion
+while a required physical regression still fails.
+
+Keep generated videos, measurements, caches and environments out of Git unless
+explicitly requested for publication. Update README commands and state when
+behaviour changes. Preserve LICENSE and upstream attribution. Before a push,
+inspect staged changes and exclude credentials, external restricted assets and
+large generated files. Never force-push or overwrite unrelated remote work.
+
+## Remote workstation
+
+The current training host is SSH alias `jp` (i9-13900K, RTX 5090 32 GB, 64 GB
+RAM). Existing runs use `/mnt/ssd/experiments/kiwi-pergola`, with `pergola/` for
+this source, `conda/` for the environment, `assets/relic/`, `logs/` and caches.
+`run.sh` selects the environment; set `ORCHARDBENCH_SOURCE` to the source path.
+These are deployment details, not requirements for other contributors.
+
+Check GPU use, free SSD space and running processes before a substantial job.
+Preserve other workloads. Keep caches and outputs on the SSD; the root disk is
+space constrained. Do not kill unrelated processes. First CUDA compilation can
+be slow; inspect the log before restarting a job. Desktop DISPLAY/XAUTHORITY
+values are session-specific, so verify them rather than hardcoding new scripts.

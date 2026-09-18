@@ -22,14 +22,14 @@ from . import fruit as _fruit
 
 
 def _make_solver(name, model, *, collisions, iterations, ls_iterations,
-                 algo: str = "cg"):
+                 algo: str = "cg", nconmax=2048, native_contacts=False):
     if name == "mujoco":
         # Use MuJoCo's default (implicit) integration/iterations — they resolve
         # the stiff torsional springs stably.  Only drop contacts when unused.
         # njmax (constraints/world) is otherwise sized from the calm rest state; a
         # hard yank spawns many transient constraints, so give a generous margin
         # to avoid "nefc overflow" (esp. with several breaking branches / envs).
-        # With contacts on, use NEWTON's collision pipeline (model.collide each
+        # The original apple path uses NEWTON's collision pipeline (model.collide each
         # substep) instead of MuJoCo's internal one: it honours newton's
         # collision-group semantics exactly (tree = -1 self-filtered, leaves 0,
         # robot chassis 3 / arm 1), which is what makes robot-vs-tree contact
@@ -48,12 +48,14 @@ def _make_solver(name, model, *, collisions, iterations, ls_iterations,
         # validated bit-for-bit on the full physics regression matrix (rest
         # drift, pull-bend, detach, break fall rate, rams, e2e).  Iteration
         # caps don't matter for either (early termination on tolerance).
+        # Kiwi uses native contacts: external Newton ellipsoid contacts failed
+        # the stationary-basket retention regression.
         algo_i = {"cg": 1, "newton": 2}.get(str(algo).lower(), 1)
         return newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
-                                           use_mujoco_contacts=False if collisions else True,
+                                           use_mujoco_contacts=native_contacts if collisions else True,
                                            solver=algo_i,
-                                           nconmax=2048 if collisions else None,
-                                           njmax=8192 if collisions else 1024)
+                                           nconmax=nconmax if collisions else None,
+                                           njmax=max(8192, nconmax*4) if collisions else 1024)
     if name == "featherstone":
         return newton.solvers.SolverFeatherstone(model)
     if name == "semiimplicit":
@@ -79,6 +81,9 @@ class Sim:
         # Branch-vs-branch self-collision is O(N^2) and usually unwanted; leave
         # it off for fast interactive bending (forces apply directly).  Turn on
         # for falling snapped debris / external-object interaction.
+        # Detached kiwi must still hit the basket/ground in a default demo.
+        if tree.config.lsystem.kind == "pergola":
+            collisions = True
         self.collisions = collisions
 
         # aerodynamic drag + soft ground (see PhysicsParams); applied every substep
@@ -108,15 +113,30 @@ class Sim:
         # inside the captured CUDA graph.
         self._drag_scale_host = np.ones(self.model.body_count, dtype=np.float32)
         self._drag_scale = wp.array(self._drag_scale_host, device=self.model.device)
+        # A legged robot uses contact dynamics, not the plant's drag/soft ground.
+        self._drag_body_count = (tree.robot_data["body_start"]
+                                 if tree.robot_data and tree.robot_data.get("kind") == "spot"
+                                 else self.model.body_count)
 
         # "spring" mode = fast maximal-coordinate base + our torsional-spring kernel.
         base_solver = spring_base if solver == "spring" else solver
+        self.contact_capacity = 8192 if tree.robot_data and tree.robot_data.get("basket") else 2048
         self.solver = _make_solver(base_solver, self.model, collisions=collisions,
                                    iterations=iterations, ls_iterations=ls_iterations,
+                                   nconmax=self.contact_capacity,
+                                   native_contacts=tree.config.lsystem.kind == "pergola",
                                    algo=getattr(ph, "mj_solver", "cg"))
         self.state_0, self.state_1 = tree.state_pair()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
+        self.kiwi_damage = None
+        if tree.config.lsystem.kind == "pergola" and collisions:
+            if base_solver != "mujoco":
+                raise ValueError('Kiwi contacts/damage require the MuJoCo solver')
+            self.contacts = newton.Contacts(rigid_contact_max=self.contact_capacity,
+                soft_contact_max=0, device=self.model.device, requested_attributes={'force'})
+            from .kiwi import ContactDamage
+            self.kiwi_damage = ContactDamage(tree)
         # host-side pose cache shared across all callers (e.g. every env's
         # picker): body_q/joint_q are copied to the host at most ONCE per step,
         # so N pickers cost one device->host sync per frame, not N.
@@ -138,6 +158,7 @@ class Sim:
 
         self.viewer = None
         self._graph = None
+        self.robot_controller = None
 
         # external programmatic forces (persistent buffer, added each substep)
         self._ext_force = wp.zeros(self.model.body_count, dtype=wp.spatial_vector,
@@ -160,7 +181,13 @@ class Sim:
         # the solver — pure forces + a flag, so it never hitches or destabilises.
         self.apples = None
         if tree.apple_data is not None and len(tree.apple_data["apple_body"]):
-            self.apples = _fruit.AppleField(tree, tree.config)
+            if tree.config.lsystem.kind == "pergola":
+                from .kiwi import KiwiField
+                self.apples = KiwiField(tree, self.sim_dt)
+                # Real contacts and gravity, without the legacy apple ground/drag proxy.
+                self._drag_body_count = min(tree.apple_bodies)
+            else:
+                self.apples = _fruit.AppleField(tree, tree.config)
 
         # thin twigs don't take rigid contacts (mass-ratio explosion); the
         # brush kernel is what lets the robot push small branches aside
@@ -266,7 +293,7 @@ class Sim:
                 self.apples.apply(self.state_0)
             ld, ad, gz, gk, gd, gf = self._drag
             vmax, wmax, brake, vfade, wfade = self._vcap
-            wp.launch(_drag_ground, dim=self.model.body_count,
+            wp.launch(_drag_ground, dim=self._drag_body_count,
                       inputs=[self.state_0.body_q, self.state_0.body_qd, self.body_mass,
                               self._body_inertia, self._drag_scale,
                               ld, ad, gz, gk, gd, gf, vmax, wmax, brake, vfade, wfade,
@@ -281,10 +308,15 @@ class Sim:
                 self.brush.apply(self.state_0)
             if self.breaker is not None:
                 self.breaker.apply_cancel(self.state_0, self.control)   # limp snapped joints (in-graph)
-            if self.collisions:
+            if self.collisions and not getattr(self.solver, "_use_mujoco_contacts", False):
                 self.model.collide(self.state_0, self.contacts)
+            if self.robot_controller is not None:
+                self.robot_controller.apply(self.state_0, self.control)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
+            if self.kiwi_damage is not None:
+                self.solver.update_contacts(self.contacts, self.state_0)
+                self.kiwi_damage.apply(self.contacts, self.sim_dt)
 
     def step(self):
         if self._graph is not None:
@@ -295,6 +327,8 @@ class Sim:
             self.breaker.update(self.state_0)   # flag new breaks; cancel kernel limps them
         if self.apples is not None:
             self.apples.update(self.state_0)    # flag over-pulled apples; tether kernel drops them
+        if self.kiwi_damage is not None:
+            self.kiwi_damage.update()
         self.sim_time += self.frame_dt
         self._host_step += 1        # invalidates the shared host pose cache below
 

@@ -87,7 +87,7 @@ class LSystemParams:
     # gravimorphic droop (branches arch downward).  Ranges are sampled
     # per-seed so every tree is different but plausible.
     # ------------------------------------------------------------------ #
-    kind: str = "ternary"                       # "ternary" | "apple"
+    kind: str = "ternary"                       # "ternary" | "apple" | "pergola"
     # A trained central-leader tree carries several tiers of 3-5 scaffolds
     # (~8-15 total); the sim's fewer, longer primary limbs stand in for those
     # tiers [NMSU H-333; PSU Extension apple training].
@@ -123,12 +123,14 @@ def preset(name: str) -> LSystemParams:
         "tc": (22.5, 112.5, 157.5, 1.790, 1.732, 8),
         "td": (36.0, 180.0, 252.0, 1.070, 1.732, 6),
     }
+    if name == "pergola":
+        return LSystemParams(kind="pergola", target_height=1.6)
     if name == "apple":
         # central-leader apple tree; ``n`` is the max branch order (recursion depth)
         return LSystemParams(kind="apple", n=4, target_height=2.6, base_radius=0.055,
                              tip_radius=0.004, pipe_beta=2.2)
     if name not in table:
-        raise ValueError(f"unknown preset {name!r}; choose from {sorted(table) + ['apple']}")
+        raise ValueError(f"unknown preset {name!r}; choose from {sorted(table) + ['apple', 'pergola']}")
     a, d1, d2, lr, vr, n = table[name]
     return LSystemParams(a=a, d1=d1, d2=d2, lr=lr, vr=vr, n=n)
 
@@ -463,6 +465,12 @@ class RobotParams:
     """
     enabled: bool = False
     position: tuple = (2.4, 0.0)       # base spawn in the env's local frame [m]
+    kind: str = "ridgeback"
+    relic_path: str = ""              # External RELIC checkout (research license).
+    basket: bool = False
+    basket_mass: float = 1.2           # Prototype assumption, excluding fruit [kg].
+    payload_mass: float = 0.0         # Loose fruit payload [kg], range 0..6.
+    payload_seed: int = 0
     yaw: float = 3.14159265            # spawn heading [rad] (pi = facing the tree)
     # Clearpath Ridgeback max speed is 1.1 m/s [Clearpath Ridgeback datasheet];
     # real orchard harvesters drive ~0.3-0.5 m/s while picking and up to ~1.4

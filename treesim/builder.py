@@ -409,7 +409,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         pxform = wp.transform(p=wp.vec3(0.0, 0.0, max(parent.length, 1e-3)), q=_wq(q_rel))
         cxform = wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity())
 
-        if not deformable:
+        if not deformable or (config.lsystem.kind == "pergola" and seg.order < 2):
             jid = builder.add_joint_fixed(parent=pbody, child=cbody,
                                           parent_xform=pxform, child_xform=cxform)
             all_joint_ids.append(jid)
@@ -521,7 +521,8 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             # instancing cost), so each leaf gets its own green.  The blades are
             # massless & non-colliding and move rigidly with the branch, so
             # foliage stays PURELY VISUAL: zero physics cost.
-            leaf_cfg = builder.ShapeConfig(density=0.0, mu=0.5, collision_group=0)
+            leaf_cfg = builder.ShapeConfig(density=0.0, mu=0.5, collision_group=0,
+                                           has_shape_collision=False, has_particle_collision=False)
             meshes = _foliage.leaf_meshes(fp)
             leaf_rng = np.random.default_rng(config.seed + 313)
             ncls = len(meshes)
@@ -558,29 +559,48 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     ap_offset: list[list[float]] = []
     ap_drop: list[float] = []
     ap_detach: list[float] = []
-    if config.fruit.enabled and deformable:
+    if config.fruit.enabled and (deformable or config.lsystem.kind == "pergola"):
         from . import fruit as _fruit
         fr = config.fruit
         apple_rng = np.random.default_rng(config.seed + 99)
+        if config.lsystem.kind == "pergola":
+            from .pergola import place_fruit
+        else:
+            place_fruit = _fruit.place_apples
         _aplace = (apple_placements if apple_placements is not None
-                   else _fruit.place_apples(skeleton, fr, seed=config.seed))
-        slide = getattr(fr, "joint", "slide") == "slide"
+                   else place_fruit(skeleton, fr, seed=config.seed))
+        kiwi = config.lsystem.kind == "pergola"
+        slide = not kiwi and getattr(fr, "joint", "slide") == "slide"
         for ap in _aplace:
+            half_height = getattr(ap, "half_height", 0.0)
+            volume = (4.0 / 3.0) * np.pi * ap.radius ** 3 + 2 * half_height * np.pi * ap.radius ** 2
+            if kiwi:
+                from .kiwi_material import STEM_LENGTH, DETACH_RANGE, FRUIT_FRICTION, RESTITUTION
+                volume = 4*np.pi*np.prod(ap.radii)/3
             acfg = builder.ShapeConfig(
-                density=max(fr.mass / ((4.0 / 3.0) * np.pi * ap.radius ** 3), 50.0), mu=1.0,
-                collision_group=-1)   # apples don't self-collide / hit branches; grippy skin
+                density=float(ap.mass/volume if kiwi else max(fr.mass/volume, 50.)), mu=FRUIT_FRICTION if kiwi else 1.0,
+                restitution=RESTITUTION if kiwi else 0.,
+                collision_group=1 if kiwi else -1)   # apples don't self-collide / hit branches; grippy skin
             pseg = skeleton[ap.parent_seg]
             pbody = int(seg_to_body[ap.parent_seg])
-            drop = fr.stem_length + ap.radius            # apple centre hangs this far below attach
+            drop = STEM_LENGTH + ap.radii[2] if kiwi else fr.stem_length + ap.radius + half_height
             hang = ap.attach + np.array([0.0, 0.0, -drop])
             # body whose ORIGIN is the apple centre (sphere at local origin),
             # spawned already at its hang position so it starts attached-looking
             abody = builder.add_link(
                 xform=wp.transform(p=_wv(hang), q=wp.quat_identity()),
                 label=f"apple{len(apple_bodies)}")
-            builder.add_shape_sphere(
-                abody, xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
-                radius=ap.radius, cfg=acfg, color=ap.color)
+            if kiwi:
+                builder.add_shape_ellipsoid(abody, rx=float(ap.radii[0]), ry=float(ap.radii[1]),
+                                            rz=float(ap.radii[2]), cfg=acfg, color=ap.color)
+            elif half_height:
+                builder.add_shape_capsule(
+                    abody, radius=ap.radius, half_height=half_height,
+                    cfg=acfg, color=ap.color)
+            else:
+                builder.add_shape_sphere(
+                    abody, xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+                    radius=ap.radius, cfg=acfg, color=ap.color)
             if slide:
                 # 3 translational DOFs to the WORLD (an apple never needs to
                 # spin): HALF the dofs of a free joint, and the free-body dof
@@ -611,13 +631,18 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             ap_parent.append(pbody)
             ap_offset.append([float(off[0]), float(off[1]), float(off[2])])
             ap_drop.append(float(drop))
-            ap_detach.append(float(apple_rng.uniform(*fr.detach_force)))
+            ap_detach.append(float(apple_rng.uniform(*(DETACH_RANGE if kiwi else fr.detach_force))))
 
     # --- optional RidgebackFranka mobile manipulator (one per env; identical
     #     in every env so the worlds stay homogeneous and keep batching) ------- #
     robot_maps = None
     if getattr(config, "robot", None) is not None and config.robot.enabled:
-        from . import robot as _robot
+        if config.robot.kind == "spot":
+            if num_envs != 1 or _sub:
+                raise ValueError("Spot currently supports one environment")
+            from . import spot as _robot
+        else:
+            from . import robot as _robot
         robot_maps = _robot.build_robot(builder, config.robot)
         # keep the per-body colour table aligned (chassis + arm links)
         for _ in range(robot_maps["nbody"]):
@@ -704,7 +729,10 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         )
 
     robot_data = None
-    if robot_maps is not None:
+    if robot_maps is not None and config.robot.kind == "spot":
+        from .spot import finalize_maps
+        robot_data = finalize_maps(model, robot_maps)
+    elif robot_maps is not None:
         # translate joint ids -> final-model coordinate/dof/target indices
         # (builder-time starts do NOT survive finalize in general)
         jq_s = model.joint_q_start.numpy()
@@ -1084,6 +1112,8 @@ def generate_and_build(config: TreeConfig, max_bodies: int = 4000,
                        randomize_geometry: bool = False) -> TreeModel:
     from . import lsystem
     import os
+    if config.lsystem.kind == "pergola" and randomize_envs:
+        raise ValueError("pergola uses seeded layouts; apple-specific --randomize-envs is unsupported")
     num_envs = max(int(num_envs), 1)
     base = lsystem.generate(config.lsystem, seed=config.seed)
     if num_envs == 1 or not randomize_envs:

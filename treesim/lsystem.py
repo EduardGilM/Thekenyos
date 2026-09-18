@@ -145,6 +145,9 @@ def generate(params: LSystemParams, seed: int = 0) -> TreeSkeleton:
     The bracket handling above keeps a single ``_TurtleState`` per stack level;
     ``[`` pushes a *copy* and makes it current, ``]`` restores the parent.
     """
+    if params.kind == "pergola":
+        from .pergola import generate as generate_pergola
+        return generate_pergola(height=params.target_height, seed=seed)
     if params.kind == "apple":
         skel = grow_apple(params, seed)
     else:

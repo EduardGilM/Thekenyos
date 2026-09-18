@@ -1,271 +1,219 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/title_dark.png">
-  <img alt="OrchardBench" src="assets/title_light.png" width="360">
-</picture>
+# Thekenyos · Kiwi harvesting robotics
 
-![OrchardBench — a mobile manipulator autonomously harvesting a compliant, fruit-bearing tree, amid a GPU-parallel orchard](assets/hero.png)
+![Spot with a chassis-mounted kiwi basket under a procedural pergola](assets/kiwi-pergola.jpg)
 
-**🌱 [Project page &amp; overview &rarr;](https://humphreymunn.github.io/orchardbench-page/)**
+A research simulation for a **Spot quadruped with one arm**, harvesting kiwis
+under a **1.6 m pergola canopy** and carrying them in a rear basket.
 
-A physically-grounded, GPU-parallel **apple-orchard simulation benchmark** for
-agricultural robotics, built on [NVIDIA **Newton**](https://newton-physics.github.io/newton/)
-(GPU physics on [Warp](https://github.com/NVIDIA/warp) + MuJoCo-Warp).
+Built on [OrchardBench](https://github.com/humphreymunn/orchardbench),
+[Newton](https://github.com/newton-physics/newton), MuJoCo-Warp and native MuJoCo.
+The first milestone is one robot. All fruit starts harvestable. Multi-robot
+coordination, maturity perception and automatic unloading come later.
 
-Every run grows a *different but plausible* apple tree — a compliant, breakable
-articulation of rigid branches joined by torsional spring-dampers — populates it
-with detachable fruit and foliage, and (optionally) drops in a mobile
-manipulator that autonomously finds, reaches, grasps and picks the fruit. Trees,
-dynamics, fruit and canopy can be **domain-randomized per environment** while
-staying batched on the GPU, so you can run large diverse populations for
-learning and evaluation.
+## What works, and what does not
 
-The branch model follows *Gentle Manipulation of Tree-Branches: A Contact-Aware
-Policy Learning Approach* (Jacob, Cai, Borges, Bandyopadhyay & Ramos, **CoRL
-2024**): branches as rigid cylinders + torsional "spring abstractions", stiffness
-`Kp ∝ E·r⁴/l`, `Kd ∝ Kp`, decaying per branch level. See [PHYSICS.md](PHYSICS.md)
-for the full modelling and equations, and the accompanying paper for the
-benchmark design and baseline results.
+| Component | Current implementation |
+|---|---|
+| Pergola | Seeded 3 × 4 m bay, posts, wires, compliant canes and hanging fruit |
+| Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
+| Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
+| Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
+| Canopy fruit | Coupled Hayward size/mass/density envelope; free ellipsoids with stem-site spring forces |
+| Stems | Axial/bending stiffness derived from measured stalk dimensions; irreversible load-triggered detachment |
+| Damage | Persistent contact/strain **proxy**, with negative increments available as reward terms |
+| Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
+| RL training | **Not implemented here yet.** Walking uses an existing policy; penalties do not retrain it |
 
----
+**The GPU orchard fruit is still rigid collision geometry.** The native flex
+bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
+Neither model is a validated predictor of bruising. Layered skin/core,
+viscoelastic/plastic constitutive laws, calibrated wet friction and
+angle/torque-dependent abscission remain open work. Research ranges are not
+interchangeable across cultivars and test conditions.
 
 ## Install
 
-The easiest path is [**pixi**](https://pixi.sh), which creates a fully pinned,
-reproducible environment (Python + all dependencies) from `pyproject.toml`:
+The tested GPU platform is Linux with an NVIDIA RTX 5090. Python 3.12,
+Newton 1.3.0, Warp 1.14.0 and MuJoCo/MuJoCo-Warp 3.8.1 are pinned. First runs
+compile CUDA kernels and can take several minutes. The full GPU workflow is
+not verified on macOS.
 
 ```bash
-# 1. install pixi once (if you don't already have it)
-curl -fsSL https://pixi.sh/install.sh | bash      # then restart your shell
-
-# 2. from the repo root, create the environment and try it
-pixi install
-pixi run demo
+git clone https://github.com/EduardGilM/Thekenyos.git
+cd Thekenyos
+conda env create -f environment.yml
+conda activate kiwi-pergola
+python -m unittest discover -s tests -v
 ```
 
-`pixi run <task>` runs inside the managed environment; `pixi shell` drops you
-into it. The predefined tasks are:
+`ffmpeg` is included for videos. Use a working OpenGL display for Newton's GL
+viewer. Native MuJoCo recordings can use `MUJOCO_GL=egl` on Linux. `--no-render`
+on the Spot script avoids a display dependency. Do not upgrade Warp alone:
+the earlier Warp 1.17 combination failed on this workstation.
 
-| task | what it does |
-|------|--------------|
-| `pixi run demo`    | a random deformable apple tree you can push around |
-| `pixi run harvest` | autonomous harvesting (detect → reach → grasp → pull → drop) |
-| `pixi run drive`   | drive a RidgebackFranka around the tree (W/S/A/D) |
-| `pixi run orchard` | a batched, domain-randomized 6-tree orchard |
-| `pixi run bench`   | headless benchmark / smoke test (no window) |
+### External Spot assets
 
-<details>
-<summary>Prefer plain pip / conda?</summary>
-
-Any Python 3.10–3.12 environment works. From the repo root:
+RELIC assets and policy weights are **not redistributed in this repository**.
+Review its [license](https://github.com/rai-opensource/relic) before use: its
+noncommercial research terms differ from this project's Apache-2.0 code.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-python scripts/grow_tree.py --viewer gl
+git clone https://github.com/rai-opensource/relic.git ../relic
+git -C ../relic checkout 27f8033c5064d32f049a17accb71cd1091422878
 ```
 
-This pulls `newton[examples]==1.3.0` (Warp, MuJoCo-Warp, the OpenGL viewer) plus
-NumPy/SciPy/Matplotlib/Pandas/Pillow.
-</details>
+The adapter loads `source/relic/relic/assets/spot/spot_with_arm.urdf`,
+`constants.py` and `pretrained/policy.onnx`. It does not require Isaac Sim.
 
-**Requirements.** An NVIDIA GPU with CUDA is required (Newton/Warp are
-CUDA-only). Everything here was developed on an 8 GB RTX 2000 Ada laptop; smaller
-scenes run comfortably, and batch size scales with VRAM. On hybrid-graphics
-laptops the GL window must render on the NVIDIA GPU, or it falls back to slow CPU
-copies each frame; `grow_tree.py` detects an NVIDIA GPU on Linux and sets
-`__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` for you (export them
-yourself to override). **The first run is slower:** Warp compiles its CUDA kernels
-and the robot asset is downloaded on first launch, then both are cached, so a
-second run is much faster — judge speed on the second run.
+## Run the demos
 
----
-
-## Quick start
-
-The default tree is a **random apple tree** — run it again for a different one.
+### Procedural pergola
 
 ```bash
-# Deformable apple tree you can push around (drag with the mouse). New each run.
-python scripts/grow_tree.py --viewer gl
-
-# Apple tree with leaves and fruit (pull an apple hard -> it snaps off its stem)
-python scripts/grow_tree.py --apples --foliage --viewer gl
-
-# Branch breaking (yank a branch -> it snaps and then decelerates & settles)
-python scripts/grow_tree.py --break --viewer gl
-
-# A specific, repeatable tree
-python scripts/grow_tree.py --seed 42 --apples --foliage --viewer gl
-
-# Drive a RidgebackFranka around the tree (W/S/A/D; camera = arrows/Q/E/mouse).
-# The wrist depth camera shows up as a live image panel in the viewer.
-python scripts/grow_tree.py --apples --foliage --break --robot --viewer gl
-
-# AUTONOMOUS harvesting: the robot finds apples with its depth camera, drives
-# up, grasps, pulls them off and drops them in its bucket. Metrics saved.
-python scripts/grow_tree.py --auto --foliage --break --viewer gl
-
-# A whole randomized orchard, each env a different tree (physics stays batched)
-python scripts/grow_tree.py --apples --num-envs 8 --randomize-envs --viewer gl
-
-# Bumpy outdoor ground (value-noise heightfield, randomized per seed, driveable)
-python scripts/grow_tree.py --auto --foliage --terrain --viewer gl
-
-# The CoRL branch model's ternary tree class instead of an apple tree
-python scripts/grow_tree.py --preset tb --depth 5 --viewer gl
-
-# Headless smoke test / benchmark (no window)
-python scripts/grow_tree.py --viewer null --frames 60
-
-# Quick CPU preview image of the generated geometry (no GPU)
-python -m treesim.viz apple 4        # writes output/skeleton.png
+python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --collisions --substeps 40 --viewer gl
 ```
 
-Run `python scripts/grow_tree.py --help` for the full option list.
+The scene is built programmatically in Python; it is not a hand-authored pergola
+XML. Change geometry in `treesim/pergola.py`. The native compression bench
+writes its own generated MuJoCo XML to its output directory.
 
----
-
-## Features
-
-- **Stochastic apple-tree generator** (default; MAppleT-style central leader +
-  scaffold tiers at wide crotch angles, phyllotactic spiral, gravimorphic droop)
-  — every seed grows a different but plausible tree.
-- **Parametric ternary L-system** (ABoP / Honda model, classes Ta–Td) with a
-  true 3-D turtle, pipe-model (da-Vinci/Murray) taper, and Gaussian domain
-  randomization.
-- **Compliant, breakable branches** — one rigid body + capsule per internode,
-  joined by torsional spring-dampers (Euler–Bernoulli beam stiffness). Push the
-  tree and it bends and springs back; branches rupture when the bending moment
-  exceeds `σ_r·π·r³/4`, then go limp (hinge) or detach and fall at gravity rate.
-- **Detachable apples** on the spurs — a hard sustained pull (~13–20 N) snaps
-  one off; a sub-threshold tug visibly **pulls the branch with you**. The stem
-  breaks under sustained *tension*, so a gripper holding the fruit by contact
-  friction can pick it; a detached apple is plain ballistic.
-- **Realistic foliage** — folded/curled elliptical leaf-blade meshes in 3
-  instanced size classes with per-leaf colour variation: the whole canopy is a
-  few draw batches and **zero physics cost** (or `--foliage-physics` for
-  per-leaf fluttering bodies).
-- **RidgebackFranka mobile manipulator** (`--robot`) — IsaacLab's Clearpath
-  Ridgeback base + Franka FR3 arm from the real URDF, driven with **W/S/A/D**,
-  with a live **wrist depth camera** panel. It collides with the tree
-  (group-filtered contacts): the bumper stops at the trunk, thick limbs deflect,
-  and thin twigs are pushed aside by a bounded brush force. The base rides on the
-  ground via a terrain-following axis.
-- **Fruit perception** — depth-only sphere-fit detection (segmentation + XYZ,
-  sub-cm accuracy, ~7 ms), shown in the 3-D viewer as marker spheres at the
-  estimated locations (committed pick target in orange). The same pipeline would
-  run unchanged on a real RGB-D camera; the robot masks its own links from
-  known kinematics.
-- **Autonomous harvesting** (`--auto`) — explore (a persistent tree-centre
-  belief keeps the camera oriented at the tree and lets the robot orbit-survey
-  the canopy, with bump-and-retreat stuck recovery), IK-reach, close the fingers
-  in a real contact grasp, pull until the stem's tension rupture gives, and drop
-  the fruit in the **bucket** on the robot's back. Full cycle ~7 s of sim time.
-  With `--num-envs N` every world runs its own independent picker (per-env
-  perception + metrics, merged into one stand-level JSON).
-- **Per-env domain randomization** (`--randomize-envs`) — geometry, material,
-  fruit, growth habit (droop/lean/spread/twist) and coloration differ per env
-  while the worlds stay GPU-batched. Dynamics, gains, growth habit, fruit and
-  foliage randomize at **full batch speed**; only per-branch *size* variation
-  (which re-dimensions every link) is more expensive. See the paper's scaling
-  section and [PHYSICS.md](PHYSICS.md) for the batching breakdown.
-- **Run metrics** (`--metrics`, automatic with `--auto`) — fps, grasp/pick/place
-  success, cycle time, throughput, max pull force, branches snapped, detection
-  precision/recall, saved as JSON.
-
----
-
-## Interactive controls (OpenGL viewer)
-
-- **Orbit / pan / zoom**: left-drag / middle-drag / scroll; **WASD/arrows + Q/E**
-  fly the camera.
-- **Apply force**: grab a body and drag — the viewer injects the force into the
-  sim, so the branch bends (and may snap if `--break`). Grab an **apple** and
-  tug: the branch bends toward you; pull harder than its stem strength and it
-  snaps off.
-- **Space**: pause; the side panel exposes Newton's own options.
-- With `--robot`: **W/S** drive the base forward/back, **A/D** turn — the camera
-  then keeps only the arrow keys / Q / E / mouse. The `wrist depth` image panel
-  can be dragged anywhere.
-
----
-
-## Performance notes (8 GB laptop GPU)
-
-- **Constraint solver:** the benchmark runs MuJoCo-Warp's **CG algorithm by
-  default** (`--mj-solver cg`) — several times faster than the default
-  blocked-Cholesky ("newton") algorithm on this workload, and physics-identical
-  on the regression matrix. CG is what makes laptop-scale batches practical
-  (up to ~1024 trees on 8 GB before it runs out of memory). `--mj-solver newton`
-  is kept as a fallback.
-- **Fruit are the main per-step cost** — each apple is a real (3-DOF slide)
-  body. `--apple-count` trades fruit for speed. Breaking and foliage are nearly
-  free; on rupture the joint's actuator rows are zeroed in place (no recompile,
-  no graph recapture), so the branch becomes a genuinely free hinge.
-- **Rendering does not batch** the way physics does — pair large `--num-envs`
-  with `--no-render` (or `--viewer null`) for headless batches.
-- Mature-wood stiffness (E ≈ 8 GPa) barely bends under hand-scale forces
-  (correct!); drop `physics.youngs_modulus` (e.g. `3e8`, a green sapling) for
-  dramatic bending.
-
----
-
-## Reproducing the paper experiments
+### Spot with a loaded basket
 
 ```bash
-# Run the benchmark matrix (scaling, foliage/fruit/terrain sweeps, baseline).
-# Runs jobs one at a time, saving as it goes; re-run to resume.
-python scripts/run_experiments.py --profile full        # or --profile quick
-
-# Turn the results into tidy CSVs + figures + a report.
-python scripts/analyze_experiments.py
-
-# Physics scaling sweep (step rate vs number of parallel trees, CG vs newton)
-python scripts/scaling_sweep.py
-
-# On-device domain-randomization verification (device build == host build)
-python scripts/test_dr_device.py
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
+  --frames 600 --closeup --video output/spot-basket.mp4 \
+  --metrics output/spot-basket.json
 ```
 
-Outputs land under `output/`. See each script's `--help` for options.
+Omit `--payload` to sample 0–6 kg using `--payload-seed`. The arm holds its ready
+pose; random arm poses and payload-aware locomotion retraining are not complete.
+For a numerical run, replace the video options with `--no-render`.
 
----
+`--spill-test` applies a deliberate 400 N·m roll torque (`--spill-torque` overrides it) from 2.0 to 2.4 seconds. This is
+an adverse-motion test, not a learned behaviour. Each lost fruit receives one
+negative spill event. Contact damage is recorded separately and persists after
+release. Normal runs stop if Spot falls; spill tests permit that outcome.
 
-## Layout
+### Native deformable kiwi bench
 
-```
-treesim/    config, lsystem, skeleton, physics, builder, sim, breaking,
-            springs, fruit, foliage, robot, perception, picker, metrics,
-            domainrand, domainrand_gpu, viz
-scripts/    grow_tree.py (main entry point), run_experiments.py,
-            analyze_experiments.py, scaling_sweep.py, test_dr_device.py,
-            render_paper_figs.py
-output/     renders, metrics JSON, experiment results (created on demand)
-PHYSICS.md  modelling details and equations
-```
+```bash
+MUJOCO_GL=egl python scripts/kiwi_compression.py --compression .10 \
+  --output output/xuxiang-compression --video output/xuxiang-compression.mp4
 
----
-
-## Citation
-
-OrchardBench is described in our arXiv preprint,
-[arXiv:2607.06337](https://arxiv.org/abs/2607.06337). If you use OrchardBench,
-please cite:
-
-```bibtex
-@misc{munn2026orchardbench,
-  title         = {OrchardBench: A Physically-Grounded, GPU-Parallel Apple-Orchard
-                   Simulation Benchmark for Agricultural Robotics},
-  author        = {Munn, Humphrey},
-  year          = {2026},
-  eprint        = {2607.06337},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.RO}
-}
+MUJOCO_GL=egl python scripts/kiwi_compression.py --compression .03 \
+  --output output/gentle-compression --check-timestep
 ```
 
-## License
+Outputs include `kiwi.xml`, `measurements.csv`, `metrics.json` and optional MP4.
+The default is **1.57 MPa homogeneous Xuxiang flesh**, not the earlier 30 kPa
+soft toy. The default timestep is 10 microseconds. Compare timestep-refined
+forces before changing it. The pads are ideal parallel surfaces, not Spot's
+actual gripper. Zero gravity isolates compression; geometry recovery does not
+clear the persistent damage proxy.
 
-OrchardBench is open source under the **Apache License 2.0** — free to use, modify
-and distribute (including commercially), with an explicit patent grant. See
-[LICENSE](LICENSE).
+## Physics and evidence
+
+Read [the evidence table](docs/kiwi-material-evidence.md) before changing a
+material value. It lists primary sources, units, cultivar, loading protocol,
+known source inconsistencies and missing measurements.
+
+- **Geometry:** sampled equatorial diameters and measured mean axial length;
+  mass derives from volume and density and is rejected outside the source
+  envelope. The joint distribution is an engineering assumption.
+- **Basket fruit:** fixed packing geometry and equal masses conserve requested
+  payload exactly. Sub-fruit payloads are synthetic load tests. Contacts with
+  the actual basket liner and other fruit remain uncalibrated.
+- **Stems:** beam stiffness derives from `EA/L` and `3EI/L³`. The attachment is
+  at the fruit surface, so forces act with a moment arm and react on the cane.
+  An implicit spring approximation supports small timesteps. Pooled detachment
+  forces are sampled; the threshold is conditioned to support static weight.
+  This is not a measured angle-conditioned fracture law.
+- **GPU damage:** native MuJoCo contact forces feed a Hertz equivalent-patch
+  estimate of pressure and indentation. A persistent score uses a 5% strain
+  reference and 0.26 MPa flesh stress reference, with an **assumed** one-second
+  accumulation scale. It is a diagnostic and training proxy, not a bruise
+  probability. Multiple contact patches and cross-cultivar transfer limit it.
+- **Native flex:** actual elastic deformation and compression/release forces;
+  homogeneous tissue, numerical damping, strain-based damage proxy. No physical
+  peel rupture, plastic set or fitted relaxation law is claimed.
+- **Contacts:** the kiwi scene uses native MuJoCo contacts. The earlier Newton
+  collision path allowed a fruit to escape a stationary basket. Planar Spot
+  lower-leg collision hulls receive 1 mm thickness for native compatibility;
+  the original body inertia is retained.
+
+## Validate a change
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/check_loose_fruit.py
+python scripts/check_loose_fruit.py --timestep .0005
+python scripts/check_kiwi_physics.py
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
+  --frames 300 --no-render --metrics output/walk-check.json
+```
+
+The stationary-basket check requires retention and actual settling motion.
+The kiwi check requires rest attachment, detachment under a pull, free fall,
+ground contact and measured contact load. The native bench fails on numerical
+warnings, inverted sampled tetrahedra or poor release/recovery. Tests and videos
+are complementary: inspect contact penetration, mounting, packing and spill
+trajectories in recordings as well as checking metrics.
+
+### Latest validation on the RTX 5090
+
+Validated on 18 September 2026; these are checks of the implementation, not
+real-fruit calibration or evidence that a harvesting policy has been trained.
+
+| Check | Result |
+|---|---|
+| Unit/integration suite | 8 tests passed in the Linux environment |
+| Stationary basket, 60 fruit | Zero spills over 5 s at both 1 ms and 0.5 ms physics steps |
+| Loaded walking | 12 s, 2.83 m travelled, 7.6° maximum tilt, zero spills, zero canopy detachments |
+| Deliberate 400 N·m roll disturbance | 36 fruit spilled; total spill penalty −36 |
+| Stem/drop regression | Attached at rest; detached under a 20 N pull; landed without tunnelling |
+| Original apple / pergola smoke runs | 60 / 120 frames completed |
+| Native 3% timestep refinement | 10 µs vs 5 µs: force difference 0.069%; strain difference 0.00046 percentage points |
+| Native 10% commanded squeeze | 8.72% measured compression, 71.38 N per pad, no solver warnings; damage proxy saturated |
+
+The 10% command differs from tissue strain because the pads also have compliant
+contact. The native 3% case records zero strain-based damage proxy; that is not
+a guarantee of unbruised real fruit. Outputs are generated under `output/`.
+
+## Continue the project
+
+1. Fit compression/hold/release and impact tests to one cultivar and harvest
+   condition. Add layered, viscoelastic/plastic response without mixing datasets.
+2. Validate the actual Spot jaw contact and a stem angle/torque break law.
+3. Train locomotion over 0–6 kg payload and arm configurations; compare against
+   the existing policy on matched seeds, spills, tracking and falls.
+4. Train reach, grip, detach and deposit, then integrate a full harvesting task.
+5. Add station unloading and, later, multi-robot coordination.
+
+PufferLib is not installed or integrated. Select a GPU training implementation
+only after the native material and contact benchmarks agree with measurements.
+
+| Path | Purpose |
+|---|---|
+| `treesim/pergola.py` | Procedural structure and fruit placement |
+| `treesim/kiwi_material.py` | Source-backed constants, geometry sampler, damage helper |
+| `treesim/kiwi.py` | Stem dynamics and GPU contact damage diagnostics |
+| `treesim/basket.py` | Mounted basket, loose payload, spill events |
+| `treesim/spot.py` | URDF import, observation mapping, policy and PD control |
+| `treesim/sim.py` | Solver and stepping integration |
+| `scripts/walk_spot.py` | Loaded walking and spill recordings |
+| `scripts/kiwi_compression.py` | Native MuJoCo material bench |
+| `tests/` | Fast geometry, mass, independence and event checks |
+| `docs/kiwi-material-evidence.md` | Research sources and calibration gaps |
+
+See [AGENTS.md](AGENTS.md) for implementation and handoff rules.
+
+## Provenance and license
+
+This is a derivative of Humphrey Munn's OrchardBench, based on upstream commit
+`6313313db8b1a7d23fb2cc3afd67cac46f29399a`. The original apple workflows remain
+available; see the [upstream documentation](docs/orchardbench-upstream.md) and
+[original physics notes](PHYSICS.md). Preserve upstream attribution and the
+[Apache-2.0 license](LICENSE). RELIC assets have separate terms. Do not copy
+external model weights, robot meshes or research PDFs into this repository
+without checking their licenses.
