@@ -24,15 +24,24 @@ class KiwiPlacement:
     mass: float
 
 
-def generate(height: float = 1.6, seed: int = 0) -> TreeSkeleton:
+def generate(height: float = 1.6, seed: int = 0,
+             ground_z=None, canopy_z=None) -> TreeSkeleton:
     """One 3 x 4 m bay, with 0.5 m wire spacing and randomized paired canes.
 
-    Height denotes the support/cane centreline above level ground. Branch
-    radii and leaves extend above it. Fruit hangs below it. Dimensions and
-    material values are initial scene parameters, not a calibrated crop model.
+    Height denotes the support/cane centreline above the aisle plane. On
+    level ground that is world z. When ``ground_z`` / ``canopy_z`` are
+    provided they are ``(x, y) -> z`` samples so posts sit on the orchard
+    floor and the wires follow the slope plane. Branch radii and leaves
+    extend above the canopy. Fruit hangs below it. Dimensions and material
+    values are initial scene parameters, not a calibrated crop model.
     """
     if not np.isfinite(height) or height < 0.3:
         raise ValueError("canopy height must be finite and at least 0.3 m")
+    planted = ground_z is not None
+    if ground_z is None:
+        ground_z = lambda x, y: 0.0
+    if canopy_z is None:
+        canopy_z = lambda x, y: height
     rng = np.random.default_rng(seed)
     segments = []
 
@@ -52,24 +61,37 @@ def generate(height: float = 1.6, seed: int = 0) -> TreeSkeleton:
         ))
         return idx
 
+    def post_ends(x, y):
+        from .orchard_terrain import POST_EMBED_M
+        top = float(canopy_z(x, y))
+        foot = float(ground_z(x, y)) - (POST_EMBED_M if planted else 0.0)
+        if not np.isfinite(top) or not np.isfinite(foot):
+            raise ValueError("terrain samples must be finite")
+        if top - foot < 0.3:
+            raise ValueError("post would be shorter than 0.3 m at this terrain")
+        return foot, top
+
     # One rooted, connected fixed frame avoids closed kinematic loops.
-    root = add(-1, [-1.5, -2., height], 0.045, 0, start=[-1.5, -2., 0.])
+    foot, top = post_ends(-1.5, -2.)
+    root = add(-1, [-1.5, -2., top], 0.045, 0, start=[-1.5, -2., foot])
     beam = root
     for xi, x in enumerate(np.linspace(-1.5, 1.5, 7)):
         if xi:
-            beam = add(beam, [x, -2., height], 0.025, 0)
+            beam = add(beam, [x, -2., float(canopy_z(x, -2.))], 0.025, 0)
         wire = beam
         for yi, y in enumerate(np.linspace(-1.5, 2., 8)):
-            wire = add(wire, [x, y, height], 0.004, 1)
+            wire = add(wire, [x, y, float(canopy_z(x, y))], 0.004, 1)
             # Each cane occupies its own grid cell, preventing overlapping
             # fruit pairs on adjacent wires.
             if xi < 6:
                 length = rng.uniform(0.34, 0.44)
-                end = np.array([x + length, y + rng.uniform(-0.06, 0.0), height])
-                add(wire, end, rng.uniform(0.006, 0.009), 2)
+                ex, ey = x + length, y + rng.uniform(-0.06, 0.0)
+                add(wire, [ex, ey, float(canopy_z(ex, ey))], rng.uniform(0.006, 0.009), 2)
         if xi in (0, 6):
-            add(wire, [x, 2., 0.], 0.045, 0)
-    add(beam, [1.5, -2., 0.], 0.045, 0)
+            foot, _ = post_ends(x, 2.)
+            add(wire, [x, 2., foot], 0.045, 0)
+    foot, _ = post_ends(1.5, -2.)
+    add(beam, [1.5, -2., foot], 0.045, 0)
     return TreeSkeleton(segments)
 
 

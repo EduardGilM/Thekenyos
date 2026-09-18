@@ -26,7 +26,7 @@ def build_robot(builder, params):
     constants = runpy.run_path(str(asset / "constants.py"))
     nb, nj, ns = builder.body_count, builder.joint_count, builder.shape_count
     builder.add_urdf(str(asset / "spot_with_arm.urdf"), floating=True,
-                     xform=wp.transform(wp.vec3(*params.position, 0.65),
+                     xform=wp.transform(wp.vec3(*params.position, float(params.base_z)),
                                         wp.quat_from_axis_angle(wp.vec3(0, 0, 1), params.yaw)),
                      enable_self_collisions=True, joint_ordering="dfs")
     # PhysX trains with convex collision hulls, not triangle-mesh self contacts.
@@ -69,7 +69,7 @@ def build_robot(builder, params):
     basket = None
     if params.basket:
         from .basket import add_basket
-        spawn = wp.transform(wp.vec3(*params.position, .65),
+        spawn = wp.transform(wp.vec3(*params.position, float(params.base_z)),
                              wp.quat_from_axis_angle(wp.vec3(0, 0, 1), params.yaw))
         basket = add_basket(builder, chassis, params.basket_mass, params.payload_mass, params.payload_seed, spawn)
     return dict(kind="spot", nbody=builder.body_count-nb, body_start=nb,

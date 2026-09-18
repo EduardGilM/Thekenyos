@@ -243,7 +243,7 @@ display range is deliberately short (3 m): the tree only "appears" as the robot
 closes in, and at manipulation distance apples read as bright round blobs
 clearly distinct from the speckled foliage.
 
-**Terrain (`--terrain`).**  Optional bumpy outdoor ground: a value-noise
+**Terrain (`--terrain`).**  Apple scenes keep the original value-noise
 heightfield (`newton.Heightfield`, 3 octaves, randomized per seed, flattened
 under the tree so the trunk stays planted), one global static shape shared by
 all envs — batching unaffected, one collision shape total.  Multi-env, the
@@ -253,6 +253,12 @@ sits at the origin, so the ground drawn under each displayed env is identical
 to the terrain the physics samples — every trunk gets its flattened disc and
 every robot rides the bumps it appears to stand on.  Gentle by default (5 cm
 bumps, ~1.8 m wavelength) so the base stays driveable.
+
+Pergola scenes use a different floor: a seeded kiwi orchard heightfield with a
+pasillo/surco row profile, a sampled slope, high-frequency noise and a sampled
+foot–soil friction.  Posts and Spot are planted on the sampled surface; the
+canopy follows the slope plane 1.6 m above the aisle.  Ranges are assumed
+domain-randomization bounds, not a measured orchard-floor survey.
 
 **Solver algorithm.**  The mjwarp constraint solver runs **CG** by default
 (`physics.mj_solver`, `--mj-solver`): mjwarp's default "newton" algorithm

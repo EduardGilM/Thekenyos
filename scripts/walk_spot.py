@@ -54,6 +54,9 @@ def main():
     p.add_argument('--headless', action='store_true')
     p.add_argument('--closeup', action='store_true', help='Follow Spot for basket inspection')
     p.add_argument('--no-render', action='store_true')
+    p.add_argument('--terrain', action='store_true',
+                   help='Place the pergola and Spot on a seeded kiwi orchard floor '
+                        '(slope, aisle/furrow profile, noise and friction).')
     args = p.parse_args()
     if not np.isfinite(args.spill_torque) or args.frames <= 0 or args.substeps <= 0 or args.substeps % 2 or (args.video and args.no_render):
         p.error('Use positive --frames and enable rendering for --video')
@@ -74,6 +77,7 @@ def main():
     cfg.foliage.set_density(0.6)
     cfg.foliage.min_order_for_leaves = 2
     cfg.foliage.leaf_length, cfg.foliage.leaf_width = .22, .17
+    cfg.physics.terrain = args.terrain
     tree = builder.generate_and_build(cfg)
     sim = Sim(tree, fps=50, substeps=args.substeps, collisions=True)
     from treesim.basket import SpillTracker
@@ -84,7 +88,15 @@ def main():
     viewer = V.ViewerNull() if args.no_render else V.ViewerGL(headless=args.headless)
     sim.set_viewer(viewer)
     if not args.no_render:
-        viewer.set_camera(pos=wp.vec3(3.5, -4.5, 2.1), yaw=127.87, pitch=-12.)
+        if args.terrain:
+            viewer.set_camera(pos=wp.vec3(9.5, -12.0, 6.2), yaw=127.87, pitch=-22.)
+        else:
+            viewer.set_camera(pos=wp.vec3(3.5, -4.5, 2.1), yaw=127.87, pitch=-12.)
+    if tree.terrain_params:
+        print('[terrain]', {k: tree.terrain_params[k] for k in
+                            ('slope_deg', 'ground_noise_m', 'rut_depth_m',
+                             'rut_width_m', 'friction', 'min_z_m', 'max_z_m')
+                            if k in tree.terrain_params}, flush=True)
     encoder = None
     positions, tilts = [], []
     shape_body = tree.model.shape_body.numpy()
@@ -182,7 +194,8 @@ def main():
                    spill_reward_total=spill.total_penalty if spill else 0., spill_test=args.spill_test, spill_torque_Nm=args.spill_torque if args.spill_test else 0.,
                    detached_canopy_fruit=sim.apples.broken_count if sim.apples else 0,
                    fruit_contact_damage=sim.kiwi_damage.metrics() if sim.kiwi_damage else None,
-                   basket_min_sampled_gap_m=basket_min_gap if np.isfinite(basket_min_gap) else None)
+                   basket_min_sampled_gap_m=basket_min_gap if np.isfinite(basket_min_gap) else None,
+                   terrain=tree.terrain_params)
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
     args.metrics.write_text(json.dumps(metrics, indent=2)+'\n')
     print(json.dumps(metrics, indent=2))
