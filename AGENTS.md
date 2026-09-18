@@ -30,6 +30,16 @@ already present. State a short plan before substantial implementation.
   torque must remain explicit calibration gaps. Do not sample unrelated source
   extremes as if they form one measured distribution.
 
+## Harvesting objective
+
+Read docs/harvest-task.md before adding RL controls. The oracle evaluates
+physical outcomes; it must not enforce a paper angle or a grasp sequence.
+Keep optional guidance separate from the persistent task objective and evaluate
+with guidance disabled. An evaluator is not an action teacher. Any future
+imitation must use physically verified demonstrations and permit divergence.
+The measurement bridge samples frame-end contacts; a training adapter must
+capture transient failures and force peaks at physics substeps.
+
 ## Implementation
 
 Use the smallest change that meets the task. Reuse the existing runtime and
@@ -50,8 +60,10 @@ captured loop. Validate buffer swaps if changing substep counts.
 
 Run the affected checks in README.md. Material changes require native
 compression/release results and timestep sensitivity. Contact changes require
-stationary retention, falls/ground contact and adversarial spill tests. Policy
-changes require matched-seed tracking/fall/spill comparisons. A video does not
+stationary retention, falls/ground contact and adversarial spill tests. Actual
+jaw geometry changes require `scripts/check_spot_gripper.py` and timestep
+comparison; keep failed torque cases visible. Policy changes require matched-seed
+tracking/fall/spill comparisons. A video does not
 replace numerical checks; metrics do not replace visual inspection.
 
 Show the user a video when a useful visual milestone is ready. Label scripted

@@ -87,8 +87,8 @@ class OrchardTerrainTest(unittest.TestCase):
 
     def test_pergola_posts_sit_on_sampled_floor(self):
         floor = _pinned(seed=42, slope_deg=-3.0, rut_depth_m=0.06, noise_m=0.02)
-        skel = generate(height=1.6, seed=42, ground_z=floor.ground_z,
-                        canopy_z=floor.canopy_z)
+        skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0,
+                        ground_z=floor.ground_z, canopy_z=floor.canopy_z)
         self.assertEqual(len(skel.roots), 1)
         posts = [s for s in skel if abs(s.axis[2]) > 1.0]
         self.assertEqual(len(posts), 4)
@@ -117,7 +117,7 @@ class OrchardTerrainTest(unittest.TestCase):
             self.assertGreater(center[2] - extent, floor.ground_z(center[0], center[1]))
 
     def test_flat_generate_unchanged(self):
-        skel = generate(height=1.6, seed=42)
+        skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0)
         posts = [s for s in skel if abs(s.axis[2]) > 1.0]
         for post in posts:
             zs = sorted([post.start[2], post.end[2]])

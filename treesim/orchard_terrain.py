@@ -319,6 +319,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
                          rut_width_m=None, friction=None,
                          slope_azimuth_deg=None, half_extent_m=None,
                          row_pitch_m=None, cell_m=None,
+                         appearance_cell_m=None,
                          canopy_height_m: float = 1.6) -> OrchardFloor:
     """Sample one seeded orchard floor.
 
@@ -339,6 +340,9 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     cell_m = _validate_positive(
         "cell_m",
         cell_m if cell_m is not None else getattr(ph, "orchard_cell_m", 0.05))
+    appearance_cell_m = _validate_positive(
+        "appearance_cell_m",
+        appearance_cell_m if appearance_cell_m is not None else APPEARANCE_CELL_M)
     if cell_m > 0.25 * row_pitch_m:
         raise ValueError("cell_m must resolve the row profile (keep well below row_pitch_m)")
     if not np.isfinite(canopy_height_m) or canopy_height_m < 0.3:
@@ -402,7 +406,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     heights = heights + lift
     reference_z = AISLE_HEIGHT_M + lift
 
-    n_tex = int(round(2.0 * half_extent_m / APPEARANCE_CELL_M)) + 1
+    n_tex = int(round(2.0 * half_extent_m / appearance_cell_m)) + 1
     n_tex = max(n_tex, n)
     xt = np.linspace(-half_extent_m, half_extent_m, n_tex)
     yt = np.linspace(-half_extent_m, half_extent_m, n_tex)
@@ -422,7 +426,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         half_extent_m=float(half_extent_m),
         row_pitch_m=float(row_pitch_m),
         cell_m=float(cell_m),
-        appearance_cell_m=float(APPEARANCE_CELL_M),
+        appearance_cell_m=float(appearance_cell_m),
         planting_strip_half_m=float(PLANTING_STRIP_HALF_M),
         aisle_height_m=AISLE_HEIGHT_M,
         canopy_height_m=float(canopy_height_m),

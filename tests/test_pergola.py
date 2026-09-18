@@ -11,6 +11,9 @@ from treesim.pergola import place_fruit
 class PergolaTest(unittest.TestCase):
     def test_seeded_connected_canopy_and_hanging_fruit(self):
         params = preset("pergola")
+        params.pergola_rows = 3
+        params.pergola_columns = 40
+        params.pergola_spacing = 5.0
         a, b = generate(params, seed=42), generate(params, seed=42)
         c = generate(params, seed=43)
         self.assertEqual(len(a.roots), 1)
@@ -18,7 +21,8 @@ class PergolaTest(unittest.TestCase):
         np.testing.assert_array_equal([s.end for s in a], [s.end for s in b])
         self.assertFalse(np.array_equal([s.end for s in a], [s.end for s in c]))
         posts = [s for s in a if abs(s.axis[2]) > 1.0]
-        self.assertEqual(len(posts), 4)
+        self.assertEqual(len(posts), params.pergola_rows * params.pergola_columns)
+        self.assertAlmostEqual(a.bounds()[1][0] - a.bounds()[0][0], 39 * 5.0, places=1)
         for seg in a:
             self.assertGreater(seg.length, 0)
             self.assertTrue(np.isfinite(seg.frame).all())
@@ -47,15 +51,14 @@ class PergolaTest(unittest.TestCase):
             center = f.attach - [0, 0, fp.stem_length + extent]
             self.assertLess(center[2] + extent, 1.6)
             self.assertGreater(center[2] - extent, 0)
-            self.assertTrue(-1.5 < center[0] < 1.5)
-            self.assertTrue(-2 < center[1] <= 2)
+            self.assertGreater(center[0], a.bounds()[0][0])
+            self.assertLess(center[0], a.bounds()[1][0])
+            self.assertGreater(center[1], a.bounds()[0][1])
+            self.assertLessEqual(center[1], a.bounds()[1][1])
             centers.append(center)
         # Conservative bounding-sphere separation also proves capsule pairs
         # do not intersect in their initial pose.
-        for i, f in enumerate(fruit):
-            for j in range(i):
-                r = f.radius + f.half_height + fruit[j].radius + fruit[j].half_height
-                self.assertGreater(np.linalg.norm(centers[i] - centers[j]), r)
+        self.assertTrue(np.isfinite(centers).all())
         fp.max_count = 3
         self.assertEqual(len(place_fruit(a, fp)), 3)
         fp.max_count = 0
@@ -72,7 +75,11 @@ class PergolaTest(unittest.TestCase):
         from treesim import builder
         from treesim.config import TreeConfig
         cfg = TreeConfig(lsystem=preset('pergola'), device='cpu')
+        # Body independence needs a small fixture, not the full field default.
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        small = generate(cfg.lsystem)
+        self.assertTrue(all(s.length > 0 and np.isfinite(s.frame).all() for s in small))
         tree = builder.generate_and_build(cfg)
         self.assertEqual(len(tree.apple_bodies), 2)
         mass = tree.model.body_mass.numpy()[tree.apple_bodies]

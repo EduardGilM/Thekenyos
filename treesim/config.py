@@ -77,6 +77,12 @@ class LSystemParams:
     # [M.9 rootstock caliper / trunk cross-sectional-area data].
     base_radius: float = 0.035    # trunk radius [m] after rescaling
 
+    # Commercial kiwi pergola layout.  Forty columns by forty-five rows at
+    # 5 m centres covers about 4.3 ha before the perimeter allowance.
+    pergola_rows: int = 45
+    pergola_columns: int = 40
+    pergola_spacing: float = 5.0  # structural post/row spacing [m]
+
     # Gaussian domain-randomisation sigma on shape params (paper: sigma=0.1).
     shape_jitter: float = 0.0     # 0 -> deterministic; 0.1 -> paper default
 
@@ -124,7 +130,9 @@ def preset(name: str) -> LSystemParams:
         "td": (36.0, 180.0, 252.0, 1.070, 1.732, 6),
     }
     if name == "pergola":
-        return LSystemParams(kind="pergola", target_height=1.6)
+        return LSystemParams(kind="pergola", target_height=1.6,
+                             pergola_rows=45, pergola_columns=40,
+                             pergola_spacing=5.0)
     if name == "apple":
         # central-leader apple tree; ``n`` is the max branch order (recursion depth)
         return LSystemParams(kind="apple", n=4, target_height=2.6, base_radius=0.055,
@@ -384,6 +392,7 @@ class FoliageParams:
 # --------------------------------------------------------------------------- #
 @dataclass
 class FruitParams:
+    kiwi_strength_scale: float = 1.0   # Hayward curve multiplier; 1 = paper mean proxy.
     enabled: bool = False
     min_order: int = 2                  # apples grow on >=2-year-old wood (spurs), outer canopy
     prob_per_spur: float = 0.35         # chance an eligible spur bears fruit

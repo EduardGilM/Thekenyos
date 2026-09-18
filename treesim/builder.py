@@ -586,7 +586,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             half_height = getattr(ap, "half_height", 0.0)
             volume = (4.0 / 3.0) * np.pi * ap.radius ** 3 + 2 * half_height * np.pi * ap.radius ** 2
             if kiwi:
-                from .kiwi_material import STEM_LENGTH, DETACH_RANGE, FRUIT_FRICTION, RESTITUTION
+                from .kiwi_material import STEM_LENGTH, HAYWARD_FDF_N, FRUIT_FRICTION, RESTITUTION
                 volume = 4*np.pi*np.prod(ap.radii)/3
             acfg = builder.ShapeConfig(
                 density=float(ap.mass/volume if kiwi else max(fr.mass/volume, 50.)), mu=FRUIT_FRICTION if kiwi else 1.0,
@@ -642,7 +642,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             ap_parent.append(pbody)
             ap_offset.append([float(off[0]), float(off[1]), float(off[2])])
             ap_drop.append(float(drop))
-            ap_detach.append(float(apple_rng.uniform(*(DETACH_RANGE if kiwi else fr.detach_force))))
+            ap_detach.append(float(HAYWARD_FDF_N[-1]*fr.kiwi_strength_scale if kiwi else apple_rng.uniform(*fr.detach_force)))
 
     # --- optional RidgebackFranka mobile manipulator (one per env; identical
     #     in every env so the worlds stay homogeneous and keep batching) ------- #
@@ -1143,9 +1143,13 @@ def generate_and_build(config: TreeConfig, max_bodies: int = 4000,
         from .pergola import generate as generate_pergola
         floor = sample_orchard_floor(
             config.seed, config.physics,
-            canopy_height_m=float(config.lsystem.target_height))
+            canopy_height_m=float(config.lsystem.target_height),
+            row_pitch_m=float(config.lsystem.pergola_spacing))
         base = generate_pergola(
             height=config.lsystem.target_height, seed=config.seed,
+            rows=config.lsystem.pergola_rows,
+            columns=config.lsystem.pergola_columns,
+            spacing=config.lsystem.pergola_spacing,
             ground_z=floor.ground_z, canopy_z=floor.canopy_z)
     else:
         base = lsystem.generate(config.lsystem, seed=config.seed)

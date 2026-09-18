@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Native MuJoCo preview of the kiwi orchard floor plus planted pergola.
+"""Native MuJoCo preview of the commercial kiwi plantation.
 
-This is a scripted aisle walk of the same seeded heightfield used by
-``--terrain``, compiled as a MuJoCo hfield. Neighbor vine-row posts are
-visual-only. It is not Newton GL, not Spot's URDF, and not a learned policy.
+This is a scripted flyover of the seeded pergola grid plus orchard floor,
+compiled as a MuJoCo hfield. It is not Newton GL, not Spot's URDF, and
+not a learned policy. Render-only foliage from the GPU path is omitted.
 
     MUJOCO_GL=osmesa python scripts/record_orchard_mujoco.py \
         --seed 42 --video output/orchard-mujoco.mp4
@@ -23,48 +23,12 @@ import numpy as np
 
 from treesim.config import FruitParams
 from treesim.kiwi_material import STEM_LENGTH
-from treesim.orchard_terrain import PERGOLA_POST_XY_M, sample_orchard_floor
+from treesim.orchard_terrain import sample_orchard_floor
 from treesim.pergola import generate, place_fruit
 
 
 def _rgba(rgb, a=1.0) -> str:
     return " ".join(f"{float(c):.3f}" for c in (*rgb, a))
-
-
-def _block_markers(floor) -> list[str]:
-    """Visual-only vine-row posts and wires so the 30 m block reads as a field.
-
-    These are not in the Newton scene and have no contacts. The planted 3 x 4 m
-    bay keeps its own posts. Layout is assumed, not a surveyed block.
-    """
-    pitch = float(floor.sampled["row_pitch_m"])
-    geoms = []
-    xs = np.arange(0.5 * pitch, float(floor.half_extent_m) - 0.45, pitch)
-    xs = np.unique(np.round(np.concatenate((-xs, xs)), 6))
-    ys = np.arange(-12.0, 12.01, 4.0)
-    wood, wire = (0.40, 0.25, 0.11), (0.24, 0.24, 0.22)
-    for x in xs:
-        y0, y1 = float(ys[0]), float(ys[-1])
-        z0 = float(floor.canopy_z(x, y0))
-        z1 = float(floor.canopy_z(x, y1))
-        geoms.append(
-            f'    <geom type="capsule" fromto="{x:.4f} {y0:.4f} {z0:.4f} '
-            f'{x:.4f} {y1:.4f} {z1:.4f}" size="0.006" rgba="{_rgba(wire)}" '
-            f'contype="0" conaffinity="0"/>'
-        )
-        for y in ys:
-            y = float(y)
-            if any(abs(x - px) < 0.25 and abs(y - py) < 0.25
-                   for px, py in PERGOLA_POST_XY_M):
-                continue
-            foot = float(floor.ground_z(x, y)) - 0.04
-            top = float(floor.canopy_z(x, y))
-            geoms.append(
-                f'    <geom type="capsule" fromto="{x:.4f} {y:.4f} {foot:.4f} '
-                f'{x:.4f} {y:.4f} {top:.4f}" size="0.038" rgba="{_rgba(wood)}" '
-                f'contype="0" conaffinity="0"/>'
-            )
-    return geoms
 
 
 def mjcf(floor, skeleton, fruit) -> str:
@@ -94,16 +58,15 @@ def mjcf(floor, skeleton, fruit) -> str:
             f'size="{rx:.5f} {ry:.5f} {rz:.5f}" rgba="{_rgba(f.color)}" '
             f'contype="0" conaffinity="0"/>'
         )
-    geoms.extend(_block_markers(floor))
     look_z = 0.5 * (min_z + float(floor.canopy_z(0.0, 0.0)))
-    return f'''<mujoco model="kiwi_orchard_floor">
+    return f'''<mujoco model="kiwi_plantation">
   <compiler angle="radian"/>
   <option gravity="0 0 -9.81"/>
-    <visual>
-    <global offwidth="1280" offheight="720" azimuth="125" elevation="-22" fovy="52"/>
+  <visual>
+    <global offwidth="1280" offheight="720" azimuth="125" elevation="-22" fovy="48"/>
     <headlight ambient=".22 .22 .21" diffuse=".50 .50 .48" specular=".08 .08 .07"/>
     <rgba haze=".72 .78 .84 1"/>
-    <map fogstart="16" fogend="52" znear=".08" zfar="80"/>
+    <map fogstart="80" fogend="320" znear=".20" zfar="420"/>
     <quality shadowsize="0"/>
   </visual>
   <asset>
@@ -116,11 +79,11 @@ def mjcf(floor, skeleton, fruit) -> str:
             size="{half} {half} {elevation:.5f} 0.08"/>
   </asset>
   <worldbody>
-    <light pos="8 -12 16" dir="-0.22 0.40 -1" directional="true"
+    <light pos="40 -80 90" dir="-0.18 0.35 -1" directional="true"
            diffuse=".62 .60 .52" specular=".10 .10 .08"/>
-    <light pos="-7 5 8" diffuse=".14 .15 .12"/>
-    <camera name="orbit" pos="8 -11 6" xyaxes="0.81 0.59 0 -0.18 0.25 0.95"
-            fovy="52"/>
+    <light pos="-50 40 50" diffuse=".14 .15 .12"/>
+    <camera name="orbit" pos="80 -110 60" xyaxes="0.81 0.59 0 -0.18 0.25 0.95"
+            fovy="48"/>
     <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
           pos="0 0 {min_z:.5f}" rgba="1 1 1 1"
           friction="{mu:.3f} 0.01 0.001"/>
@@ -139,20 +102,15 @@ def apply_hfield(model, floor) -> None:
     model.hfield_data[:] = ((heights - min_z) / span).astype(np.float64).ravel()
 
 
-def camera_pose(frame, n_frames, floor):
-    """Look down the grassed pasillo at the planted bay, then glance at a surco.
-
-    Azimuth/elevation follow the native free-camera convention that already
-    framed the overview stills (negative elevation = eye above the look point).
-    """
+def camera_pose(frame, n_frames, floor, half_span_m: float):
+    """High flyover of the full plantation; stay steep enough to fill the frame."""
     t = frame / max(n_frames - 1, 1)
     s = 0.5 - 0.5 * math.cos(math.pi * t)
-    x_look = 0.05 + 0.30 * s
-    y_look = -1.60 + 1.70 * s
-    look = np.array([x_look, y_look, floor.ground_z(x_look, y_look) + 0.18])
-    azimuth = 108.0 - 14.0 * s
-    elevation = -46.0
-    distance = 6.3 - 0.4 * s
+    look = np.array([0.0, -0.08 * half_span_m + 0.16 * half_span_m * s,
+                     float(floor.canopy_z(0.0, 0.0))])
+    azimuth = 35.0 + 90.0 * t
+    elevation = -58.0
+    distance = 0.95 * half_span_m + 0.08 * half_span_m * (1.0 - s)
     return look, distance, azimuth, elevation
 
 
@@ -162,22 +120,49 @@ def main():
     p.add_argument("--frames", type=int, default=240)
     p.add_argument("--video", type=Path, default=Path("output/orchard-mujoco.mp4"))
     p.add_argument("--xml", type=Path, help="Optional MJCF dump (not required)")
+    p.add_argument("--pergola-rows", type=int, default=45)
+    p.add_argument("--pergola-columns", type=int, default=40)
+    p.add_argument("--pergola-spacing", type=float, default=5.0)
+    p.add_argument("--fruit-count", type=int, default=600)
     args = p.parse_args()
     if args.frames < 2:
         p.error("--frames must be at least 2")
+    if args.pergola_rows < 2 or args.pergola_columns < 2:
+        p.error("pergola rows and columns must be at least 2")
+    if not 4.5 <= args.pergola_spacing <= 5.0:
+        p.error("pergola spacing must stay inside [4.5, 5.0] m")
+    if args.fruit_count < 0:
+        p.error("--fruit-count must be nonnegative")
 
     # MuJoCo 3.8.1 fails if OSMesa is selected before the package import.
     os.environ.pop("MUJOCO_GL", None)
     import mujoco
     os.environ["MUJOCO_GL"] = "osmesa"
 
-    floor = sample_orchard_floor(args.seed, canopy_height_m=1.6)
-    skeleton = generate(height=1.6, seed=args.seed, ground_z=floor.ground_z,
-                        canopy_z=floor.canopy_z)
+    spacing = float(args.pergola_spacing)
+    half = 0.5 * max(args.pergola_columns - 1, args.pergola_rows - 1) * spacing + 12.0
+    floor = sample_orchard_floor(
+        args.seed, canopy_height_m=1.6,
+        half_extent_m=half, cell_m=min(0.50, 0.10 * spacing),
+        row_pitch_m=spacing, appearance_cell_m=0.25,
+        slope_deg=0.0, noise_m=0.01, rut_depth_m=0.05, rut_width_m=0.40,
+        friction=1.0, slope_azimuth_deg=0.0,
+    )
+    skeleton = generate(
+        height=1.6, seed=args.seed,
+        rows=args.pergola_rows, columns=args.pergola_columns, spacing=spacing,
+        ground_z=floor.ground_z, canopy_z=floor.canopy_z,
+    )
     fruit = place_fruit(skeleton, FruitParams(
-        max_count=40, joint="free",
+        max_count=args.fruit_count, joint="free",
         colors=((0.39, 0.27, 0.12), (0.48, 0.34, 0.17)),
     ), seed=args.seed)
+    print(
+        f"[orchard-mujoco] posts {args.pergola_rows}x{args.pergola_columns} "
+        f"at {spacing:.1f} m; segments {len(skeleton)}; fruit {len(fruit)}; "
+        f"floor {2*half:.0f}x{2*half:.0f} m",
+        flush=True,
+    )
     xml = mjcf(floor, skeleton, fruit)
     if args.xml:
         args.xml.parent.mkdir(parents=True, exist_ok=True)
@@ -191,19 +176,21 @@ def main():
 
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    renderer = mujoco.Renderer(model, height=720, width=1280)
+    renderer = mujoco.Renderer(model, height=720, width=1280, max_geom=30000)
     renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = 0
     renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = 1
     args.video.parent.mkdir(parents=True, exist_ok=True)
-    m = floor.metrics()
-    label = (f"drawtext=text='NATIVE MUJOCO hfield  seed {args.seed}':"
-             f"x=28:y=28:fontsize=22:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
-             f"drawtext=text='2 m rows   slope {m['slope_deg']:.1f} deg   ruts {100*m['rut_depth_m']:.0f} cm x "
-             f"{100*m['rut_width_m']:.0f} cm   noise {100*m['ground_noise_m']:.1f} cm   "
-             f"mu={m['friction']:.2f}':x=28:y=60:fontsize=18:fontcolor=white:"
-             f"shadowcolor=black:shadowx=1:shadowy=1,"
-             f"drawtext=text='scripted aisle walk  -  planted bay + visual row posts  -  not Spot gait':"
-             f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1")
+    ha = (args.pergola_rows - 1) * spacing * (args.pergola_columns - 1) * spacing / 10000.0
+    label = (
+        f"drawtext=text='NATIVE MUJOCO plantation  seed {args.seed}':"
+        f"x=28:y=28:fontsize=22:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
+        f"drawtext=text='{args.pergola_rows} x {args.pergola_columns} posts at "
+        f"{spacing:.1f} m   ~{ha:.1f} ha   fruit {len(fruit)}':"
+        f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
+        f"drawtext=text='scripted flyover  -  Ines plantation on orchard floor  -  "
+        f"not Spot gait  -  no foliage here':"
+        f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
+    )
     encoder = subprocess.Popen([
         "ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", "1280x720", "-r", "30", "-i", "-", "-an", "-vf", label,
@@ -212,7 +199,8 @@ def main():
     ], stdin=subprocess.PIPE)
     try:
         for frame in range(args.frames):
-            lookat, distance, azimuth, elevation = camera_pose(frame, args.frames, floor)
+            lookat, distance, azimuth, elevation = camera_pose(
+                frame, args.frames, floor, half)
             camera.lookat[:] = lookat
             camera.distance = distance
             camera.azimuth = azimuth
@@ -227,7 +215,7 @@ def main():
         if encoder.wait() != 0:
             raise RuntimeError("ffmpeg failed")
     print(f"[orchard-mujoco] {args.video} ({args.frames} frames at 30 fps)")
-    print(m)
+    print(floor.metrics())
 
 
 if __name__ == "__main__":

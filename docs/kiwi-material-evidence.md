@@ -1,6 +1,6 @@
 # Kiwi physical properties: evidence for simulation
 
-Research checked 18 September 2026. This is a parameter-selection document, not a claim that the current simulator is calibrated. No simulation constants were changed by this research.
+Research checked 18 September 2026. This is a parameter-selection document, not a claim that the current simulator is calibrated. Implemented approximations are identified below; these are not joint calibration of the simulator.
 
 **Use cultivar- and condition-specific presets.** Harvest-ready fruit is not necessarily soft eating-ripe fruit. Geometry, stiffness, damage and stem detachment cannot be sampled independently without creating unrealistic fruit. Keep the source, cultivar, temperature, firmness, loading rate and contact geometry with each preset.
 
@@ -117,7 +117,36 @@ Above: [He et al.,2024](https://doi.org/10.4081/jae.2024.1640), §§Materials/Me
 
 For detachment itself, Mu2020Table1 reports **1.08–12.25N**, mean4.91N, pooled over angle tests; mean stalk length58.7mm in that separate sample. Its minimum force occurred near60° between fruit and stem axes. **This pooled range is not an angle-conditioned break law.**
 
-[Fang et al.,2023](https://doi.org/10.1016/j.compag.2023.108225) tests60–180° in five cultivars. Minimum detachment occurred at60° for Hayward/Xuxiang/Huayou,80° for Qinmei/Cuixiang; Xuxiang stems could break at160/180°. The numerical per-angle force table was not accessible. Verified kiwi-specific abscission torsional stiffness, failure torque, and fracture-energy ranges remain **unknown**. Cutting torque is not twisting-detachment torque.
+[Fang et al.,2023](https://doi.org/10.1016/j.compag.2023.108225) tests60–180° in five cultivars. Minimum detachment occurred at60° for Hayward/Xuxiang/Huayou,80° for Qinmei/Cuixiang; Xuxiang stems could break at160/180°. The user-supplied full paper is now available. The tests used 210 fruit (42 per
+cultivar), six fruit per angle, a 9 mm/s fixture pull, and fruit tested within
+four hours of harvest on 23 October 2022 in Zhouzhi, China. Fruit–stem angle is
+between the junction-to-fruit-tip vector and the junction-to-stem-anchor vector:
+a straight hanging fruit is 180 degrees.
+
+The implemented Hayward mean-force proxy uses the following points:
+
+| Angle degrees | Mean detachment force N | Evidence |
+|---:|---:|---|
+| 60 | 5.98 | Reported in text |
+| 80 | 6.3 | Approximate visual reading of Fig. 7 mean marker |
+| 100 | 13.8 | Approximate visual reading of Fig. 7 mean marker |
+| 120 | 21.3 | Approximate visual reading of Fig. 7 mean marker |
+| 140 | 30.7 | Approximate visual reading of Fig. 7 mean marker |
+| 160 | 40.27 | Reported in text |
+| 180 | 36.5 | Approximate visual reading of Fig. 7 mean marker |
+
+Intermediate readings have roughly 1 N digitization precision; their decimals
+are not raw experimental precision. Linear interpolation and clamping below
+60 degrees are **assumptions**. Only tensile load along the instantaneous stem
+axis triggers this rule. The default strength multiplier is one; changing it
+is an engineering sensitivity test, not a measured population distribution.
+The mean curve does not reproduce experimental variance, rate dependence,
+shear failure, torque failure or cultivar differences. This replaces the older
+Mu2020 pooled uniform-force sampling. Geometry, stem stiffness and detachment
+still come from different experimental populations.
+
+These forces are attachment loads, not safe jaw forces. The paper's preferred
+fixture angle does not prescribe the optimal motion for Spot's gripper. Verified kiwi-specific abscission torsional stiffness, failure torque, and fracture-energy ranges remain **unknown**. Cutting torque is not twisting-detachment torque.
 
 For a reduced model, use a bending/torsion-capable stalk connected at the fruit's actual stem site, with a separate breakable attachment. Derive beam EA/EI from stem geometry and tissue modulus if used; calibrate the break law separately. A COM spring cannot represent the correct moment arm or picking-angle response.
 

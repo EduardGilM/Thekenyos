@@ -18,7 +18,7 @@ for _ in range(100):
     sim.step()
 assert sim.apples.broken_count == 0, 'Detached under gravity at rest'
 height = float(sim.body_q_np()[body, 2])
-sim.set_external_force(body, force=(0,0,-20))
+sim.set_external_force(body, force=(0,0,-50))
 for _ in range(25):
     sim.step()
 assert sim.apples.broken_count == 1, 'Stem did not detach from actual load'
