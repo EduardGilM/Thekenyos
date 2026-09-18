@@ -90,6 +90,19 @@ Omit `--payload` to sample 0–6 kg using `--payload-seed`. The arm holds its re
 pose; random arm poses and payload-aware locomotion retraining are not complete.
 For a numerical run, replace the video options with `--no-render`.
 
+For CPU physics and policy inference, add `--device cpu` (the default is CUDA).
+With the local virtual environment, run:
+
+```bash
+.venv/bin/python scripts/walk_spot.py --device cpu --relic ../relic --basket --payload 6 \
+  --frames 600 --closeup --video output/spot-basket.mp4 \
+  --metrics output/spot-basket.json
+```
+
+The external RELIC checkout is still required. CPU stepping can be much slower
+than real time. Recording uses OpenGL and needs an available display/renderer,
+even with CPU physics; `--no-render` avoids that requirement for numerical runs.
+
 `--spill-test` applies a deliberate 400 N·m roll torque (`--spill-torque` overrides it) from 2.0 to 2.4 seconds. This is
 an adverse-motion test, not a learned behaviour. Each lost fruit receives one
 negative spill event. Contact damage is recorded separately and persists after
