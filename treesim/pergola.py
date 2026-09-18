@@ -72,7 +72,9 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
     previous_end = root
     for yi, y in enumerate(ys):
         if yi:
-            end_x = xs[-1] if direction > 0 else xs[0]
+            # Continue from the actual end of the previous row. The traversal
+            # direction has already flipped for this row.
+            end_x = segments[previous_end].end[0]
             previous_end = add(previous_end, [end_x, y, height], 0.025, 0)
         order = range(columns) if direction > 0 else range(columns - 1, -1, -1)
         nodes = []

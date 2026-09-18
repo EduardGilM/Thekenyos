@@ -78,6 +78,8 @@ class PergolaTest(unittest.TestCase):
         # Body independence needs a small fixture, not the full field default.
         cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        small = generate(cfg.lsystem)
+        self.assertTrue(all(s.length > 0 and np.isfinite(s.frame).all() for s in small))
         tree = builder.generate_and_build(cfg)
         self.assertEqual(len(tree.apple_bodies), 2)
         mass = tree.model.body_mass.numpy()[tree.apple_bodies]
