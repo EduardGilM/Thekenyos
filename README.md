@@ -15,7 +15,7 @@ coordination, maturity perception and automatic unloading come later.
 | Component | Current implementation |
 |---|---|
 | Pergola | Seeded 3 × 4 m bay, posts, wires, compliant canes and hanging fruit |
-| Orchard floor | Optional seeded heightfield: slope, pasillo/surco profile, noise and friction; posts and Spot sit on the sampled surface |
+| Orchard floor | Optional seeded heightfield: 2 m vine rows, grassed pasillos, bare surcos, slope, noise and friction; posts and Spot sit on the sampled surface |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -84,8 +84,8 @@ python scripts/grow_tree.py --preset pergola --foliage --terrain --seed 42 \
 
 The scene is built programmatically in Python; it is not a hand-authored pergola
 XML. Change geometry in `treesim/pergola.py`. Add `--terrain` to plant the bay
-on a 30 × 30 m kiwi orchard floor (aisles, planting furrows, sampled slope and
-noise). The native compression bench writes its own generated MuJoCo XML to its
+on a 30 × 30 m kiwi orchard floor (2 m vine rows, grassed aisles, bare planting
+strips, sampled slope and noise). The native compression bench writes its own generated MuJoCo XML to its
 output directory. A software-rendered orbit of the orchard floor (no GPU,
 no Spot gait) is:
 
@@ -165,8 +165,10 @@ known source inconsistencies and missing measurements.
   lower-leg collision hulls receive 1 mm thickness for native compatibility;
   the original body inertia is retained.
 - **Orchard floor:** `--terrain` on a pergola scene samples an assumed domain-
-  randomization heightfield (slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and
-  20–60 cm wide, friction 0.6–1.3). It is not a measured orchard-floor survey.
+  randomization heightfield (2 m vine rows, grassed pasillos, ~0.64 m bare
+  surcos, slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and 20–60 cm wide,
+  friction 0.6–1.3). It is an assumed compact layout, not a measured
+  orchard-floor survey.
   Apple `--terrain` remains the older value-noise field. Wet soil friction is
   still an explicit calibration gap.
 

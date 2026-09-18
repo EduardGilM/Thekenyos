@@ -255,7 +255,7 @@ every robot rides the bumps it appears to stand on.  Gentle by default (5 cm
 bumps, ~1.8 m wavelength) so the base stays driveable.
 
 Pergola scenes use a different floor: a seeded kiwi orchard heightfield with a
-pasillo/surco row profile, a sampled slope, high-frequency noise and a sampled
+2 m vine-row / surco spacing, grassed pasillos, bare planting strips, a sampled slope, high-frequency noise and a sampled
 foot–soil friction.  Posts and Spot are planted on the sampled surface; the
 canopy follows the slope plane 1.6 m above the aisle.  Ranges are assumed
 domain-randomization bounds, not a measured orchard-floor survey.

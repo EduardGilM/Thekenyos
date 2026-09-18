@@ -223,7 +223,7 @@ class PhysicsParams:
     # not a measured orchard-floor survey. Wet soil and liner friction remain
     # explicit calibration gaps.
     orchard_half_extent_m: float = 15.0
-    orchard_row_pitch_m: float = 3.0   # matches the 3 m bay; surcos on post lines
+    orchard_row_pitch_m: float = 2.0   # vine-row / surco spacing; aisle stays on bay centre
     orchard_cell_m: float = 0.05
     orchard_slope_deg: tuple = (-4.0, 4.0)
     orchard_noise_m: tuple = (0.0, 0.04)

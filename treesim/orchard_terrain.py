@@ -1,4 +1,4 @@
-"""Seeded kiwi orchard floor: aisles, planting furrows, slope and noise.
+"""Seeded kiwi orchard floor: grassed aisles and closer planting strips.
 
 The heightfield is generated in Python and added as one Newton static shape.
 It is not a MuJoCo ``terrain.png`` asset. Apple ``--terrain`` keeps the older
@@ -12,8 +12,11 @@ Structured profile (engineering layout, not a surveyed block)::
               pasillo   surco    pasillo
     ------------------------------------- x
 
-Sampled per seed, assumed domain-randomization ranges (not one measured
-orchard-floor survey):
+Row pitch defaults to 2.0 m so neighbouring vine strips read as a compact
+worked block; the 3 m bay still has its pasillo on centre for Spot. This is
+tighter than a typical commercial pergola (often ~4–5 m) and is an assumed
+layout, not a measured Hayward-block survey. Sampled per seed, assumed
+domain-randomization ranges:
 
 * ``slope_deg`` U(-4, +4)
 * ``ground_noise_m`` U(0, 0.04)
@@ -21,9 +24,6 @@ orchard-floor survey):
 * ``rut_width_m`` U(0.20, 0.60)
 * ``friction`` U(0.6, 1.3)  — robot-foot vs dry soil/grass proxy; wet and
   liner friction stay explicit calibration gaps.
-
-Row pitch defaults to 3 m so a surco sits on the pergola post lines
-(x = ±1.5 m) and the bay centre remains a pasillo for Spot.
 """
 from __future__ import annotations
 
@@ -40,7 +40,17 @@ GROUND_CLEARANCE_M = 0.004
 AISLE_HEIGHT_M = 0.04
 AISLE_NOISE_SCALE = 0.35
 WHEEL_RUT_FRACTION = 0.35
-RIDGE_FRACTION = 0.50
+DEFAULT_ROW_PITCH_M = 2.0
+# Visual herbicide/cultivated strip under the vine row (assumed look).
+# Narrower than the grass alley so the block reads as sod with vine rows,
+# not equal green/brown bars. ~0.64 m of bare earth at 2 m pitch.
+PLANTING_STRIP_HALF_M = 0.32
+PLANTING_STRIP_EDGE_M = 0.08
+APPEARANCE_CELL_M = 0.025
+# Visual-only colours (engineering look, not a photographed block).
+GRASS_COLOR = (0.22, 0.30, 0.11)
+SOIL_COLOR = (0.44, 0.29, 0.15)
+FURROW_COLOR = (0.22, 0.14, 0.07)
 
 
 def _as_range(value, default, name: str) -> tuple[float, float]:
@@ -100,29 +110,115 @@ def _value_noise(rng: np.random.Generator, x: np.ndarray, y: np.ndarray,
     return field
 
 
+def _row_coords(x_m: np.ndarray, pitch_m: float) -> tuple[np.ndarray, np.ndarray]:
+    u = np.mod(x_m + 0.5 * pitch_m, pitch_m) - 0.5 * pitch_m
+    return u, 0.5 * pitch_m - np.abs(u)
+
+
 def _row_relief(x_m: np.ndarray, pitch_m: float, rut_width_m: float,
                 rut_depth_m: float) -> np.ndarray:
-    """Pasillo at k * pitch; ridge-furrow-ridge surco at the mid-pitch lines."""
-    u = np.mod(x_m + 0.5 * pitch_m, pitch_m) - 0.5 * pitch_m
-    dist_row = 0.5 * pitch_m - np.abs(u)
-    sigma_f = 0.28 * rut_width_m + 1e-6
-    sigma_r = 0.22 * rut_width_m + 1e-6
-    furrow = -rut_depth_m * np.exp(-0.5 * (dist_row / sigma_f) ** 2)
-    dist_ridge = np.abs(dist_row - 0.55 * rut_width_m)
-    ridge = RIDGE_FRACTION * rut_depth_m * np.exp(-0.5 * (dist_ridge / sigma_r) ** 2)
-    track = min(1.15, 0.38 * pitch_m)
-    sigma_t = 0.22 * rut_width_m + 1e-6
-    wheels = np.zeros_like(u)
+    """Pasillo on the pitch centres; shallow cultivated trough between.
+
+    The trough is a worked planting strip, not a plough V. Aisle stays
+    nearly flat aside from a small drainage crown and wheel tracks.
+    """
+    u, dist_row = _row_coords(x_m, pitch_m)
+    width = max(float(rut_width_m), 1e-6)
+    half = 0.5 * pitch_m
+    trough_half = float(np.clip(0.55 * width, 0.12, 0.32))
+    shoulder = float(np.clip(0.28 * width, 0.08, 0.18))
+    knots_d = np.array([0.0, trough_half, trough_half + shoulder,
+                        trough_half + shoulder + 0.14, half])
+    knots_z = np.array([-rut_depth_m, -0.85 * rut_depth_m,
+                        0.08 * rut_depth_m, 0.0, 0.0])
+    relief = np.interp(dist_row, knots_d, knots_z)
+    relief += 0.008 * np.clip(1.0 - (np.abs(u) / (0.32 * pitch_m + 1e-9)) ** 2, 0.0, 1.0)
+    track = min(0.42, 0.22 * pitch_m)
+    track_half = 0.11
     for side in (-1.0, 1.0):
-        wheels += (-WHEEL_RUT_FRACTION * rut_depth_m
-                   * np.exp(-0.5 * ((u - side * track) / sigma_t) ** 2))
-    crown = 0.01 * np.clip(1.0 - (np.abs(u) / (0.40 * pitch_m + 1e-9)) ** 2, 0.0, 1.0)
-    return furrow + ridge + wheels + crown
+        dist = np.abs(u - side * track)
+        relief -= (WHEEL_RUT_FRACTION * rut_depth_m
+                   * np.clip(1.0 - dist / track_half, 0.0, 1.0) ** 2)
+    return relief
 
 
-def _aisle_weight(x_m: np.ndarray, pitch_m: float) -> np.ndarray:
-    u = np.mod(x_m + 0.5 * pitch_m, pitch_m) - 0.5 * pitch_m
-    return np.clip(1.0 - (np.abs(u) / (0.38 * pitch_m + 1e-9)), 0.0, 1.0)
+def _aisle_weight(x_m: np.ndarray, pitch_m: float, rut_width_m: float) -> np.ndarray:
+    """Physical aisle mask used to damp height noise on the walking strip."""
+    _, dist_row = _row_coords(x_m, pitch_m)
+    soil = float(np.clip(0.30 * rut_width_m + 0.42 * rut_width_m + 0.10, 0.22, 0.55))
+    return np.clip((dist_row - 0.6 * soil) / (0.40 * soil + 1e-9), 0.0, 1.0)
+
+
+def _planting_strip_weight(x_m: np.ndarray, pitch_m: float,
+                           edge_noise: np.ndarray | float = 0.0) -> np.ndarray:
+    """Visual cultivated strip under the vine row (wider than the physical rut)."""
+    _, dist_row = _row_coords(x_m, pitch_m)
+    half = PLANTING_STRIP_HALF_M + np.asarray(edge_noise)
+    edge = PLANTING_STRIP_EDGE_M
+    return np.clip((half + 0.5 * edge - dist_row) / edge, 0.0, 1.0)
+
+
+def _appearance_rgb(x: np.ndarray, y: np.ndarray, xx: np.ndarray, yy: np.ndarray,
+                    pitch_m: float, meander: np.ndarray, rut_width_m: float,
+                    extent_m: float, rng: np.random.Generator) -> np.ndarray:
+    """Mottled grass alleys and irregular bare vine-row earth.
+
+    Rows stay on the pitch (no lockstep sine, which reads as fabric). Edges
+    wander with noise. The bare strip is an assumed herbicide/cultivated
+    band, not a photographed spray line. ``rut_width_m`` is unused in the
+    colour mix; kept so call sites can pass the sampled value.
+    """
+    del rut_width_m
+    x_eff = xx - meander
+    u, dist_row = _row_coords(x_eff, pitch_m)
+    clump = _value_noise(rng, x, y, extent_m, wavelength_m=1.20)
+    grit = _value_noise(rng, x, y, extent_m, wavelength_m=0.24)
+    patch = _value_noise(rng, x, y, extent_m, wavelength_m=2.80)
+    broad = _value_noise(rng, x, y, extent_m, wavelength_m=6.50)
+    speck = _value_noise(rng, x, y, extent_m, wavelength_m=0.11)
+    edge = 0.18 * (2.0 * _value_noise(rng, x, y, extent_m, wavelength_m=2.20) - 1.0)
+    soil = np.clip(_planting_strip_weight(x_eff, pitch_m, edge), 0.0, 1.0)
+    weed_w = np.clip((patch - 0.82) / 0.18, 0.0, 1.0) * np.clip((clump - 0.58) / 0.32, 0.0, 1.0)
+    soil = np.clip(soil * (1.0 - 0.50 * weed_w * soil), 0.0, 1.0)
+    scar_w = (1.0 - clump) ** 2 * patch * (1.0 - soil)
+    soil = np.clip(soil + 0.22 * scar_w, 0.0, 1.0)
+    grass = 1.0 - soil
+
+    dark = np.array([0.13, 0.24, 0.07])
+    light = np.array([0.33, 0.50, 0.16])
+    dry_col = np.array([0.40, 0.35, 0.15])
+    t = np.clip(0.40 * clump + 0.35 * broad + 0.25 * patch, 0.0, 1.0)
+    grass_col = (1.0 - t)[..., None] * dark + t[..., None] * light
+    grass_col = grass_col * (0.88 + 0.16 * grit[..., None] + 0.12 * speck[..., None])
+    dry_w = np.clip((broad - 0.55) / 0.40, 0.0, 1.0) * np.clip((patch - 0.50) / 0.40, 0.0, 1.0) * grass * 0.35
+    grass_col = grass_col * (1.0 - dry_w)[..., None] + dry_w[..., None] * dry_col
+
+    wet = np.array([0.20, 0.12, 0.06])
+    loam = np.array([0.48, 0.30, 0.15])
+    dust = np.array([0.60, 0.40, 0.20])
+    s = np.clip(0.45 * grit + 0.35 * patch + 0.20 * broad, 0.0, 1.0)
+    soil_col = (1.0 - s)[..., None] * wet + s[..., None] * dust
+    soil_col = soil_col * (0.90 + 0.20 * speck[..., None]) + 0.08 * loam
+    furrow_w = np.clip(1.0 - dist_row / 0.26, 0.0, 1.0) ** 1.4
+    soil_col = soil_col * (1.0 - 0.40 * furrow_w)[..., None] + furrow_w[..., None] * wet
+
+    # RGB lerp of green+brown goes khaki; route the blend through a dark edge.
+    edge_col = np.array([0.18, 0.16, 0.07])
+    w = np.clip(soil, 0.0, 1.0)
+    rgb = np.empty(xx.shape + (3,))
+    low = w < 0.5
+    hi = ~low
+    t_low = (2.0 * w)[..., None]
+    t_hi = (2.0 * w - 1.0)[..., None]
+    rgb[low] = (1.0 - t_low[low]) * grass_col[low] + t_low[low] * edge_col
+    rgb[hi] = (1.0 - t_hi[hi]) * edge_col + t_hi[hi] * soil_col[hi]
+    track = min(0.42, 0.22 * pitch_m)
+    for side in (-1.0, 1.0):
+        worn = np.clip(1.0 - np.abs(u - side * track) / 0.15, 0.0, 1.0) ** 1.6
+        worn = worn * (0.25 + 0.75 * grit) * grass
+        rgb = rgb * (1.0 - 0.18 * worn)[..., None] + worn[..., None] * np.array(
+            [0.34, 0.27, 0.13])
+    return np.clip(rgb, 0.0, 1.0)
 
 
 @dataclass
@@ -138,6 +234,8 @@ class OrchardFloor:
     reference_z_m: float
     slope_deg: float
     slope_azimuth_rad: float
+    colors_rgb: np.ndarray = None
+    soil_weight: np.ndarray = None
     sampled: dict = field(default_factory=dict)
 
     @property
@@ -175,6 +273,23 @@ class OrchardFloor:
         return float((g[i0, j0] * (1.0 - fu) + g[i0, j1] * fu) * (1.0 - fv)
                      + (g[i1, j0] * (1.0 - fu) + g[i1, j1] * fu) * fv)
 
+    def color_at(self, x, y) -> np.ndarray:
+        """Bilinear sample of the grass/soil map in world metres."""
+        rgb = np.asarray(self.colors_rgb, dtype=np.float64)
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError("colors_rgb must be an (nrow, ncol, 3) map")
+        nr, nc = rgb.shape[:2]
+        span = 2.0 * self.half_extent_m
+        u = (float(x) + self.half_extent_m) / span * (nc - 1)
+        v = (float(y) + self.half_extent_m) / span * (nr - 1)
+        u = float(np.clip(u, 0.0, nc - 1))
+        v = float(np.clip(v, 0.0, nr - 1))
+        j0, i0 = int(np.floor(u)), int(np.floor(v))
+        j1, i1 = min(j0 + 1, nc - 1), min(i0 + 1, nr - 1)
+        fu, fv = u - j0, v - i0
+        return ((rgb[i0, j0] * (1.0 - fu) + rgb[i0, j1] * fu) * (1.0 - fv)
+                + (rgb[i1, j0] * (1.0 - fu) + rgb[i1, j1] * fu) * fv)
+
     def metrics(self) -> dict:
         out = dict(self.sampled)
         out.update(
@@ -185,6 +300,18 @@ class OrchardFloor:
                         "orchard-floor survey"),
         )
         return out
+
+    def texture_png_bytes(self) -> bytes:
+        """RGB PNG of the grass/soil map, origin at the south-west corner."""
+        from io import BytesIO
+        from PIL import Image
+        rgb = np.asarray(self.colors_rgb, dtype=np.float64)
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError("colors_rgb must be an (nrow, ncol, 3) map")
+        pixels = np.clip(np.flipud(rgb) * 255.0, 0, 255).astype(np.uint8)
+        buf = BytesIO()
+        Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
+        return buf.getvalue()
 
 
 def sample_orchard_floor(seed: int = 0, params=None, *,
@@ -208,7 +335,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         half_extent_m if half_extent_m is not None else getattr(ph, "orchard_half_extent_m", 15.0))
     row_pitch_m = _validate_positive(
         "row_pitch_m",
-        row_pitch_m if row_pitch_m is not None else getattr(ph, "orchard_row_pitch_m", 3.0))
+        row_pitch_m if row_pitch_m is not None else getattr(ph, "orchard_row_pitch_m", DEFAULT_ROW_PITCH_M))
     cell_m = _validate_positive(
         "cell_m",
         cell_m if cell_m is not None else getattr(ph, "orchard_cell_m", 0.05))
@@ -253,21 +380,19 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     y = np.linspace(-half_extent_m, half_extent_m, n)
     xx, yy = np.meshgrid(x, y)
 
-    phase = float(rng.uniform(0.0, 2.0 * np.pi))
-    meander = 0.12 * np.sin(2.0 * np.pi * yy / 7.0 + phase)
-    relief = _row_relief(xx - meander, row_pitch_m, max(rut_width, 1e-6), rut_depth)
+    # Rows stay on the pitch. A shared sine meander shears the block like fabric.
+    relief = _row_relief(xx, row_pitch_m, max(rut_width, 1e-6), rut_depth)
     angle = np.radians(slope)
     az = np.radians(azimuth_deg)
     plane = np.tan(angle) * (xx * np.cos(az) + yy * np.sin(az))
     noise = _value_noise(rng, x, y, half_extent_m, wavelength_m=1.8)
-    aisle = _aisle_weight(xx - meander, row_pitch_m)
+    aisle = _aisle_weight(xx, row_pitch_m, max(rut_width, 1e-6))
     noise_m_field = noise_amp * noise * (AISLE_NOISE_SCALE * aisle + (1.0 - aisle))
     heights = AISLE_HEIGHT_M + relief + plane + noise_m_field
 
     for px, py in PERGOLA_POST_XY_M:
         r = np.hypot(xx - px, yy - py)
         pad = np.clip((POST_PAD_RADIUS_M - r) / 0.12, 0.0, 1.0)
-        # Sample the unpadded height at the post, then flatten the disc to it.
         iu = int(np.clip(round((px + half_extent_m) / (2.0 * half_extent_m) * (n - 1)), 0, n - 1))
         iv = int(np.clip(round((py + half_extent_m) / (2.0 * half_extent_m) * (n - 1)), 0, n - 1))
         z_post = float(heights[iv, iu])
@@ -276,6 +401,16 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     lift = GROUND_CLEARANCE_M - float(heights.min())
     heights = heights + lift
     reference_z = AISLE_HEIGHT_M + lift
+
+    n_tex = int(round(2.0 * half_extent_m / APPEARANCE_CELL_M)) + 1
+    n_tex = max(n_tex, n)
+    xt = np.linspace(-half_extent_m, half_extent_m, n_tex)
+    yt = np.linspace(-half_extent_m, half_extent_m, n_tex)
+    xxt, yyt = np.meshgrid(xt, yt)
+    look = np.random.default_rng((seed * 2654435761 + 17) & 0x7FFFFFFF)
+    colors = _appearance_rgb(xt, yt, xxt, yyt, row_pitch_m, 0.0,
+                             max(rut_width, 1e-6), half_extent_m, look)
+    soil = _planting_strip_weight(xx, row_pitch_m, 0.0)
 
     sampled = dict(
         slope_deg=slope,
@@ -287,6 +422,8 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         half_extent_m=float(half_extent_m),
         row_pitch_m=float(row_pitch_m),
         cell_m=float(cell_m),
+        appearance_cell_m=float(APPEARANCE_CELL_M),
+        planting_strip_half_m=float(PLANTING_STRIP_HALF_M),
         aisle_height_m=AISLE_HEIGHT_M,
         canopy_height_m=float(canopy_height_m),
         post_embed_m=POST_EMBED_M,
@@ -296,12 +433,40 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         heights_m=heights.astype(np.float64),
         x_m=x, y_m=y, half_extent_m=float(half_extent_m), friction=mu,
         canopy_height_m=float(canopy_height_m), reference_z_m=float(reference_z),
-        slope_deg=slope, slope_azimuth_rad=az, sampled=sampled,
+        slope_deg=slope, slope_azimuth_rad=az,
+        colors_rgb=colors.astype(np.float64), soil_weight=soil.astype(np.float64),
+        sampled=sampled,
     )
 
 
+def visual_meshes(floor: OrchardFloor, stride: int = 2):
+    """Collision-free triangle meshes: grass alleys, vine-row soil, furrow."""
+    stride = max(int(stride), 1)
+    z = np.asarray(floor.heights_m, dtype=np.float64)[::stride, ::stride]
+    soil = np.asarray(floor.soil_weight, dtype=np.float64)[::stride, ::stride]
+    x = np.asarray(floor.x_m, dtype=np.float64)[::stride]
+    y = np.asarray(floor.y_m, dtype=np.float64)[::stride]
+    ny, nx = z.shape
+    xx, yy = np.meshgrid(x, y)
+    verts = np.stack([xx.ravel(), yy.ravel(), z.ravel() + 0.002], axis=1).astype(np.float32)
+    faces = {0: [], 1: [], 2: []}
+    for i in range(ny - 1):
+        for j in range(nx - 1):
+            weight = 0.25 * (soil[i, j] + soil[i, j + 1] + soil[i + 1, j] + soil[i + 1, j + 1])
+            kind = 0 if weight < 0.28 else (2 if weight > 0.72 else 1)
+            a = i * nx + j
+            faces[kind].extend((a, a + 1, a + nx, a + 1, a + nx + 1, a + nx))
+    colors = (GRASS_COLOR, SOIL_COLOR, FURROW_COLOR)
+    out = []
+    for kind, color in enumerate(colors):
+        idx = np.asarray(faces[kind], dtype=np.int32)
+        if idx.size:
+            out.append((verts, idx, color))
+    return out
+
+
 def add_to_builder(builder, floor: OrchardFloor):
-    """Add the orchard heightfield as one global static Newton shape."""
+    """Add the orchard heightfield plus a grass/soil visual mesh."""
     import newton
     import warp as wp
 
@@ -318,9 +483,18 @@ def add_to_builder(builder, floor: OrchardFloor):
     builder.add_shape_heightfield(
         heightfield=hf,
         xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
-        cfg=builder.ShapeConfig(mu=float(floor.friction), restitution=0.0, collision_group=1),
-        color=(0.36, 0.42, 0.22), label="orchard_ground",
+        cfg=builder.ShapeConfig(mu=float(floor.friction), restitution=0.0,
+                                collision_group=1, is_visible=False),
+        color=GRASS_COLOR, label="orchard_ground",
     )
+    visual = builder.ShapeConfig(density=0.0, has_shape_collision=False,
+                                 has_particle_collision=False)
+    for i, (verts, faces, color) in enumerate(visual_meshes(floor)):
+        mesh = newton.Mesh(verts, faces)
+        builder.add_shape_mesh(
+            -1, mesh=mesh, cfg=visual, color=color,
+            label=("orchard_grass", "orchard_soil", "orchard_furrow")[i],
+        )
     return floor.ground_z
 
 

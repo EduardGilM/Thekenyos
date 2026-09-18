@@ -38,15 +38,25 @@ class OrchardTerrainTest(unittest.TestCase):
         self.assertIn("assumed", m["provenance"])
 
         floor = _pinned()
+        pitch = floor.sampled["row_pitch_m"]
+        self.assertAlmostEqual(pitch, 2.0)
         aisle = floor.ground_z(0.0, 0.0)
-        furrow = floor.ground_z(1.5, 0.0)
-        ridge = max(floor.ground_z(x, 0.0) for x in np.linspace(0.9, 1.45, 12))
+        furrow = floor.ground_z(0.5 * pitch, 0.0)
+        ridge = max(floor.ground_z(x, 0.0) for x in np.linspace(0.45, 0.90, 12))
         self.assertGreater(aisle, furrow)
         self.assertGreater(ridge, furrow)
         self.assertLess(aisle - furrow, 0.08 + AISLE_HEIGHT_M)
-        # Pasillo stays the higher walking strip; the surco is the dip at x=±1.5.
-        self.assertAlmostEqual(floor.ground_z(-1.5, 1.0),
-                               floor.ground_z(1.5, 1.0), places=2)
+        # Neighbouring vine rows stay symmetric about the bay centre.
+        self.assertAlmostEqual(floor.ground_z(-0.5 * pitch, 1.0),
+                               floor.ground_z(0.5 * pitch, 1.0), places=2)
+        # Grass alleys stay greener than the bare planting strip.
+        aisle_rgb = floor.color_at(0.0, 0.0)
+        soil_rgb = floor.color_at(0.5 * pitch, 0.0)
+        self.assertGreater(aisle_rgb[1] - aisle_rgb[0], soil_rgb[1] - soil_rgb[0])
+        # The cultivated strip is a band, not a hairline: 15 cm off the
+        # furrow is still more soil-like than the aisle centre.
+        near_rgb = floor.color_at(0.5 * pitch - 0.15, 0.0)
+        self.assertGreater(aisle_rgb[1] - aisle_rgb[0], near_rgb[1] - near_rgb[0])
 
     def test_slope_plane_and_canopy(self):
         floor = _pinned(slope_deg=2.0, rut_depth_m=0.0, noise_m=0.0)
