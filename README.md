@@ -86,7 +86,12 @@ The scene is built programmatically in Python; it is not a hand-authored pergola
 XML. Change geometry in `treesim/pergola.py`. Add `--terrain` to plant the bay
 on a 30 × 30 m kiwi orchard floor (aisles, planting furrows, sampled slope and
 noise). The native compression bench writes its own generated MuJoCo XML to its
-output directory.
+output directory. A software-rendered orbit of the orchard floor (no GPU,
+no Spot gait) is:
+
+```bash
+python scripts/record_orchard_mujoco.py --seed 42 --video output/orchard-mujoco.mp4
+```
 
 ### Spot with a loaded basket
 
@@ -226,6 +231,7 @@ only after the native material and contact benchmarks agree with measurements.
 | `treesim/spot.py` | URDF import, observation mapping, policy and PD control |
 | `treesim/sim.py` | Solver and stepping integration |
 | `scripts/walk_spot.py` | Loaded walking and spill recordings |
+| `scripts/record_orchard_mujoco.py` | Native MuJoCo orbit of the orchard heightfield |
 | `scripts/kiwi_compression.py` | Native MuJoCo material bench |
 | `tests/` | Fast geometry, mass, independence and event checks |
 | `docs/kiwi-material-evidence.md` | Research sources and calibration gaps |
