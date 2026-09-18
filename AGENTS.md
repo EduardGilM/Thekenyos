@@ -72,6 +72,12 @@ For the reach/grasp pilot, retain matched-seed untrained/trained evaluations
 with guidance off. Keep failed contact cases and native crashes in the report;
 model disagreement permits only a labelled diagnostic rigid pilot. CPU contact
 adapter changes require `check_harvest_env.py --device cpu` at both timesteps.
+Whole-hand contacts require `check_hand_contacts.py`: a force on one jaw does
+not prove collision coverage of the palm, opposite jaw or teeth. Preserve the
+independent geometric intersection check and the archived failed-pilot replay.
+The CPU native-contact midphase bypass is a pinned-stack workaround; do not
+remove it without passing coverage and dynamic checks. GPU equivalence and
+calibrated deformable fruit remain gates before further harvesting training.
 
 Show the user a video when a useful visual milestone is ready. Label scripted
 motions, pretrained inference and learned behaviour accurately. Report what

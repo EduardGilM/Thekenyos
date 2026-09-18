@@ -25,7 +25,7 @@ coordination, maturity perception and automatic unloading come later.
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
 | Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
 | RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
-| RL training | Short local reach/grasp PPO pilot completed; zero stable grasps on 8 held-out seeds. No full harvesting policy |
+| RL training | Earlier diagnostic pilot used faulty CPU hand collision filtering; checkpoint retained for regression only. Training paused for physics validation |
 
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
 bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
@@ -311,6 +311,35 @@ terrain/physics suite has 22 passing tests and one expected CPU-host check
 skipped on the NVIDIA workstation.
 
 ### Spot jaw benchmark, 19 September 2026
+
+The integrated CPU pilot exposed a separate collision-discovery bug: the
+converted model's MuJoCo midphase skipped the front jaw and tooth, allowing
+27.5 mm overlap with the fruit. A nonzero load on another jaw section did not
+establish whole-hand collision correctness. The CPU native-contact path now
+bypasses that optimization and retains the original collision masks and native
+narrowphase. Hand/fruit contact solver settings match the native bench
+(`solref=.004 1`, `solimp=.95 .99 .001 .5 2`); these are numerical settings,
+not measured tissue compliance. The GPU path is unchanged and needs its own
+equivalent coverage check before training resumes.
+
+```bash
+python scripts/check_hand_contacts.py --relic ../relic
+# Optional: replay the archived failed pilot, without training.
+python scripts/check_hand_contacts.py --relic ../relic \
+  --policy output/reach-grasp-pilot/policy.zip
+python scripts/check_hand_contacts.py --relic ../relic --physics-hz 2000 \
+  --policy output/reach-grasp-pilot/policy.zip \
+  --output output/hand-contacts-halfstep.json
+```
+
+The check probes all eight hand collision meshes and cross-checks collision
+discovery against an independent ellipsoid/convex-mesh intersection test.
+Its penetrating static fixtures are never stepped. The archived-policy replay
+checks every physics step, with no fruit pose edits or artificial attachment.
+At 1 and 0.5 ms the corrected replay has no missed overlapping pairs and
+about 0.43/0.41 mm maximum penetration; the fruit moves about 40 mm.
+The policy still fails through a forbidden collision. These results establish
+this collision regression, not successful harvesting or accurate soft tissue.
 
 | Model / torque | Result in this fixture |
 |---|---|

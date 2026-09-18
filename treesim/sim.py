@@ -51,12 +51,33 @@ def _make_solver(name, model, *, collisions, iterations, ls_iterations,
         # Kiwi uses native contacts: external Newton ellipsoid contacts failed
         # the stationary-basket retention regression.
         algo_i = {"cg": 1, "newton": 2}.get(str(algo).lower(), 1)
-        return newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
+        solver = newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
                                            use_mujoco_cpu=model.device.is_cpu,
                                            use_mujoco_contacts=native_contacts if collisions else True,
                                            solver=algo_i,
                                            nconmax=nconmax if collisions else None,
                                            njmax=max(8192, nconmax*4) if collisions else 1024)
+        if model.device.is_cpu and native_contacts and collisions:
+            import mujoco
+            # The pinned Newton conversion leaves CPU midphase bounds that
+            # miss Spot jaw meshes: direct geom distance found 28 mm overlap
+            # while mj_collision omitted the pair. Bypass that optimization;
+            # retain native narrowphase and the original collision masks.
+            # See check_hand_contacts.py. Do not use missed contacts as training
+            # data or substitute contact softness for tissue deformation.
+            solver.mj_model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_MIDPHASE)
+            # Match the native gripper bench's numerical contact response.
+            # These are solver settings, NOT kiwi tissue material parameters.
+            mapping = solver.mjc_geom_to_newton_shape.numpy()[0]
+            bodies = model.shape_body.numpy()
+            for geom, shape in enumerate(mapping):
+                if shape < 0 or bodies[shape] < 0:
+                    continue
+                label = model.body_label[bodies[shape]].rsplit('/', 1)[-1]
+                if label.startswith('apple') or label in ('arm_link_wr1', 'arm_link_jaw', 'arm_link_fngr'):
+                    solver.mj_model.geom_solref[geom] = [.004, 1.]
+                    solver.mj_model.geom_solimp[geom] = [.95, .99, .001, .5, 2.]
+        return solver
     if name == "featherstone":
         return newton.solvers.SolverFeatherstone(model)
     if name == "semiimplicit":

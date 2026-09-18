@@ -195,6 +195,14 @@ pilot** when rigid/deformable transfer fails. This is not a production gate pass
 
 ### Results, 19 September 2026
 
+**The original PPO results below are historical diagnostics, not a valid
+physics baseline.** Whole-hand inspection later found that CPU midphase
+filtering omitted front-jaw contacts and allowed 27.5 mm fruit penetration.
+The corrected CPU replay detects those contacts; it does not make the old
+policy a successful picker. Keep that checkpoint for regression only. Complete
+whole-hand collision coverage, deformation calibration and backend agreement
+before resuming training. See `scripts/check_hand_contacts.py` and the README.
+
 13 contact cases cover centred fruit, ±4 mm offsets, 15° tilt, two torque
 settings and three half-timestep checks. At 0.3 N·m, centred rigid fruit fails
 the hold/release check while deformable fruit passes. At −4 mm the result
