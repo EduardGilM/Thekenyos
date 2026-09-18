@@ -15,6 +15,7 @@ coordination, maturity perception and automatic unloading come later.
 | Component | Current implementation |
 |---|---|
 | Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, compliant canes and hanging fruit |
+| Orchard floor | Optional seeded heightfield: grassed pasillos, bare surcos, slope, noise and friction; posts and Spot sit on the sampled surface |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -76,14 +77,41 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
+Plant the same bay on the orchard floor:
+
+```bash
+python scripts/grow_tree.py --preset pergola --foliage --terrain --seed 42 \
+  --collisions --substeps 40 --viewer gl
+```
+
 The scene is built programmatically in Python; it is not a hand-authored pergola
 XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
 4.3 hectares. Use `--pergola-rows`, `--pergola-columns`, and
 `--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
 enabled by default for this preset, while `--foliage-density 0` disables it.
 Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
-the plantation). Change geometry in `treesim/pergola.py`. The native compression bench
-writes its own generated MuJoCo XML to its output directory.
+the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` to
+plant the grid on a kiwi orchard floor (grassed aisles, bare planting strips,
+sampled slope and noise). The native compression bench writes its own generated
+MuJoCo XML to its output directory.
+
+On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
+render-only foliage). This is a scripted flyover, not Spot gait. The flag
+refuses a CPU fallback:
+
+```bash
+python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
+  --video output/orchard-mujoco.mp4
+```
+
+Newton GL with foliage is a separate viewer. A 4 GB card should crop the
+grid; a larger NVIDIA GPU can keep the commercial default:
+
+```bash
+python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
+  --preset pergola --terrain --foliage --seed 42 --frames 600 \
+  --pergola-rows 5 --pergola-columns 4
+```
 
 ### Spot with a loaded basket
 
@@ -93,9 +121,17 @@ python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --metrics output/spot-basket.json
 ```
 
-Omit `--payload` to sample 0–6 kg using `--payload-seed`. The arm holds its ready
-pose; random arm poses and payload-aware locomotion retraining are not complete.
-For a numerical run, replace the video options with `--no-render`.
+Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add `--terrain` to walk
+the same scripted oval on the orchard floor; sampled slope, rut, noise and
+friction are written into the metrics JSON. The pretrained gait was not trained
+on this surface. The arm holds its ready pose; random arm poses and payload-aware
+locomotion retraining are not complete. For a numerical run, replace the video
+options with `--no-render`.
+
+```bash
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain \
+  --frames 600 --video output/spot-orchard.mp4 --metrics output/spot-orchard.json
+```
 
 `--spill-test` applies a deliberate 400 N·m roll torque (`--spill-torque` overrides it) from 2.0 to 2.4 seconds. This is
 an adverse-motion test, not a learned behaviour. Each lost fruit receives one
@@ -194,6 +230,13 @@ known source inconsistencies and missing measurements.
   collision path allowed a fruit to escape a stationary basket. Planar Spot
   lower-leg collision hulls receive 1 mm thickness for native compatibility;
   the original body inertia is retained.
+- **Orchard floor:** `--terrain` on a pergola scene samples an assumed domain-
+  randomization heightfield (2 m vine rows, grassed pasillos, ~0.64 m bare
+  surcos, slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and 20–60 cm wide,
+  friction 0.6–1.3). It is an assumed compact layout, not a measured
+  orchard-floor survey.
+  Apple `--terrain` remains the older value-noise field. Wet soil friction is
+  still an explicit calibration gap.
 
 ## Validate a change
 
@@ -283,6 +326,7 @@ only after the native material and contact benchmarks agree with measurements.
 | Path | Purpose |
 |---|---|
 | `treesim/pergola.py` | Procedural structure and fruit placement |
+| `treesim/orchard_terrain.py` | Seeded kiwi orchard floor (aisles, furrows, slope, noise) |
 | `treesim/kiwi_material.py` | Source-backed constants, geometry sampler, damage helper |
 | `treesim/harvest_task.py` | Task contract, privileged oracle and simulator measurement bridge |
 | `treesim/kiwi.py` | Stem dynamics and GPU contact damage diagnostics |
@@ -290,6 +334,7 @@ only after the native material and contact benchmarks agree with measurements.
 | `treesim/spot.py` | URDF import, observation mapping, policy and PD control |
 | `treesim/sim.py` | Solver and stepping integration |
 | `scripts/walk_spot.py` | Loaded walking and spill recordings |
+| `scripts/record_orchard_mujoco.py` | Native MuJoCo orbit of the orchard heightfield |
 | `scripts/kiwi_compression.py` | Native MuJoCo material bench |
 | `tests/` | Fast geometry, mass, independence and event checks |
 | `docs/kiwi-material-evidence.md` | Research sources and calibration gaps |

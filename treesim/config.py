@@ -226,6 +226,18 @@ class PhysicsParams:
     terrain_amplitude: float = 0.03    # max bump height [m] (orchard alley ~1-3 cm)
     terrain_wavelength: float = 1.8    # dominant bump size [m]
     terrain_extent: float = 14.0       # half-extent of the field [m]
+    # Kiwi orchard floor (pergola + terrain=True). Apple --terrain keeps the
+    # value-noise field above. Ranges are assumed domain-randomization bounds,
+    # not a measured orchard-floor survey. Wet soil and liner friction remain
+    # explicit calibration gaps.
+    orchard_half_extent_m: float = 15.0
+    orchard_row_pitch_m: float = 2.0   # vine-row / surco spacing; aisle stays on bay centre
+    orchard_cell_m: float = 0.05
+    orchard_slope_deg: tuple = (-4.0, 4.0)
+    orchard_noise_m: tuple = (0.0, 0.04)
+    orchard_rut_depth_m: tuple = (0.0, 0.08)
+    orchard_rut_width_m: tuple = (0.20, 0.60)
+    orchard_friction: tuple = (0.6, 1.3)
     # Soft velocity limiter (anti-blowup): bodies faster than this get a strong
     # braking force (inactive below the caps, so normal physics is untouched).
     # This is what stops a pick-clamp-scale yank on a 5 g twig (the viewer
@@ -474,6 +486,7 @@ class RobotParams:
     """
     enabled: bool = False
     position: tuple = (2.4, 0.0)       # base spawn in the env's local frame [m]
+    base_z: float = 0.65               # chassis world z at spawn [m]
     kind: str = "ridgeback"
     fixed_base: bool = False          # Spot manipulation fixture; walking remains free.
     relic_path: str = ""              # External RELIC checkout (research license).

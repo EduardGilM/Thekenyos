@@ -227,12 +227,13 @@ def parse_args():
 
     t = p.add_argument_group("terrain")
     t.add_argument("--terrain", action="store_true",
-                   help="bumpy outdoor ground (value-noise heightfield): gentle, "
-                        "driveable, randomized per seed, flattened under the tree. "
-                        "One global static shape, so multi-env batching is unaffected.")
+                   help="uneven outdoor ground. Pergola: seeded kiwi orchard floor "
+                        "(slope, pasillo/surco profile, noise, friction) with posts "
+                        "and Spot planted on the sampled surface. Apple: the older "
+                        "value-noise heightfield, flattened under the trunk.")
     t.add_argument("--terrain-amplitude", type=float, default=0.05,
-                   help="max bump height [m] (default 0.05; keep < ~0.08 or the "
-                        "robot chassis visibly clips through crests)")
+                   help="apple-only max bump height [m] (default 0.05; keep < ~0.08 "
+                        "or the Ridgeback chassis clips crests). Ignored for pergola.")
 
     r = p.add_argument_group("render/sim")
     r.add_argument("--viewer", default="gl", choices=["gl", "rtx", "usd", "null"],
@@ -374,8 +375,12 @@ def main():
                               pitch=float(math.degrees(math.asin(d[2]))),
                               yaw=float(math.degrees(math.atan2(d[1], d[0]))))
         else:
-            viewer.set_camera(pos=wp.vec3(2.2 * h, 2.2 * h, 1.1 * h),
-                              pitch=-15.0, yaw=-135.0)
+            if tm.terrain_params:
+                viewer.set_camera(pos=wp.vec3(9.5, -12.0, 6.2),
+                                  pitch=-22.0, yaw=127.87)
+            else:
+                viewer.set_camera(pos=wp.vec3(2.2 * h, 2.2 * h, 1.1 * h),
+                                  pitch=-15.0, yaw=-135.0)
     except Exception:
         pass
 

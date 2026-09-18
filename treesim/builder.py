@@ -89,6 +89,7 @@ class TreeModel:
 
     robot_data: dict = field(default=None)             # RidgebackFranka maps (per env, tiled)
     terrain_height: object = None                       # callable (x, y) -> ground z, or None
+    terrain_params: dict = None                         # sampled orchard-floor metrics
     env_pitch: tuple = None                             # (px, py) display-grid pitch [m]
     env_cols: int = 1                                   # display-grid columns
 
@@ -265,6 +266,23 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     rng = np.random.default_rng(config.seed)
     builder = newton.ModelBuilder()
     builder.gravity = config.physics.gravity   # along -up (Z)
+
+    from .orchard_terrain import (
+        floor_kwargs_for_plantation, sample_orchard_floor, uses_orchard_floor,
+    )
+    orchard_floor = None
+    if uses_orchard_floor(config) and not _sub:
+        orchard_floor = sample_orchard_floor(
+            config.seed, config.physics,
+            canopy_height_m=float(config.lsystem.target_height),
+            **floor_kwargs_for_plantation(
+                config.lsystem.pergola_rows,
+                config.lsystem.pergola_columns,
+                config.lsystem.pergola_spacing,
+                config.physics))
+        if config.robot.enabled:
+            rx, ry = float(config.robot.position[0]), float(config.robot.position[1])
+            config.robot.base_z = orchard_floor.ground_z(rx, ry) + 0.65
 
     # collision_group = -1: branches collide with the ground and with *external*
     # positive-group objects (e.g. a robot arm) but NOT with each other.  Tree
@@ -680,9 +698,14 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         aabbs.append(env_aabb)      # DR headroom: union over the perturbed skeletons
     env_pitch, env_cols, env_rows = _env_grid(aabbs, num_envs)
     terrain_fn = None
+    terrain_params = None
     if num_envs == 1:
         builder.add_ground_plane()
-        if getattr(config.physics, "terrain", False):
+        if orchard_floor is not None:
+            from .orchard_terrain import add_to_builder
+            terrain_fn = add_to_builder(builder, orchard_floor)
+            terrain_params = orchard_floor.metrics()
+        elif getattr(config.physics, "terrain", False):
             terrain_fn = _add_terrain(builder, config.physics, config.seed)
         model = builder.finalize(device=config.device)
     else:
@@ -693,7 +716,11 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         # for every env).  The viewer spreads them on the display grid.
         main.replicate(builder, world_count=num_envs)
         main.add_ground_plane()
-        if getattr(config.physics, "terrain", False):
+        if orchard_floor is not None:
+            from .orchard_terrain import add_to_builder
+            terrain_fn = add_to_builder(main, orchard_floor)
+            terrain_params = orchard_floor.metrics()
+        elif getattr(config.physics, "terrain", False):
             terrain_fn = _add_terrain(main, config.physics, config.seed,
                                       pitch=env_pitch, grid=(env_cols, env_rows))
         model = main.finalize(device=config.device)
@@ -772,6 +799,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         apple_data=apple_data,
         robot_data=robot_data,
         terrain_height=terrain_fn,
+        terrain_params=terrain_params,
         env_pitch=env_pitch, env_cols=env_cols,
         brk_joint_id=_tile_idx(brk_jid, njpe),
         brk_parent_body=_tile_idx(brk_parent, nbpe),
@@ -901,6 +929,7 @@ def _assemble_dr(config: TreeConfig, base_skeleton: TreeSkeleton, subs,
         apple_data=apple_data,
         robot_data=robot_data,
         terrain_height=terrain_fn,
+        terrain_params=None,
         env_pitch=env_pitch, env_cols=env_cols,
         brk_joint_id=brk_joint_id,
         brk_parent_body=cat_i("brk_parent", body_off),
@@ -1115,7 +1144,26 @@ def generate_and_build(config: TreeConfig, max_bodies: int = 4000,
     if config.lsystem.kind == "pergola" and randomize_envs:
         raise ValueError("pergola uses seeded layouts; apple-specific --randomize-envs is unsupported")
     num_envs = max(int(num_envs), 1)
-    base = lsystem.generate(config.lsystem, seed=config.seed)
+    from .orchard_terrain import uses_orchard_floor
+    if uses_orchard_floor(config):
+        from .orchard_terrain import floor_kwargs_for_plantation, sample_orchard_floor
+        from .pergola import generate as generate_pergola
+        floor = sample_orchard_floor(
+            config.seed, config.physics,
+            canopy_height_m=float(config.lsystem.target_height),
+            **floor_kwargs_for_plantation(
+                config.lsystem.pergola_rows,
+                config.lsystem.pergola_columns,
+                config.lsystem.pergola_spacing,
+                config.physics))
+        base = generate_pergola(
+            height=config.lsystem.target_height, seed=config.seed,
+            rows=config.lsystem.pergola_rows,
+            columns=config.lsystem.pergola_columns,
+            spacing=config.lsystem.pergola_spacing,
+            ground_z=floor.ground_z, canopy_z=floor.canopy_z)
+    else:
+        base = lsystem.generate(config.lsystem, seed=config.seed)
     if num_envs == 1 or not randomize_envs:
         return build(config, base, max_bodies=max_bodies, num_envs=num_envs)
 
