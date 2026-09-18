@@ -75,6 +75,8 @@ class PergolaTest(unittest.TestCase):
         from treesim import builder
         from treesim.config import TreeConfig
         cfg = TreeConfig(lsystem=preset('pergola'), device='cpu')
+        # Body independence needs a small fixture, not the full field default.
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 2
         tree = builder.generate_and_build(cfg)
         self.assertEqual(len(tree.apple_bodies), 2)
