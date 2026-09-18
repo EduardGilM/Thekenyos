@@ -267,12 +267,19 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     builder = newton.ModelBuilder()
     builder.gravity = config.physics.gravity   # along -up (Z)
 
-    from .orchard_terrain import sample_orchard_floor, uses_orchard_floor
+    from .orchard_terrain import (
+        floor_kwargs_for_plantation, sample_orchard_floor, uses_orchard_floor,
+    )
     orchard_floor = None
     if uses_orchard_floor(config) and not _sub:
         orchard_floor = sample_orchard_floor(
             config.seed, config.physics,
-            canopy_height_m=float(config.lsystem.target_height))
+            canopy_height_m=float(config.lsystem.target_height),
+            **floor_kwargs_for_plantation(
+                config.lsystem.pergola_rows,
+                config.lsystem.pergola_columns,
+                config.lsystem.pergola_spacing,
+                config.physics))
         if config.robot.enabled:
             rx, ry = float(config.robot.position[0]), float(config.robot.position[1])
             config.robot.base_z = orchard_floor.ground_z(rx, ry) + 0.65
@@ -1139,12 +1146,16 @@ def generate_and_build(config: TreeConfig, max_bodies: int = 4000,
     num_envs = max(int(num_envs), 1)
     from .orchard_terrain import uses_orchard_floor
     if uses_orchard_floor(config):
-        from .orchard_terrain import sample_orchard_floor
+        from .orchard_terrain import floor_kwargs_for_plantation, sample_orchard_floor
         from .pergola import generate as generate_pergola
         floor = sample_orchard_floor(
             config.seed, config.physics,
             canopy_height_m=float(config.lsystem.target_height),
-            row_pitch_m=float(config.lsystem.pergola_spacing))
+            **floor_kwargs_for_plantation(
+                config.lsystem.pergola_rows,
+                config.lsystem.pergola_columns,
+                config.lsystem.pergola_spacing,
+                config.physics))
         base = generate_pergola(
             height=config.lsystem.target_height, seed=config.seed,
             rows=config.lsystem.pergola_rows,

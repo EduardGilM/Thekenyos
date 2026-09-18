@@ -314,6 +314,49 @@ class OrchardFloor:
         return buf.getvalue()
 
 
+def floor_kwargs_for_plantation(rows, columns, spacing, params=None,
+                                margin_m: float = 12.0) -> dict:
+    """Cover a pergola grid without allocating a fine 0.05 m field over hectares.
+
+    The compact 15 m / 5 cm default stays for a 2×2 fixture. A 45×40 block at
+    5 m needs ~122 m half-extent; collision cells coarsen so each side stays
+    at most 501 samples. Visual texels coarsen to 0.25 m on fields larger
+    than 30 m half-extent. ``row_pitch_m`` follows the structural spacing so
+    soil strips line up with posts.
+    """
+    rows = int(rows)
+    columns = int(columns)
+    spacing = float(spacing)
+    margin_m = float(margin_m)
+    if rows < 2 or columns < 2:
+        raise ValueError("plantation rows and columns must be at least 2")
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        raise ValueError("spacing must be a positive finite length in metres")
+    if not np.isfinite(margin_m) or margin_m < 0.0:
+        raise ValueError("margin_m must be a finite non-negative length in metres")
+    half_extent_m = 0.5 * max(columns - 1, rows - 1) * spacing + margin_m
+    default_half = float(getattr(params, "orchard_half_extent_m", 15.0))
+    half_extent_m = max(half_extent_m, default_half)
+    cell_m = float(getattr(params, "orchard_cell_m", 0.05))
+    appearance_cell_m = float(APPEARANCE_CELL_M)
+    # Keep the compact 15 m / 5 cm default. Only coarsen a commercial block.
+    if half_extent_m > 30.0:
+        appearance_cell_m = max(appearance_cell_m, 0.25)
+        max_side = 501
+        n = int(round(2.0 * half_extent_m / cell_m)) + 1
+        if n > max_side:
+            cell_m = (2.0 * half_extent_m) / (max_side - 1)
+    if cell_m > 0.20 * spacing:
+        raise ValueError(
+            f"plantation cell_m={cell_m:.4f} is too coarse for spacing={spacing:.3f} m")
+    return {
+        "half_extent_m": float(half_extent_m),
+        "cell_m": float(cell_m),
+        "appearance_cell_m": float(appearance_cell_m),
+        "row_pitch_m": spacing,
+    }
+
+
 def sample_orchard_floor(seed: int = 0, params=None, *,
                          slope_deg=None, noise_m=None, rut_depth_m=None,
                          rut_width_m=None, friction=None,

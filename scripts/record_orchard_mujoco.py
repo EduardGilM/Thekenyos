@@ -5,14 +5,16 @@ This is a scripted flyover of the seeded pergola grid plus orchard floor,
 compiled as a MuJoCo hfield. It is not Newton GL, not Spot's URDF, and
 not a learned policy. Render-only foliage from the GPU path is omitted.
 
-    MUJOCO_GL=osmesa python scripts/record_orchard_mujoco.py \
-        --seed 42 --video output/orchard-mujoco.mp4
+On an NVIDIA host the default is MuJoCo EGL. Pass ``--require-gpu`` to
+refuse OSMesa. The Newton GL recording is ``scripts/record_scene.py``.
+
+    python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
+        --video output/orchard-mujoco.mp4
 """
 from __future__ import annotations
 
 import argparse
 import math
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from treesim.config import FruitParams
+from treesim.gl_backend import bind_mujoco_gl
 from treesim.kiwi_material import STEM_LENGTH
-from treesim.orchard_terrain import sample_orchard_floor
+from treesim.orchard_terrain import floor_kwargs_for_plantation, sample_orchard_floor
 from treesim.pergola import generate, place_fruit
 
 
@@ -124,6 +127,10 @@ def main():
     p.add_argument("--pergola-columns", type=int, default=40)
     p.add_argument("--pergola-spacing", type=float, default=5.0)
     p.add_argument("--fruit-count", type=int, default=600)
+    p.add_argument("--gl", choices=("auto", "egl", "osmesa"), default="auto",
+                   help="MuJoCo GL backend (auto = EGL on NVIDIA, else OSMesa)")
+    p.add_argument("--require-gpu", action="store_true",
+                   help="refuse OSMesa / CPU fallback; exit if no NVIDIA GPU")
     args = p.parse_args()
     if args.frames < 2:
         p.error("--frames must be at least 2")
@@ -134,19 +141,20 @@ def main():
     if args.fruit_count < 0:
         p.error("--fruit-count must be nonnegative")
 
-    # MuJoCo 3.8.1 fails if OSMesa is selected before the package import.
-    os.environ.pop("MUJOCO_GL", None)
+    try:
+        gl_backend = bind_mujoco_gl(args.gl, require_gpu=args.require_gpu)
+    except RuntimeError as exc:
+        p.error(str(exc))
     import mujoco
-    os.environ["MUJOCO_GL"] = "osmesa"
 
     spacing = float(args.pergola_spacing)
-    half = 0.5 * max(args.pergola_columns - 1, args.pergola_rows - 1) * spacing + 12.0
+    cover = floor_kwargs_for_plantation(
+        args.pergola_rows, args.pergola_columns, spacing)
+    half = float(cover["half_extent_m"])
     floor = sample_orchard_floor(
         args.seed, canopy_height_m=1.6,
-        half_extent_m=half, cell_m=min(0.50, 0.10 * spacing),
-        row_pitch_m=spacing, appearance_cell_m=0.25,
         slope_deg=0.0, noise_m=0.01, rut_depth_m=0.05, rut_width_m=0.40,
-        friction=1.0, slope_azimuth_deg=0.0,
+        friction=1.0, slope_azimuth_deg=0.0, **cover,
     )
     skeleton = generate(
         height=1.6, seed=args.seed,
@@ -160,7 +168,7 @@ def main():
     print(
         f"[orchard-mujoco] posts {args.pergola_rows}x{args.pergola_columns} "
         f"at {spacing:.1f} m; segments {len(skeleton)}; fruit {len(fruit)}; "
-        f"floor {2*half:.0f}x{2*half:.0f} m",
+        f"floor {2*half:.0f}x{2*half:.0f} m; GL {gl_backend}",
         flush=True,
     )
     xml = mjcf(floor, skeleton, fruit)
@@ -188,7 +196,7 @@ def main():
         f"{spacing:.1f} m   ~{ha:.1f} ha   fruit {len(fruit)}':"
         f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
         f"drawtext=text='scripted flyover  -  Ines plantation on orchard floor  -  "
-        f"not Spot gait  -  no foliage here':"
+        f"GL {gl_backend}  -  not Spot gait  -  no foliage here':"
         f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
     )
     encoder = subprocess.Popen([

@@ -6,7 +6,8 @@ import numpy as np
 
 from treesim.config import FruitParams, preset
 from treesim.orchard_terrain import (
-    AISLE_HEIGHT_M, POST_EMBED_M, sample_orchard_floor,
+    AISLE_HEIGHT_M, POST_EMBED_M, floor_kwargs_for_plantation,
+    sample_orchard_floor,
 )
 from treesim.pergola import generate, place_fruit
 
@@ -115,6 +116,25 @@ class OrchardTerrainTest(unittest.TestCase):
             center = f.attach - np.array([0.0, 0.0, fp.stem_length + extent])
             self.assertLess(center[2] + extent, floor.canopy_z(*f.attach[:2]))
             self.assertGreater(center[2] - extent, floor.ground_z(center[0], center[1]))
+
+    def test_plantation_cover_matches_commercial_grid(self):
+        small = floor_kwargs_for_plantation(2, 2, 5.0)
+        self.assertAlmostEqual(small["half_extent_m"], 15.0)
+        self.assertAlmostEqual(small["cell_m"], 0.05)
+        self.assertAlmostEqual(small["row_pitch_m"], 5.0)
+        cover = floor_kwargs_for_plantation(45, 40, 5.0)
+        half = cover["half_extent_m"]
+        self.assertAlmostEqual(half, 0.5 * 44 * 5.0 + 12.0)
+        self.assertLessEqual(int(round(2.0 * half / cover["cell_m"])) + 1, 501)
+        self.assertLessEqual(cover["cell_m"], 0.20 * 5.0)
+        self.assertAlmostEqual(cover["appearance_cell_m"], 0.25)
+        self.assertAlmostEqual(cover["row_pitch_m"], 5.0)
+        # Corner posts of the default 45×40 @ 5 m field stay on the hfield.
+        self.assertGreater(half, 110.0)
+        floor = _pinned(seed=42, **cover)
+        self.assertEqual(floor.heights_m.shape[0],
+                         int(round(2.0 * half / cover["cell_m"])) + 1)
+        self.assertTrue(np.isfinite(floor.ground_z(97.5, 110.0)))
 
     def test_flat_generate_unchanged(self):
         skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0)

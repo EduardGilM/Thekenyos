@@ -92,11 +92,24 @@ Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
 the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` to
 plant the grid on a kiwi orchard floor (grassed aisles, bare planting strips,
 sampled slope and noise). The native compression bench writes its own generated
-MuJoCo XML to its output directory. A software-rendered flyover of the
-plantation (no GPU, no Spot gait) is:
+MuJoCo XML to its output directory.
+
+On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
+render-only foliage). This is a scripted flyover, not Spot gait. The flag
+refuses a CPU fallback:
 
 ```bash
-python scripts/record_orchard_mujoco.py --seed 42 --video output/orchard-mujoco.mp4
+python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
+  --video output/orchard-mujoco.mp4
+```
+
+Newton GL with foliage is a separate viewer. A 4 GB card should crop the
+grid; a larger NVIDIA GPU can keep the commercial default:
+
+```bash
+python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
+  --preset pergola --terrain --foliage --seed 42 --frames 600 \
+  --pergola-rows 5 --pergola-columns 4
 ```
 
 ### Spot with a loaded basket
