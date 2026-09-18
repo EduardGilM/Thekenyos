@@ -118,6 +118,43 @@ forces before changing it. The pads are ideal parallel surfaces, not Spot's
 actual gripper. Zero gravity isolates compression; geometry recovery does not
 clear the persistent damage proxy.
 
+### Actual Spot gripper bench
+
+```bash
+MUJOCO_GL=egl python scripts/check_spot_gripper.py --relic ../relic \
+  --torque .3 --check --output output/spot-gripper \
+  --video output/spot-gripper.mp4
+MUJOCO_GL=egl python scripts/check_spot_gripper.py --relic ../relic \
+  --torque .3 --timestep .000005 --check --output output/spot-gripper-halfstep
+```
+
+This separate native MuJoCo bench uses the external Spot wrist/finger meshes,
+URDF hinge limits and finger inertia. It holds the wrist sideways in a test
+fixture. One **free, detached** kiwi is initially weight-compensated, squeezed
+with a torque-limited jaw, loaded by gravity at 1.5 s, then released at 2.8 s.
+There is no fruit weld, grasp assistance, arm trajectory or stem in this test.
+The floor catches the released fruit; this deliberate drop is not a harvesting
+success. Videos are scripted and shown at 2x slow motion.
+
+`--rigid --timestep .0005` isolates collision geometry. The default fruit is a
+native tetrahedral elastic body with the same homogeneous Xuxiang flesh proxy
+as the compression bench. `--torque 1` is a stronger-grip comparison. The motor
+torque limit is in **N·m**, distinct from measured per-jaw contact load in **N**;
+neither is a calibrated safe grasp setting. The assumed friction coefficient
+is 0.44; actual Spot pad friction needs measurement.
+
+Outputs include the generated scene, sub-sampled force/position measurements
+and metrics. Forces and numerical warnings are checked each physics step;
+shape compression removes rigid rotation and is sampled every millisecond.
+The 9–12 mm tetrahedral grid is coarse relative to the teeth. Mesh refinement
+and pad calibration are still required; the rigid and flex surfaces also differ
+in discretization. The strain damage proxy cannot predict local tooth injury
+or delayed bruising.
+Grip damage is reported separately from the later floor impact. `--check`
+uses a 20 mm displacement tolerance during 1.7–2.7 s, no early ground contact,
+bilateral contact during the run and contact-free release
+to the floor. Test results apply to this one initial pose and fruit geometry.
+
 ## Physics and evidence
 
 Read [the evidence table](docs/kiwi-material-evidence.md) before changing a
@@ -191,6 +228,23 @@ real-fruit calibration or evidence that a harvesting policy has been trained.
 The 10% command differs from tissue strain because the pads also have compliant
 contact. The native 3% case records zero strain-based damage proxy; that is not
 a guarantee of unbruised real fruit. Outputs are generated under `output/`.
+
+### Spot jaw benchmark, 19 September 2026
+
+| Model / torque | Result in this fixture |
+|---|---|
+| Rigid / 0.3 and 0.6 N·m | Slipped out before commanded release |
+| Rigid / 1.0 N·m | Passed; maximum hold displacement 7.29 mm |
+| Deformable / 0.3 N·m | Passed at 10 and 5 µs; hold displacement 15.94 / 15.95 mm; peak jaw loads 5.58 / 7.44 N |
+| Deformable / 1.0 N·m | Failed the 20 mm stability tolerance at both 10 and 5 µs; displacement 23.98 mm; no early drop |
+
+The gentler deformable run reached 0.457% rotation-corrected whole-fruit
+compression. Halving the timestep changed peak jaw loads by less than 0.06%
+and hold displacement by 0.013 mm. The final floor pose differs, so this is
+not evidence that post-release rolling trajectories have converged. All runs completed without MuJoCo numerical warnings. These are
+one-pose bench results, not an optimal grip or evidence of bruise-free fruit.
+The differing rigid/flex outcomes mean the rigid model cannot yet stand in for
+the flex benchmark without further contact and mesh-resolution checks.
 
 ## Continue the project
 

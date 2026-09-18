@@ -60,8 +60,10 @@ captured loop. Validate buffer swaps if changing substep counts.
 
 Run the affected checks in README.md. Material changes require native
 compression/release results and timestep sensitivity. Contact changes require
-stationary retention, falls/ground contact and adversarial spill tests. Policy
-changes require matched-seed tracking/fall/spill comparisons. A video does not
+stationary retention, falls/ground contact and adversarial spill tests. Actual
+jaw geometry changes require `scripts/check_spot_gripper.py` and timestep
+comparison; keep failed torque cases visible. Policy changes require matched-seed
+tracking/fall/spill comparisons. A video does not
 replace numerical checks; metrics do not replace visual inspection.
 
 Show the user a video when a useful visual milestone is ready. Label scripted
