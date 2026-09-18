@@ -14,7 +14,7 @@ coordination, maturity perception and automatic unloading come later.
 
 | Component | Current implementation |
 |---|---|
-| Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, compliant canes and hanging fruit |
+| Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, tied canes, compliant tips and hanging fruit |
 | Orchard floor | Optional seeded heightfield: grassed pasillos, bare surcos, slope, noise and friction; posts and Spot sit on the sampled surface |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
@@ -112,6 +112,13 @@ python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
   --preset pergola --terrain --foliage --seed 42 --frames 600 \
   --pergola-rows 5 --pergola-columns 4
 ```
+
+The trellis has fixed transverse support wires. Main cane sections are tied
+rigidly to this frame; only the final 0.35 m tips bend. This is an ideal-support
+assumption, not calibrated wire tension or tie compliance. It replaces the
+unsupported 2.3 m cantilevers that sagged into the robot's workspace. Fruit
+stems are drawn between the actual force attachment sites and disappear on
+rupture; fruit remains an independent physical body.
 
 ### Spot with a loaded basket
 

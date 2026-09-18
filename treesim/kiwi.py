@@ -98,6 +98,22 @@ class KiwiField(AppleField):
         self.detach_force = self.threshold.numpy()
         self.break_load = wp.zeros(self.n, device=self.dev)
 
+    def render(self, viewer, state):
+        """Draw only intact stems at the same sites used by the force model."""
+        poses = state.body_q.numpy()
+        starts, ends = [], []
+        for i, (fruit, parent, offset, half) in enumerate(zip(
+                self.apple_body.numpy(), self.parent_body.numpy(),
+                self.offset.numpy(), self.half.numpy())):
+            if self.detached[i]:
+                continue
+            starts.append(wp.transform_point(wp.transform(wp.vec3(*poses[parent,:3]), wp.quat(*poses[parent,3:])), wp.vec3(*offset)))
+            ends.append(wp.transform_point(wp.transform(wp.vec3(*poses[fruit,:3]), wp.quat(*poses[fruit,3:])), wp.vec3(0., 0., float(half))))
+        viewer.log_lines('kiwi stems',
+                         wp.array(starts, dtype=wp.vec3) if starts else None,
+                         wp.array(ends, dtype=wp.vec3) if ends else None,
+                         colors=(.35, .55, .16), width=.003, hidden=not starts)
+
     def hold(self, i, hand_body):
         raise RuntimeError('Kiwi grasping requires physical pad contact; no grip-assist spring')
 

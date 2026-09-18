@@ -38,6 +38,11 @@ class PergolaTest(unittest.TestCase):
                 self.assertAlmostEqual(seg.start[2], 1.6)
                 self.assertAlmostEqual(seg.end[2], 1.6)
 
+        tips = [s for s in a if s.order == 2 and not s.supported]
+        self.assertTrue(tips)
+        for tip in tips:
+            self.assertAlmostEqual(tip.length, .35)
+            self.assertTrue(a[tip.parent].supported)
         fp = FruitParams(max_count=96, radius=(0.024, 0.028), stem_length=0.055,
                          colors=((0.39, 0.27, 0.12),))
         fruit = place_fruit(a, fp, seed=42)

@@ -36,11 +36,20 @@ o,_=e.reset(seed=42)
 for k in o: np.testing.assert_array_equal(o[k],initial[k])
 assert e.work==0 and not e.oracle.grasped and not e.sim.apples.detached.any()
 second=e.step(np.ones(7)*.1)
-for key in first[0]: np.testing.assert_allclose(first[0][key],second[0][key],atol=1e-5,rtol=1e-5)
+# GPU solve/reduction order is nondeterministic. Keep pose/velocity bounds
+# explicit: 10 micrometres, 1e-4 quaternion components, 0.2 mm/s or mrad/s.
+repeat_drift = {}
+for key in first[0]:
+    tolerance = 2e-4 if key.endswith('velocity') else 1e-4 if key.endswith('quaternion') else 1e-5
+    repeat_drift[key] = float(np.max(np.abs(first[0][key]-second[0][key])))
+    np.testing.assert_allclose(first[0][key],second[0][key],atol=tolerance,rtol=0)
 assert abs(first[1]-second[1])<1e-6
 o,_=e.reset(seed=42)
 base=e.base_pose.copy(); start_joint=o['joint_position'].copy()
 encoder=None
+from treesim.builder import _qrot
+max_anchor_gap = 0.
+max_tip_sag = 0.
 try:
     for i in range(100):
         # Exercise shoulder yaw and wrist without attempting a pick.
@@ -48,6 +57,22 @@ try:
         action[5]=.2*np.sin(i/20)
         o,r,done,cut,info=e.step(action)
         assert np.isfinite(r) and not cut
+        poses = e.sim.body_q_np(); tree = e.sim.tree
+        for seg in tree.skeleton:
+            body = tree.seg_to_body[seg.index]
+            tip = poses[body,:3] + _qrot(poses[body,3:], np.array([0.,0.,seg.length]))
+            if seg.parent >= 0:
+                parent = tree.skeleton[seg.parent]; pb = tree.seg_to_body[parent.index]
+                anchor = poses[pb,:3] + _qrot(poses[pb,3:], np.array([0.,0.,parent.length]))
+                max_anchor_gap = max(max_anchor_gap, float(np.linalg.norm(poses[body,:3]-anchor)))
+            if seg.order == 2:
+                max_tip_sag = max(max_tip_sag, float(seg.end[2]-tip[2]))
+            if seg.order < 2 or seg.supported:
+                np.testing.assert_allclose(tip, seg.end, atol=1e-4)
+        assert max_anchor_gap < 1e-4, max_anchor_gap
+        assert max_tip_sag < .05, max_tip_sag
+        assert e.physical.attached
+
         np.testing.assert_allclose(e.sim.body_q_np()[e.observer.chassis],base,atol=1e-6)
         assert np.all(e.controller.targets[12:]>=e.lower-1e-6)
         assert np.all(e.controller.targets[12:]<=e.upper+1e-6)
@@ -70,7 +95,7 @@ try:
     import newton
     fk=e.sim.model.state()
     newton.eval_fk(e.sim.model,e.sim.state_0.joint_q,e.sim.state_0.joint_qd,fk)
-    ids=np.arange(e.sim.tree.robot_data['body_start'],e.sim.model.body_count)
+    ids=np.arange(e.sim.model.body_count)
     kinematic_error=float(np.max(np.abs(fk.body_q.numpy()[ids,:3]-e.sim.body_q_np()[ids,:3])))
     assert kinematic_error<1e-4, kinematic_error
 finally:
@@ -145,8 +170,8 @@ e=SpotHarvestEnv(a.relic,task=TaskDefinition(time_limit_s=.03),physics_hz=a.phys
 e.step(np.zeros(7)); _,_,done,cut,timeout_info=e.step(np.zeros(7))
 assert done and not cut and timeout_info['outcome']=='timeout'
 e.close()
-metrics=dict(passed=True,gymnasium_check=True,seeded_reset=True,fixed_base=True,
-             actuator_work_J=work,robot_fk_error_m=kinematic_error,forced_loss=info['outcome'],
+metrics=dict(passed=True,gymnasium_check=True,seeded_reset=True,seeded_step_drift=repeat_drift,fixed_base=True,
+             actuator_work_J=work,all_body_fk_error_m=kinematic_error, max_canopy_anchor_gap_m=max_anchor_gap, max_tip_sag_m=max_tip_sag,forced_loss=info['outcome'],
              transient_overload_detected_at_s=spike_info['elapsed_s'],physics_hz=a.physics_hz,
              timeout_is_task_failure=True,fixture_outcomes=fixture_outcomes,policy_trained=False,fruit_model='rigid surrogate')
 a.output.parent.mkdir(parents=True,exist_ok=True)

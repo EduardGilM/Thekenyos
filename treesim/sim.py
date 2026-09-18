@@ -356,6 +356,8 @@ class Sim:
             self.breaker.render(self.viewer)   # recolour newly-snapped branches
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        if self.apples is not None and hasattr(self.apples, "render"):
+            self.apples.render(self.viewer, self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 

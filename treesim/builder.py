@@ -427,7 +427,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         pxform = wp.transform(p=wp.vec3(0.0, 0.0, max(parent.length, 1e-3)), q=_wq(q_rel))
         cxform = wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity())
 
-        if not deformable or (config.lsystem.kind == "pergola" and seg.order < 2):
+        if not deformable or (config.lsystem.kind == "pergola" and (seg.order < 2 or seg.supported)):
             jid = builder.add_joint_fixed(parent=pbody, child=cbody,
                                           parent_xform=pxform, child_xform=cxform)
             all_joint_ids.append(jid)

@@ -155,8 +155,11 @@ class SpotHarvestEnv(gym.Env):
             import warp as wp
             self.viewer = V.ViewerGL(headless=True); self.viewer.set_model(self.sim.model)
             base = self.base_pose[:3]
-            self.viewer.set_camera(pos=wp.vec3(*(base+[2.,2.,1.])), yaw=-135., pitch=-20.)
-        self.viewer.begin_frame(self.sim.sim_time); self.viewer.log_state(self.sim.state_0); self.viewer.end_frame()
+            self.viewer.set_camera(pos=wp.vec3(*(base+[3.2,3.2,2.])), yaw=-135., pitch=-24.)
+        self.viewer.begin_frame(self.sim.sim_time)
+        self.viewer.log_state(self.sim.state_0)
+        self.sim.apples.render(self.viewer, self.sim.state_0)
+        self.viewer.end_frame()
         return self.viewer.get_frame().numpy().copy()
 
     def close(self):

@@ -1,7 +1,7 @@
 """Seeded kiwi pergola geometry, independent of the physics runtime.
 
 Order 0 is posts/beams, order 1 is support wires, and order 2 is fruiting
-canes. The builder fixes orders 0/1 and gives canes its existing compliant
+canes. Tied cane sections are fixed; free tips use the existing compliant
 joints. All connections use parent endpoints, matching TreeSkeleton's contract.
 """
 from dataclasses import dataclass
@@ -54,7 +54,7 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
     rng = np.random.default_rng(seed)
     segments = []
 
-    def add(parent, end, radius, order, start=None):
+    def add(parent, end, radius, order, start=None, supported=False):
         start = np.asarray(start if parent < 0 else segments[parent].end, float)
         end = np.asarray(end, float)
         heading = end - start
@@ -67,6 +67,7 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
             idx, parent, start.copy(), end, radius, radius, order,
             0 if parent < 0 else segments[parent].depth + 1,
             frame=_frame_to_quat(heading, left, np.cross(heading, left)),
+            supported=supported,
         ))
         return idx
 
@@ -121,6 +122,10 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
                 for fraction in (0.25, 0.50, 0.75):
                     wire_y = y + fraction * (next_y - y)
                     wire = add(node, [xs[xi], wire_y, canopy(xs[xi], wire_y)], 0.004, 1)
+                    # Transverse support meets the next fixed row wire; avoid
+                    # a redundant closed-loop joint in the rigid frame.
+                    if xi < columns - 1:
+                        add(wire, [xs[xi+1], wire_y, canopy(xs[xi+1], wire_y)], 0.004, 1)
                     # Long paired canes make the canopy continuous between
                     # posts; their foliage remains massless/render-only.
                     inward = -1 if xi == columns - 1 else 1
@@ -130,8 +135,14 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
                             continue
                         length = rng.uniform(2.15, 2.40)
                         ex = xs[xi] + side * length
-                        ey = wire_y + rng.uniform(-0.08, 0.08)
-                        add(wire, [ex, ey, canopy(ex, ey)], rng.uniform(0.006, 0.009), 2)
+                        radius = rng.uniform(0.006, 0.009)
+                        # Ideal rigid ties secure the main cane to the wire.
+                        # Only the final 0.35 m horizontal span is compliant.
+                        # Tie/wire compliance is an engineering simplification.
+                        tx = ex - side * .35
+                        tied = add(wire, [tx, wire_y, canopy(tx, wire_y)],
+                                   radius, 2, supported=True)
+                        add(tied, [ex, wire_y, canopy(ex, wire_y)], radius, 2)
         previous_end = beam
         direction *= -1
     return TreeSkeleton(segments)
@@ -146,7 +157,7 @@ def place_fruit(skeleton: TreeSkeleton, params: FruitParams,
     if params.max_count < 0:
         raise ValueError("fruit count must be nonnegative")
     rng = np.random.default_rng(seed + 4242)
-    candidates = [(s, t) for s in skeleton if s.order == 2 for t in (0.35, 0.80)]
+    candidates = [(s, t) for s in skeleton if s.order == 2 and not s.supported for t in (0.35, 0.80)]
     rng.shuffle(candidates)
     out = []
     for seg, t in candidates[:params.max_count]:
