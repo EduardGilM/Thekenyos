@@ -87,15 +87,25 @@ def apply_easy_cli(args):
 
 
 def mix_privileged_actions(raw, teacher_applied, mix_mask):
-    """Replace pre-tanh samples with atanh(teacher) where mix_mask is true."""
+    """Replace pre-tanh arm samples with atanh(teacher) where mix_mask is true.
+
+    The compact actor is 10-D (N3 + arm). The deposit teacher is 7-D arm/jaw
+    only and must not overwrite locomotion commands.
+    """
     import torch
-    if raw.shape != teacher_applied.shape:
-        raise ValueError('teacher actions must match the student sample shape')
-    if mix_mask.shape != raw.shape[:1]:
-        raise ValueError('mix_mask must be one flag per world')
+    if raw.ndim != 2 or teacher_applied.ndim != 2:
+        raise ValueError('raw and teacher actions must be rank-2')
+    if mix_mask.shape != raw.shape[:1] or teacher_applied.shape[0] != raw.shape[0]:
+        raise ValueError('mix_mask and teacher actions must be one row per world')
     applied = teacher_applied.clamp(-0.999, 0.999)
     teacher_raw = torch.atanh(applied)
-    return torch.where(mix_mask[:, None], teacher_raw, raw)
+    if teacher_applied.shape[-1] == raw.shape[-1]:
+        return torch.where(mix_mask[:, None], teacher_raw, raw)
+    if teacher_applied.shape[-1] == 7 and raw.shape[-1] == 10:
+        mixed = raw.clone()
+        mixed[:, 3:] = torch.where(mix_mask[:, None], teacher_raw, raw[:, 3:])
+        return mixed
+    raise ValueError('teacher actions must be 7 (arm) or match the student sample shape')
 
 
 def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, carry=None,

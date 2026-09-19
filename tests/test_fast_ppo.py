@@ -129,6 +129,12 @@ class FastTrainerCLITest(unittest.TestCase):
         mixed = mix_privileged_actions(raw, teacher, torch.tensor([True, False]))
         self.assertAlmostEqual(float(mixed[0, 0]), float(torch.atanh(torch.tensor(0.5))), places=5)
         self.assertEqual(float(mixed[1, 0]), 0.0)
+        raw10 = torch.zeros(2, 10)
+        raw10[:, :3] = 0.25
+        mixed10 = mix_privileged_actions(raw10, teacher, torch.tensor([True, False]))
+        self.assertEqual(float(mixed10[0, 0]), 0.25)
+        self.assertAlmostEqual(float(mixed10[0, 3]), float(torch.atanh(torch.tensor(0.5))), places=5)
+        self.assertEqual(float(mixed10[1, 3]), 0.0)
 
 
 if __name__ == '__main__':
