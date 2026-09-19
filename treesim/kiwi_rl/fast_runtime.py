@@ -809,6 +809,7 @@ class FastRuntime:
                     'close_frac': float(row['close_frac']),
                     'slip_m': float(row['slip_m']),
                     'max_load_N': float(row['max_load_N']),
+                    'jaw_q': None if row.get('jaw_q') is None else float(row['jaw_q']),
                     'retained': bool(row['retained']),
                 }
                 for row in (self._hold_sweep.get('rows') or [])
@@ -835,7 +836,11 @@ class FastRuntime:
                 arm_qids=self.control.contract.qids[12:18], start_q=start_q,
                 jaw_open=self._jaw_open, jaw_closed=self._jaw_closed,
                 load_limit_n=float(JAW_FORCE_LIMIT_N),
-                fruit_equality=int(self.task.equality_id))
+                fruit_equality=int(self.task.equality_id),
+                jaw_actuator=int(self.control.contract.actuators[18]),
+                jaw_kp=float(self.control.contract.kp[18]),
+                jaw_kd=float(self.control.contract.kd[18]),
+                jaw_cap_nm=min(0.3, float(self.control.contract.limits[18])))
         except (ValueError, RuntimeError, TypeError, AttributeError) as exc:
             mid = float(self._hold_close_fracs[len(self._hold_close_fracs) // 2])
             from .reach_teacher import grasp_local_fallback_m

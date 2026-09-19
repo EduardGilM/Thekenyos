@@ -209,7 +209,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def axial_mouth_local', teacher_src)
         self.assertIn('_hand_fruit_contact_load_n', teacher_src)
         self.assertIn('_apply_jaw_close_ctrl', teacher_src)
-        self.assertIn('hold during carry screen', teacher_src)
+        self.assertIn('jaw_actuator', teacher_src)
         self.assertIn('jaw_open', teacher_src)
         self.assertIn('model.opt.timestep', teacher_src)
         self.assertIn('fruit_equality', teacher_src)

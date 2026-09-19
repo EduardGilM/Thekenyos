@@ -183,7 +183,8 @@ def _joint_actuator_id(model, qposadr):
     return None
 
 
-def _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold, *, cap_nm=0.3):
+def _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold, *,
+                          cap_nm=0.3, kp=2.0, kd=0.04):
     """Command the jaw toward ``hold`` without rewriting qpos each step.
 
     Affine-bias actuators get a position target. Motors get a PD torque clipped
@@ -209,10 +210,13 @@ def _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold, *, cap_nm=0.3
             break
     q = float(data.qpos[int(jaw_qposadr)])
     v = 0.0 if joint_id is None else float(data.qvel[int(model.jnt_dofadr[joint_id])])
-    gain = float(model.actuator_gainprm[act, 0])
+    gain = float(kp)
+    damp = float(kd)
     if not np.isfinite(gain) or abs(gain) < 1e-9:
         gain = 2.0
-    data.ctrl[act] = float(np.clip(gain * (target - q) - 0.04 * v, -cap, cap))
+    if not np.isfinite(damp) or damp < 0:
+        damp = 0.04
+    data.ctrl[act] = float(np.clip(gain * (target - q) - damp * v, -cap, cap))
     return 'motor'
 
 
@@ -395,7 +399,8 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
 
 def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qposadr,
                    arm_qids, start_q, jaw_open, jaw_closed, close_fracs=None,
-                   hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0, fruit_equality=None):
+                   hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0, fruit_equality=None,
+                   jaw_actuator=None, jaw_kp=2.0, jaw_kd=0.04, jaw_cap_nm=0.3):
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
     Fruit stays a free body. The pocket is the open-mouth axial COM, then each
@@ -424,8 +429,11 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
     try:
         steps = max(1, min(80, int(round(hold_time / float(model.opt.timestep)))))
         hand_geoms = _hand_geom_ids(model)
-        jaw_act = _joint_actuator_id(model, jaw_qposadr)
+        jaw_act = int(jaw_actuator) if jaw_actuator is not None else _joint_actuator_id(model, jaw_qposadr)
         fruit_geoms = _fruit_geom_ids(model, fruit_qposadr)
+        kp = float(jaw_kp)
+        kd = float(jaw_kd)
+        cap = float(jaw_cap_nm)
         data = mujoco.MjData(model)
         eq = None if fruit_equality is None else int(fruit_equality)
         data.qpos[:] = q0
@@ -435,8 +443,8 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.eq_active[eq] = 0
         data.qpos[arm_qids] = start
         data.qpos[int(jaw_qposadr)] = jaw_open
-        if jaw_act is not None:
-            data.ctrl[jaw_act] = jaw_open
+        _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, jaw_open,
+                              cap_nm=cap, kp=kp, kd=kd)
         mujoco.mj_forward(model, data)
         local = grasp_local_in_body_m(model, data, tcp_site)
         body = int(model.site_bodyid[int(tcp_site)])
@@ -453,8 +461,8 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 data.eq_active[eq] = 0
             data.qpos[arm_qids] = start
             data.qpos[int(jaw_qposadr)] = jaw_open
-            if jaw_act is not None:
-                data.ctrl[jaw_act] = jaw_open
+            _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, jaw_open,
+                                  cap_nm=cap, kp=kp, kd=kd)
             data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket0
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
@@ -462,19 +470,8 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             max_load = 0.0
             for _ in range(steps):
                 data.qpos[arm_qids] = start
-                _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold)
-                if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
-                    data.eq_active[eq] = 0
-                mujoco.mj_step(model, data)
-                max_load = max(max_load, _hand_fruit_contact_load_n(
-                    model, data, hand_geoms, fruit_geoms))
-            carry_steps = max(1, min(40, steps // 2))
-            carry_q = start.copy()
-            carry_q[0] = start[0] + 0.10
-            for step in range(carry_steps):
-                alpha = float(step + 1) / float(carry_steps)
-                data.qpos[arm_qids] = (1.0 - alpha) * start + alpha * carry_q
-                _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold)  # hold during carry screen
+                _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold,
+                                      cap_nm=cap, kp=kp, kd=kd)
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)
@@ -489,6 +486,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 'close_frac': float(frac),
                 'slip_m': slip if np.isfinite(slip) else 1.0,
                 'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
+                'jaw_q': float(data.qpos[int(jaw_qposadr)]),
                 'retained': bool(np.isfinite(slip) and slip <= slip_ok),
             })
         chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
