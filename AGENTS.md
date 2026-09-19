@@ -298,3 +298,12 @@ Accepted-checkpoint selection and rollback must preserve earlier demonstrated
 skills on both training and held-out scenes. Preserve candidate evidence, source
 checkpoint provenance, and both optimizers when rolling back. Do not claim the
 acceptance tolerances prove monotonic learning or broad generalization.
+
+## Weighted regression graph v4
+
+The user's current direction supersedes v3 acceptance/rollback and stage practice.
+Use PPO only, without CTI or explicit curriculum. New runs start with a random
+harvesting actor and critic. Keep physical success prerequisites and archived
+profiles, but replace rollback with weighted progress-loss penalties. Read
+`docs/reward-graph.md`; run `tests.test_soft_graph` and the affected archived/GPU
+checks. A best display checkpoint never replaces the active learner.

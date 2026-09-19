@@ -5,7 +5,10 @@ import torch
 LEGACY_GRAPH_PROFILE = 'graph-harvest/v1'
 CONTINUOUS_GRAPH_PROFILE = 'graph-harvest/v2'
 GRAPH_PROFILE = 'graph-harvest/v3'
-CONTINUOUS_GRAPH_PROFILES = (CONTINUOUS_GRAPH_PROFILE, GRAPH_PROFILE)
+SOFT_GRAPH_PROFILE = 'graph-harvest/v4'
+PREREQUISITE_GRAPH_PROFILES = (GRAPH_PROFILE, SOFT_GRAPH_PROFILE)
+REGRESSION_WEIGHTS = dict(position=1., grip=1.5, extract=2., carry=2., deposit=2., complete=2.)
+CONTINUOUS_GRAPH_PROFILES = (CONTINUOUS_GRAPH_PROFILE, *PREREQUISITE_GRAPH_PROFILES)
 GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, *CONTINUOUS_GRAPH_PROFILES)
 STAGE_NAMES = ('position', 'grip', 'extract', 'carry', 'deposit', 'complete')
 GRAPH_CONSTANTS = dict(approach_radius_m=.5, approach_outer_m=1.5,
@@ -127,7 +130,7 @@ class CollisionGeometry:
 def graph_step(progress, now):
     """Update explicit dwell/hysteresis and current-state grade, including regressions."""
     c = GRAPH_CONSTANTS
-    if progress.reward_profile == GRAPH_PROFILE:
+    if progress.reward_profile in PREREQUISITE_GRAPH_PROFILES:
         return prerequisite_graph_step(progress, now)
     safe = ~now['failed'] & (now['max_load'] <= c['jaw_load_limit_N']) & (now['damage'] <= c['damage_limit'])
     threshold = torch.where(progress.graph_grip, c['slip_exit_m_s'], c['slip_enter_m_s'])

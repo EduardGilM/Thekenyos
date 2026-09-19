@@ -9,8 +9,8 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from train_fast import update
 from train_physical_smoke import build_policy
-from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE
-from treesim.kiwi_rl.graph_training import graph_rank, acceptance, protect_skills, save_acceptance, StagePractice
+from treesim.kiwi_rl.reward_graph import SOFT_GRAPH_PROFILE as GRAPH_PROFILE
+from treesim.kiwi_rl.graph_training import graph_rank, save_acceptance
 from treesim.kiwi_rl.fast_teacher import TEACHER_SCHEMA, build_privileged_policy, validate_teacher_report
 
 
@@ -82,8 +82,8 @@ def run(args):
     from treesim.kiwi_rl.ppo import save_checkpoint,load_checkpoint
     from treesim.kiwi_rl.training_log import TrainingLog
     role=args.role
-    if args.reward_graph and args.cti and args.stall_seconds < 6.:
-        raise ValueError('Graph CTI requires at least six seconds before inactivity termination')
+    if args.reward_graph and args.cti:
+        raise ValueError('Graph v4 is a PPO-only baseline; omit --cti')
     if args.cti and role != 'teacher':
         raise ValueError('Selective CTI currently supports the privileged teacher only')
     if role == 'teacher' and (args.eval_scene is None or args.eval_worlds < args.teacher_min_eval_episodes):
@@ -124,12 +124,13 @@ def run(args):
         optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
         cti_version=(8 if args.reward_graph else 5) if args.cti else 0,
         initialization=('checkpoint' if args.initialize_from or args.resume_from else 'random'),
-        cti_optimizer='independent_adam_vtrace' if args.reward_graph else 'independent_adam',
+        cti_optimizer=('independent_adam_vtrace' if args.reward_graph else 'independent_adam') if args.cti else None,
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     if args.reward_graph:
-        config.update(stage_practice_fraction=.25, evaluation_trials=3, evaluation_scenes=2, acceptance_rate_tolerance=.05,
-            acceptance_distance_tolerance_m=.02, regression_penalty_per_stage=.5, terminal_potential=0.)
-        from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS
+        config.update(stage_practice_fraction=0., evaluation_trials=3, evaluation_scenes=2,
+            checkpoint_rollback=False, regression_loss_multiplier=2., reward_accounting='episode_peak_gain_minus_weighted_loss')
+        from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS, REGRESSION_WEIGHTS
+        config['regression_weights']=REGRESSION_WEIGHTS
         config['reward_graph_constants']={k:v for k,v in GRAPH_CONSTANTS.items()
             if k not in ('approach_radius_m','approach_outer_m','insertion_range_m')}
         config['reward_graph_constants'].update(position_scale_m=.15, reset_settle_seconds=4., cti_minimum_remaining_seconds=6.)
@@ -225,7 +226,6 @@ def run(args):
             max_episode_seconds=args.max_episode_seconds,guidance=1.,role=role,teacher_policy=teacher,
             reward_profile=config['reward_profile'],curriculum_stage=(1 if args.curriculum and
                 baseline['grasp']>=.75 and baseline['physical_failure']<=.1 else 0))
-        if args.reward_graph: collector.practice=StagePractice()
         cti_queue=None
         if cti is not None:
             from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
@@ -343,6 +343,8 @@ def run(args):
                 metrics['reward/completion_mean']=float(torch.stack([r['completion_reward'] for r in rows]).mean())
                 for name in rows[0]['stage_rewards']:
                     metrics[f'stage_reward/{name}'] = float(torch.stack([r['stage_rewards'][name] for r in rows]).mean())
+                    metrics[f'stage_gain/{name}'] = float(torch.stack([r['stage_gains'][name] for r in rows]).mean())
+                    metrics[f'stage_loss/{name}'] = float(torch.stack([r['stage_losses'][name] for r in rows]).mean())
                     metrics[f'stage_progress/{name}'] = float(torch.stack([r['stage_scores'][name] for r in rows]).mean())
                 for i, name in enumerate(('shoulder_0','shoulder_1','elbow_0','elbow_1','wrist_0','wrist_1','jaw')):
                     actions = torch.stack([r['raw'][:,i].tanh() for r in rows])
@@ -372,31 +374,21 @@ def run(args):
                 metrics.update({f'evaluation/{k}':v for k,v in result.items()})
                 score=evaluation_score(result)
                 if args.reward_graph:
-                    promoted,regressions=acceptance(result,accepted_result,floor=skill_floor)
-                    metrics.update({'acceptance/promoted':int(promoted),'acceptance/rollback':int(bool(regressions)),
-                        'acceptance/regressions':regressions,'acceptance/checkpoint':accepted_checkpoint})
+                    # Evaluation selects a display checkpoint; it never changes
+                    # the active actor, critic, optimizer or physical episodes.
+                    promoted=score>best
                     if promoted:
-                        accepted_checkpoint,accepted_result=path,result
-                        skill_floor=protect_skills(skill_floor,result)
                         best,best_checkpoint,best_result=score,path,result
-                        save_acceptance(gate_path,path,result,skill_floor)
-                    elif regressions:
-                        policy_reverted=True
-                        load_checkpoint(accepted_checkpoint,role_state,optimizer_states,expected_meta={
-                            'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
-                        practice=collector.practice
-                        collector=HarvestCollector(runtime,stall_seconds=args.stall_seconds,
-                            max_episode_seconds=args.max_episode_seconds,role=role,reward_profile=config['reward_profile'])
-                        collector.practice=practice
-                        if cti_queue is not None:
-                            cti_queue=PPODecisionQueue(worlds=args.cti_worlds,segment_steps=args.steps,minimum_remaining_seconds=6.)
-                    metrics['acceptance/checkpoint']=accepted_checkpoint
+                        accepted_checkpoint,accepted_result=path,result
+                        save_acceptance(gate_path,path,result,{})
+                    metrics.update({'acceptance/promoted':int(promoted),'acceptance/rollback':0,
+                        'acceptance/checkpoint':accepted_checkpoint})
                     for key,value in accepted_result.items(): metrics['accepted/'+key]=value
                 elif score>best:best,best_checkpoint,best_result=score,path,result
                 last_eval=time.monotonic()
             if args.reward_graph:
-                metrics['practice/starts']=collector.practice.starts
-                metrics['practice/boundaries']=len(collector.practice.bank)
+                metrics['practice/starts']=0
+                metrics['practice/boundaries']=0
                 metrics['graph/score_mean']=float(collector.progress.graph_score.mean())
                 metrics['graph/enclosure_fraction']=float(collector.progress.graph_enclosed.float().mean())
                 metrics['graph/secure_grip_fraction']=float(collector.progress.graph_grip.float().mean())
@@ -424,12 +416,9 @@ def run(args):
         evaluations.append(dict(update=index,**result))
         score=evaluation_score(result)
         if args.reward_graph:
-            promoted,regressions=acceptance(result,accepted_result,floor=skill_floor)
-            if promoted and not policy_reverted:
-                accepted_checkpoint,accepted_result=final,result
-                skill_floor=protect_skills(skill_floor,result)
-                save_acceptance(gate_path,final,result,skill_floor)
-            best_checkpoint,best_result=accepted_checkpoint,accepted_result
+            if score>best:
+                best,best_checkpoint,best_result=score,final,result
+                save_acceptance(gate_path,final,result,{})
         elif score>best:best,best_checkpoint,best_result=score,final,result
         teacher_sha256=hashlib.sha256(Path(best_checkpoint).read_bytes()).hexdigest()
         report=dict(config=config,baseline=baseline,evaluation=result,evaluations=evaluations,

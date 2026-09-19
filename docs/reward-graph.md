@@ -1,6 +1,41 @@
-# Prerequisite harvesting graph v3
+# Weighted regression graph v4
 
-The current profile is `graph-harvest/v3`. This contract supersedes the v1/v2
+The current profile is `graph-harvest/v4`, a PPO-only experiment with a random
+harvesting actor and critic. The fixed gait is reused. CTI, stage practice,
+explicit curriculum stages and evaluation-triggered checkpoint rollback are off.
+All seven actions remain available at every step.
+
+Physical grades and success prerequisites remain those of v3 below. An unheld
+extraction never earns extraction, carry or success credit. It receives a one-time
+penalty of 2, rather than immediately resetting the episode. Ground drops,
+physical failures, inactivity and episode limits still end episodes. Valid
+completion still requires controlled extraction and two seconds of basket settling.
+
+For each additive graph component, reward is `weight * (new_peak_gain - 2*loss)`.
+The episode peak starts at the initial component value. Only a new high earns
+positive credit; recovering previously lost progress does not repay it. Loss is
+the decrease from the previous physical component value, not a missing future
+ability. Weights are position 1, grip 1.5, extraction/carry/deposit/completion 2.
+This makes regression more expensive than equal progress and prevents profitable
+repeated acquire/release cycles. Peaks reset per physical episode. These are
+engineering weights, not calibrated guarantees of cross-update skill retention.
+
+Unlike v3 potential shaping, earned partial progress is not erased by an artificial
+terminal debit. This deliberately changes the objective to value partial competence.
+Time costs .001/control step, stall .5, physical failure/drop 5, and valid success
+pays 20. A fruit lost in reality still loses its dependent grade and incurs weighted
+regression costs. Numerical corruption remains fail-fast. Timeouts still bootstrap.
+
+Evaluation covers the same two scenes and seeded trials. It selects a best recorded
+checkpoint for display only; it never changes active policy or optimizer state.
+`acceptance/rollback` is always zero. Stage reward and physical completion charts
+remain separate. `stage_gain/*` and `stage_loss/*` expose the weighted positive
+and negative terms independently in W&B and the dashboard. Check `tests.test_soft_graph` plus archived graph tests, GPU
+collector/optimizer checks and a full-size smoke run before launching.
+
+## Archived prerequisite graph v3
+
+The archived profile is `graph-harvest/v3`. This contract supersedes the v1/v2
 partial-drop rewards below; archived checkpoints retain their original profile.
 It is an engineering training objective, not a physical calibration claim.
 

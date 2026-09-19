@@ -17,8 +17,10 @@
 <h2 class="charts-title">Skills and regression protection</h2><section class="charts">
 <div class="panel chart"><h2>Completion after entering each stage</h2><svg id="stageConditional"></svg><div class="chart-note">Full episodes only. Practice starts are excluded. Stages: position, grip, extract, carry, deposit, complete.</div></div>
 <div class="panel chart"><h2>Lost prerequisites per episode</h2><svg id="stageRegressions"></svg><div class="chart-note">Position, grip, extraction, carry and deposit losses.</div></div>
-<div class="panel chart"><h2>Accepted policy skills</h2><svg id="acceptedSkills"></svg><div class="chart-note">Evaluated completion rates for the accepted checkpoint.</div></div>
-<div class="panel chart"><h2>Candidate promotion and rollback</h2><svg id="acceptanceGate"></svg><div class="chart-note">Green: promoted. Red: reverted after skill regression. Latest video can show a rejected candidate; accepted video preserves the selected policy.</div></div>
+<div class="panel chart"><h2>New progress rewards</h2><svg id="stageGains"></svg><div class="chart-note">Weighted new episode peaks; recovery is not paid twice.</div></div>
+<div class="panel chart"><h2>Regression costs</h2><svg id="stageLosses"></svg><div class="chart-note">Weighted loss of existing progress, charged at twice the gain rate.</div></div>
+<div class="panel chart"><h2 id="selectedTitle">Accepted policy skills</h2><svg id="acceptedSkills"></svg><div class="chart-note">Evaluated completion rates for the accepted checkpoint.</div></div>
+<div class="panel chart"><h2 id="selectionTitle">Candidate promotion and rollback</h2><svg id="acceptanceGate"></svg><div class="chart-note">Green: promoted. Red: reverted after skill regression. Latest video can show a rejected candidate; accepted video preserves the selected policy.</div></div>
 </section></main><script>
 'use strict';
 const $=id=>document.getElementById(id),fmt=(n,d=0)=>Number.isFinite(n)?n.toLocaleString('en-GB',{maximumFractionDigits:d}):'—',compact=n=>Number.isFinite(n)?Intl.NumberFormat('en-GB',{notation:'compact',maximumFractionDigits:1}).format(n):'—',percent=n=>Number.isFinite(n)?fmt(n*100,1)+'%':'—',time=n=>Number.isFinite(n)?`${Math.floor(n/60)}:${String(Math.floor(n%60)).padStart(2,'0')}`:'—';
@@ -39,11 +41,23 @@ $('comparisons').textContent=fmt(total('roots_searched'))+' PPO starting worlds 
 $('ctinote').textContent='All valid branch transitions feed actor and critic learning, including failures. Replay-invalid roots are excluded. The count above includes only accepted optimizer updates; harvesting success is measured separately.';
 $('ctiColValid').textContent='Valid branches';$('ctiColBetter').textContent='Better alternatives';$('ctiColLearning').textContent='Learned transitions';
 }const r=s.render||{};$('renderStatus').textContent=r.status==='rendering'?'Rendering '+(r.checkpoint||'checkpoint')+'…':r.error?'Render needs attention':s.video?'Recorded rollout':'Preparing rollout';if(s.video){const v=s.video;if(v.url!==videoURL){const playing=!$('video').paused;videoURL=v.url;$('video').src=v.url;$('video').hidden=false;$('videoEmpty').style.display='none';if(playing)$('video').play().catch(()=>{})}const when=v.created_at?new Date(v.created_at*1000).toLocaleTimeString():'';$('videoNote').textContent=`${v.checkpoint||'Checkpoint'} · rendered ${when} · ${v.report?.success?'Harvest succeeded':'No successful harvest in this rollout'} · privileged teacher, world + arm camera. ${r.error||''}`;}else if(r.error){$('videoEmpty').textContent='Render unavailable: '+r.error}const phaseEvent=(s.phase_events||[]).filter(e=>(e.phase||'').startsWith('cti-v')).at(-1);const boundary=phaseEvent&&Number(phaseEvent.elapsed_seconds);chart('outcomes',evals,[{key:'evaluation/success',color:'#b7e87d'},{key:'evaluation/physical_failure',color:'#f69c8d'},{key:'evaluation/grasp',color:'#87c8e9'}],{fixed:[0,100],unit:'%',scale:100,boundary});chart('distance',rows.filter(r=>r['episode/episodes']>0),[{key:'episode/closest_distance_m',color:'#ebce83'}],{scale:100,boundary});chart('reward',rows,[{key:'reward/task_mean',color:'#87c8e9'},{key:'reward/shaping_mean',color:'#b7e87d'}]);chart('throughput',rows,[{key:'training_transitions_per_second',color:'#b7e87d'}],{scale:.001,unit:'k',boundary});const stageNames=['position','grip','extract','carry','deposit','complete'], colors=['#b7e87d','#87c8e9','#ebce83','#c7a6f7','#f69c8d','#ffffff'];
-for(const [id,prefix,suffix] of [['stageRewards','stage_reward/',''],['stageProgress','stage_progress/',''],['stageReached','episode/reached/',''],['stageTimes','episode/time/','_seconds']]) chart(id,rows,stageNames.map((name,i)=>({key:prefix+name+suffix,color:colors[i]})));
+for(const [id,prefix,suffix] of [['stageGains','stage_gain/',''],['stageLosses','stage_loss/',''],['stageRewards','stage_reward/',''],['stageProgress','stage_progress/',''],['stageReached','episode/reached/',''],['stageTimes','episode/time/','_seconds']]) chart(id,rows,stageNames.map((name,i)=>({key:prefix+name+suffix,color:colors[i]})));
 chart('stageConditional',rows,stageNames.map((name,i)=>({key:'episode/conditional/'+name,color:colors[i]})));
 chart('stageRegressions',rows,stageNames.map((name,i)=>({key:'episode/regression/'+name,color:colors[i]})));
 chart('acceptedSkills',rows.map((r,i)=>i===0?{...r,...Object.fromEntries(Object.entries(r).filter(([k])=>k.startsWith('evaluation/')).map(([k,v])=>[k.replace('evaluation/','accepted/'),v]))}:r),stageNames.map((name,i)=>({key:'accepted/completed/'+name,color:colors[i]})));
 chart('acceptanceGate',rows,[{key:'acceptance/promoted',color:colors[0]},{key:'acceptance/rollback',color:'#f69c8d'}]);
+if(s.config?.reward_profile==='graph-harvest/v4'){
+$('ctiKind').textContent='Disabled';
+$('ctinote').textContent='PPO only. No counterfactual learner or branch search.';
+$('runDescription').textContent='Fresh harvesting policy · 4,096 PPO worlds · weighted regression rewards · no curriculum or rollback';
+$('accepted').textContent='Off'; $('acceptedLabel').textContent='CTI disabled';
+$('evalScope').textContent='Training and held-out scenes · nominal and seeded stochastic trials';
+$('selectedTitle').textContent='Best recorded policy skills';
+$('selectedTitle').parentElement.querySelector('.chart-note').textContent='Evaluation selects a recording; the active learner continues uninterrupted.';
+$('selectionTitle').textContent='Best checkpoint updates';
+$('selectionTitle').parentElement.querySelector('.chart-note').textContent='Green: new best recorded checkpoint. No policy or optimizer rollback.';
+}
+
 
 chart('saturation',rows,['shoulder_0','shoulder_1','elbow_0','elbow_1','wrist_0','wrist_1','jaw'].map((name,i)=>({key:'action_saturation/'+name,color:[...colors,'#ffa7da'][i]})),{fixed:[0,100],scale:100});
 chart('stageCti',rows,Array.from({length:7},(_,i)=>({key:'cti/stage_'+i+'/physical_progress_fraction',color:[...colors,'#ffa7da'][i]})),{fixed:[0,100],scale:100});

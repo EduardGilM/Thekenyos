@@ -225,7 +225,7 @@ class Dashboard:
             report_wandb_url = report.get('wandb_url') if isinstance(report, dict) else None
             wandb_url = self.wandb_url or (report_wandb_url if isinstance(report_wandb_url, str) else None)
             with self.lock:
-                self.state.update(rows=rows, wandb_url=wandb_url, log_mtime=remote.get('log_mtime'),
+                self.state.update(rows=rows, config=remote.get('config') or {}, wandb_url=wandb_url, log_mtime=remote.get('log_mtime'),
                                   process_alive=bool(remote.get('process_alive')),
                                   active_process=remote.get('active_process'),
                                   active_status=remote.get('active_status'),

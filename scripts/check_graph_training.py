@@ -1,4 +1,4 @@
-"""Physical reset, command sensitivity and progress checks for graph v2."""
+"""Physical reset, command sensitivity and progress checks for the current weighted graph."""
 import json
 import os
 import sys
@@ -12,7 +12,7 @@ def main():
     from treesim.kiwi_rl.fast_runtime import FastRuntime
     from treesim.kiwi_rl.control import load_gait_artifact
     from treesim.kiwi_rl.harvest_training import signals, EpisodeProgress
-    from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE
+    from treesim.kiwi_rl.reward_graph import SOFT_GRAPH_PROFILE as GRAPH_PROFILE
     torch.set_num_threads(1); wp.init()
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)), torch.no_grad():

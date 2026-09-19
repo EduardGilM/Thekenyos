@@ -2,7 +2,7 @@
 import torch
 import warp as wp
 from treesim.basket import CENTER
-from .reward_graph import GRAPH_PROFILE, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
+from .reward_graph import GRAPH_PROFILE, SOFT_GRAPH_PROFILE, PREREQUISITE_GRAPH_PROFILES, REGRESSION_WEIGHTS, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -83,9 +83,12 @@ class EpisodeProgress:
         if reward_profile in GRAPH_PROFILES:
             graph_step(self, initial)
             self.graph_dwell.zero_()
+        self.graph_peak_components = {k:v.clone() for k,v in self.graph_components.items()} if reward_profile in GRAPH_PROFILES else {}
         self.graph_best = self.graph_score.clone()
         self.graph_reference = self.graph_score.clone()
         self.graph_progress_reward = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
+        self.graph_gain_reward = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
+        self.graph_loss_reward = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
         self.graph_time = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
         self.graph_reached = {name: torch.zeros_like(self.ever_grasp) for name in STAGE_NAMES}
         self.graph_forward = torch.zeros_like(self.age)
@@ -197,6 +200,7 @@ class EpisodeProgress:
 
     def _graph_step(self, now, physical_done):
         self.age += 1; self.stale += 1
+        previous_detached = self.graph_detached.clone()
         previous_score = self.graph_score.clone()
         previous_components = self.graph_components
         previous_stage = self.graph_stage.clone()
@@ -221,7 +225,7 @@ class EpisodeProgress:
             extract=(self.graph_grip & ~detached) | (detached & ~self.graph_grip & ~settling),
             carry=detached & self.graph_grip,
             deposit=settling & ~now['success'], complete=now['success'])
-        if self.reward_profile == GRAPH_PROFILE:
+        if self.reward_profile in PREREQUISITE_GRAPH_PROFILES:
             activity = dict(position=self.graph_stage==0, grip=self.graph_stage==1,
                 extract=self.graph_stage==2, carry=(self.graph_stage==3)|(self.graph_stage==4),
                 deposit=self.graph_stage==5, complete=self.graph_stage==6)
@@ -236,12 +240,12 @@ class EpisodeProgress:
             active = activity[name]
             self.graph_time[name] += active.float()*self.control_dt
             self.graph_reached[name] |= active
-            if self.reward_profile == GRAPH_PROFILE: self.graph_reached[name] |= self.graph_completed[name]
+            if self.reward_profile in PREREQUISITE_GRAPH_PROFILES: self.graph_reached[name] |= self.graph_completed[name]
 
         self.closest = torch.minimum(self.closest, now['distance'])
         self.ever_grasp |= self.graph_grip
         self.ever_detached |= self.graph_detached
-        self.ever_held_detach |= (self.graph_valid_extract & self.graph_grip if self.reward_profile == GRAPH_PROFILE else self.graph_detached & self.graph_grip)
+        self.ever_held_detach |= (self.graph_valid_extract & self.graph_grip if self.reward_profile in PREREQUISITE_GRAPH_PROFILES else self.graph_detached & self.graph_grip)
         ending = physical_done | self.graph_ground_drop
         stalled = (self.stale >= self.stall_steps) & ~ending
         terminated = ending | stalled
@@ -250,7 +254,7 @@ class EpisodeProgress:
         self.task_reward = -.001 + 20*now['success'] - 5*failure - .5*stalled
         self.shaping_reward = self.gamma*score - previous_score
         self.previous = {k:v.clone() for k,v in now.items()}
-        if self.reward_profile == GRAPH_PROFILE:
+        if self.reward_profile in PREREQUISITE_GRAPH_PROFILES:
             failure = failure | self.graph_ground_drop | self.graph_invalid_extract | (physical_done & ~self.graph_success)
             terminated = terminated | failure
             truncated &= ~terminated
@@ -261,6 +265,22 @@ class EpisodeProgress:
             self.shaping_reward = self.gamma*torch.where(terminated,0.,score)-previous_score
             for name in STAGE_NAMES:
                 self.graph_progress_reward[name] = self.gamma*torch.where(terminated,0.,self.graph_components[name])-previous_components[name]
+        if self.reward_profile == SOFT_GRAPH_PROFILE:
+            # Irreversible bad extraction is negative experience, not an early
+            # reset. Physical failure/drop and the episode limits still end it.
+            new_invalid = self.graph_invalid_extract & ~previous_detached
+            terminated = ending | stalled
+            truncated = (self.age >= self.max_steps) & ~terminated
+            failure = now['failed'] | self.graph_ground_drop | (physical_done & ~self.graph_success)
+            self.task_reward = -.001 + 20*self.graph_success - 5*failure - 2*new_invalid - .5*stalled
+            for name, current in self.graph_components.items():
+                gain = (current-self.graph_peak_components[name]).clamp_min(0)
+                loss = (previous_components[name]-current).clamp_min(0)
+                self.graph_gain_reward[name] = REGRESSION_WEIGHTS[name]*gain
+                self.graph_loss_reward[name] = 2*REGRESSION_WEIGHTS[name]*loss
+                self.graph_progress_reward[name] = self.graph_gain_reward[name]-self.graph_loss_reward[name]
+                self.graph_peak_components[name] = torch.maximum(self.graph_peak_components[name], current)
+            self.shaping_reward = sum(self.graph_progress_reward.values())
         return self.task_reward+self.shaping_reward, terminated, truncated, stalled
 
 
@@ -363,8 +383,10 @@ class HarvestCollector:
                         row['teacher_action'] = teacher_action
                     if self.progress.reward_profile in GRAPH_PROFILES:
                         row['stage_rewards'] = {k:v.clone() for k,v in self.progress.graph_progress_reward.items()}
+                        row['stage_gains'] = {k:v.clone() for k,v in self.progress.graph_gain_reward.items()}
+                        row['stage_losses'] = {k:v.clone() for k,v in self.progress.graph_loss_reward.items()}
                         row['stage_scores'] = {k:v.clone() for k,v in self.progress.graph_components.items()}
-                        row['completion_reward'] = 20*(self.progress.graph_success if self.progress.reward_profile == GRAPH_PROFILE else now['success']).float()
+                        row['completion_reward'] = 20*(self.progress.graph_success if self.progress.reward_profile in PREREQUISITE_GRAPH_PROFILES else now['success']).float()
                         row['joint_velocity'] = wp.to_torch(rt.data.qvel)[:, self.runtime.control.contract.dofs[12:]].clone()
                         row['target_error'] = (wp.to_torch(rt.control.targets)[:,12:] - wp.to_torch(rt.data.qpos)[:,rt.control.contract.qids[12:]]).clone()
                     rows.append(row)
@@ -373,7 +395,7 @@ class HarvestCollector:
                     rt.check()
                     # Summaries are episode outcomes; each world contributes once.
                     ids = ending.nonzero(as_tuple=False).flatten()
-                    outcome_success = self.progress.graph_success if self.progress.reward_profile == GRAPH_PROFILE else now['success']
+                    outcome_success = self.progress.graph_success if self.progress.reward_profile in PREREQUISITE_GRAPH_PROFILES else now['success']
                     packed = torch.stack((ids, outcome_success[ids],
                         self.progress.ever_grasp[ids],self.progress.ever_detached[ids],self.progress.ever_held_detach[ids],
                         (done & ~outcome_success)[ids],stalled[ids],truncated[ids],
@@ -394,7 +416,7 @@ class HarvestCollector:
                                 backward_transitions=int(self.progress.graph_backward[world]),
                                 **{f'reached/{k}':bool(v[world]) for k,v in self.progress.graph_reached.items()},
                                 **{f'time/{k}_seconds':float(v[world]) for k,v in self.progress.graph_time.items()})
-                    if self.progress.reward_profile == GRAPH_PROFILE:
+                    if self.progress.reward_profile in PREREQUISITE_GRAPH_PROFILES:
                         for entry, world in zip(episodes[-len(ids):], ids.tolist()):
                             entry.update(task_failure=bool(self.progress.graph_invalid_extract[world] | self.progress.graph_ground_drop[world] | (done[world] & ~outcome_success[world])),
                                 invalid_extraction=bool(self.progress.graph_invalid_extract[world]),
