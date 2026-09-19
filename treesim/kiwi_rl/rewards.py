@@ -145,3 +145,64 @@ class RewardEvaluator:
         """Preloaded basket fruit counts as STORED without deposit reward."""
         i = self.ledger._idx(fid)
         self.ledger.deposit_paid[i] = True
+
+
+SPARSE_TERM_NAMES = ('deposit', 'loss', 'spill', 'damage', 'fall', 'time')
+
+
+def _batch_flags(name, values, batch, fruit=None):
+    arr = np.asarray(values)
+    if fruit is None:
+        expected = (batch,)
+    else:
+        expected = (batch, fruit)
+    if arr.shape != expected:
+        raise ValueError(f'{name} shape {arr.shape} != {expected}')
+    return arr.astype(bool)
+
+
+def compute_reward_batch(privileged, action, next_privileged):
+    """Sparse event rewards from privileged state only. No images.
+
+    Relabel demo and online transitions from stored
+    ``(privileged_state, action, next_privileged_state)`` pairs. View
+    terms (in_view, centering, view_loss) are not part of this lane.
+    """
+    if action is None:
+        raise ValueError('Sparse reward still records the executed action')
+    prev, nxt = privileged, next_privileged
+    deposited = np.asarray(prev['deposited'], dtype=bool)
+    batch, fruit = deposited.shape
+    action = np.asarray(action, dtype=np.float32)
+    if action.ndim != 2 or action.shape[0] != batch or not np.isfinite(action).all():
+        raise ValueError('Actions must be finite [batch, dim]')
+    new_deposit = (~deposited) & _batch_flags('next.deposited', nxt['deposited'], batch, fruit)
+    new_loss = (~_batch_flags('lost', prev['lost'], batch, fruit)
+                & _batch_flags('next.lost', nxt['lost'], batch, fruit))
+    new_spill = (~_batch_flags('spilled', prev['spilled'], batch, fruit)
+                 & _batch_flags('next.spilled', nxt['spilled'], batch, fruit))
+    damage = np.asarray(nxt['damage'], dtype=np.float64) - np.asarray(prev['damage'], dtype=np.float64)
+    if damage.shape != (batch,) or not np.isfinite(damage).all() or np.any(damage < -1e-9):
+        raise ValueError('Damage must be finite and nondecreasing')
+    damage = np.clip(damage, 0., None)
+    fallen = (~_batch_flags('fallen', prev['fallen'], batch)
+              & _batch_flags('next.fallen', nxt['fallen'], batch))
+    dt = np.asarray(nxt.get('dt_s', prev.get('dt_s', 0.04)), dtype=np.float64)
+    if dt.shape not in ((batch,), ()) or not np.isfinite(dt).all() or np.any(np.asarray(dt) < 0) or np.any(np.asarray(dt) > 1):
+        raise ValueError('dt_s must be finite in [0, 1] s')
+    terms = dict(
+        deposit=W_DEPOSIT * new_deposit.sum(axis=1).astype(np.float64),
+        loss=W_LOSS * new_loss.sum(axis=1).astype(np.float64),
+        spill=W_SPILL * new_spill.sum(axis=1).astype(np.float64),
+        damage=W_DAMAGE_PER_UNIT * damage,
+        fall=W_FALL * fallen.astype(np.float64),
+        time=W_TIME_PER_S * np.broadcast_to(dt, (batch,)).astype(np.float64),
+    )
+    if any(name in terms for name in ('in_view', 'centering', 'view_loss')):
+        raise RuntimeError('Sparse pixel lane must not add view-based rewards')
+    reward = np.zeros(batch, dtype=np.float32)
+    for name in SPARSE_TERM_NAMES:
+        reward += terms[name].astype(np.float32)
+    if not np.isfinite(reward).all():
+        raise ValueError('Sparse reward must be finite')
+    return reward, {name: value.astype(np.float32) for name, value in terms.items()}

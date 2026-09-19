@@ -853,6 +853,381 @@ a scripted controller using frozen RELIC, not learned deposit behavior. The next
 learning milestone is carrying and depositing from varied held-fruit poses,
 then full approach/pick/deposit and repeated collection with held-out evaluation.
 
+### Camera-based assisted RL
+
+`Thekenyos/VisualKiwi-v0` (`treesim/visual_kiwi_env.py`) is an opt-in visual
+version of the basket fixture. The actor **and critic** receive only robot
+sensor observations; exact fruit poses, target IDs, masks, attachment flags,
+harvest phase and deposit counts are excluded. Privileged state remains in
+rewards, termination checks and diagnostic `info`, which is not policy input.
+The 78/99-value policies are intentionally incompatible with visual checkpoints.
+This does not resume the blocked contact-only rigid-fruit pilot.
+
+The camera contract is deliberately explicit and provisional:
+
+- Hand RGB and ToF only. Wrist-relative offsets `[.13806, .0202, .02452]`
+  and `[.13495, 0, .00799]` m and forward axis from the commented hand sensor
+  frames in the pinned external RELIC URDF; assumed 75-degree vertical FOV.
+  There is no chassis head camera. Camera axes move rigidly with the wrist, never track a simulator target, and
+  retain self-occlusion. Actual hardware extrinsics/intrinsics still need measurement.
+- 64×64 pixels by default (`--camera-size 96` is supported), 10 Hz synchronized
+  sampling, one control-step latency and three frames of history. `rgb` is
+  channel-first hand RGB uint8 (3 channels per frame); `tof` contains optical-axis depth divided by 3 m and
+  a validity channel per frame. This is a rendered depth **surrogate**, not a
+  physical ToF model: no multipath, reflectance or sunlight simulation.
+- Range 0.08–3 m, invalid depth encoded as zero plus an explicit invalid mask;
+  3% depth-pixel dropout, Gaussian depth noise with standard deviation
+  `0.005 + 0.003 * depth_m**2`, 5% whole-rig frame loss, pixel noise, per-episode
+  RGB gains, ±2-degree FOV variation and 3 mm mount-position standard deviation.
+  Sensor ages expose stale frames. These are assumptions, not measured noise.
+- 61 proprioceptive values: joint positions/velocities, projected gravity,
+  body twist estimate, forward-kinematic TCP offset, previous commands and
+  remaining time. The first 47 values receive small Gaussian noise. Body twist
+  and attitude remain simulator-derived estimator surrogates, not a tested
+  visual-inertial estimator; frozen RELIC retains its original low-level inputs.
+
+PPO uses a small two-branch CNN (RGB and depth), fuses those features with
+proprioception and frame ages, and learns **ten** 10 Hz commands: body x/y/yaw,
+hand Cartesian XYZ velocity, wrist angular XYZ requests and jaw closure.
+Wrist commands use a damped positional-nullspace IK correction, so they are
+requests rather than guaranteed angular tracking. Joint speed/effort bounds and
+basket collision guards stay active. No scripted actions or pretrained detector
+are used. Cameras never render diagnostic target spheres, sites or segmentation.
+
+Fruit positions vary independently after the reset arm pose is chosen: ±18 cm
+in X/Y and ±7.2 cm in Z. The inherited close-start curriculum is still a biased
+fixture, not a full orchard. Any unpicked kiwi can be captured; internal nearest
+fruit selection supplies outcome/shaping bookkeeping, not actor coordinates.
+
+```bash
+MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_visual_kiwi_env -v
+python scripts/train_assisted_kiwi.py --relic ../relic --vision \
+  --visual-lesson grab --output output/visual-grab --steps 8192 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0003 \
+  --exploration-std .3 --gripper-std .2 --eval-every 2048 \
+  --eval-episodes 8 --heldout-seed 81000 --policy-device cuda --record-video
+python scripts/train_assisted_kiwi.py --relic ../relic --vision \
+  --visual-lesson collect --start-phase release --picks 1 \
+  --output output/visual-release --steps 8192 --num-envs 4 \
+  --policy-device cuda --record-video
+```
+
+The grab lesson terminates after assisted retention, **not basket collection**.
+The collect lesson preserves the complete basket objective; `carry`/`release`
+starts remain reset-only teaching fixtures. Move to `--start-phase pick`, then
+increase `--picks` only after evaluations support doing so. Weight-only warm
+starts may change the visual lesson, start phase, count and episode horizon
+(for longer collection lessons), but retain matching sensor/source contracts and
+physical success criteria. Exact resume still requires the same horizon. There is no automatic transition
+from grasp lessons to full collection. Existing distance-stage promotion still
+requires two consecutive monitoring passes. Sensor rendering remains mandatory
+even with `--no-images`; that flag only disables diagnostic images/video.
+
+All evaluations disable distance/capture shaping, keep sensor degradation and
+physical failure checks, and save numerical results. Monitoring selects the
+checkpoint before matched held-out comparisons and hand-RGB, ToF, and all-camera
+**blackout ablations**. Blackout tests are distribution
+shifts, not sufficient evidence of semantic perception; comparable blind success
+would reveal that the fixture can be solved without vision. Videos include the
+actual delayed sensor views alongside a diagnostic external view. Failures,
+initial weights, checkpoint/source manifests and weight-change checks are retained.
+
+Initial visual experiments on dayone: a 256-transition interface check followed
+by **two 8,192-transition PPO experiments**, all on the close-start grab lesson.
+The first run used learning rate 3e-4 and achieved no deterministic grabs;
+monitoring selected its 2,048-step checkpoint rather than the regressed final
+checkpoint. A weight-only continuation used learning rate 3e-5, gripper
+exploration standard deviation 0.4, motion standard deviation 0.3 and entropy
+0.001. The lower rate reduced excessive policy KL changes. It produced six
+exploratory grabs, but deterministic monitoring and held-out success remained
+**0/8**. This is not a learned full-cycle basket policy.
+
+On identical fresh seeds 82000–82007, the second experiment's initial and selected
+8,192-step policies compared as follows (shaping disabled):
+
+| Policy/input | Assisted grabs | Mean closest gripper distance |
+|---|---:|---:|
+| Continuation initial weights, all sensors | 0/8 | 14.4 cm |
+| Continuation selected weights, all sensors | 0/8 | 6.2 cm |
+| Same selected weights, all cameras blacked out | 0/8 | 15.0 cm |
+
+All these episodes timed out. Images influence useful approach behavior in this
+screen, but there is no successful-grasp or real-perception validation. Diagnostic
+replays found the hand inside the capture zone on two checked seeds while the
+mean gripper command stayed below the unchanged 0.2 close threshold, leaving the
+jaw open. A gripper-decision/retention curriculum is the next learning priority;
+neither capture rules nor evaluation thresholds were relaxed to improve scores.
+
+Artifacts and failed videos are preserved under
+`/home/fran/Thekenyos-visual-results-01` and `Thekenyos-visual-results-02`, mirrored
+from `/home/ubuntu/visual-kiwi-ppo-01` and `visual-kiwi-ppo-02`. The second run's
+`policy-00008192.zip` is a research continuation checkpoint, not a working picker.
+Its `heldout-best-stage-0.mp4` shows the first fixed held-out failure with sensor
+insets. Forty-one visual/assisted/basket tests passed, alongside the original
+harvesting-interface checks at 1/2 kHz and fixed-base full-cycle regressions at
+20/10 microseconds. Real hardware calibration, broader scenes, long-distance
+visual approach, reliable grabbing and learned visual basket collection remain
+unvalidated.
+
+### Camera geometry and body-first approach experiment
+
+The visual task now fixes a close-range rendering bug: the scene-scaled near
+plane was **6.644 cm**, while the gripper TCP is only about **6 cm** from the
+wrist cameras (and closer along their optical axes). Near gripper/fruit surfaces
+could therefore disappear. Robot-camera rendering temporarily uses a **5 mm**
+near plane, with the same value in MuJoCo's metric-depth conversion, then restores
+the diagnostic renderer's settings. Physics and the ToF's **8 cm minimum valid
+range** are unchanged. Invalid depth remains unknown, not zero clearance.
+
+Hand RGB/ToF mount offsets remain the authored URDF references, not target-following
+cameras. New pinhole projection/back-projection tests verify off-axis pixels,
+metric optical-axis depth, camera-to-TCP translation, and near-surface occlusion.
+A ToF surface depth is neither Euclidean range nor distance from the gripper;
+`visual_servo.py` back-projects each pixel and transforms it into the current body
+frame before subtracting the forward-kinematic TCP. Depth is registered into the
+separately positioned RGB camera, not indexed at matching RGB pixel coordinates.
+Capture-time poses compensate for delayed images using the robot's own odometry
+surrogate. Real intrinsics/extrinsics, depth biases and odometry remain uncalibrated.
+The white crosses in diagnostic images are projected **TCP + 11.5 cm along the
+hand's forward axis**; they are not fruit labels and never enter policy images.
+
+`scripts/check_visual_approach.py` tests a **SCRIPTED, camera-only baseline**, not
+new PPO learning or basket collection. It consumes RGB, ToF, camera calibration,
+robot kinematics and body velocity; simulator fruit coordinates are used only
+by the separate outcome/error/contact recorder. The baseline:
+
+1. Uses the current hand pose. It does not park the arm out of view: there is
+   no chassis head camera to clear.
+2. Confirms repeated hand RGB/ToF candidates. There is no monocular size prior.
+   The remaining brown-mask heuristic can confuse brown branches with fruit; it
+   is not a trained or validated real-fruit detector.
+3. Stops the base before fine control (`body_first`), rather than continuing to
+   walk while reaching. `fixed` and `simultaneous` provide comparison conditions.
+4. Aims the **gripper axis**, not the camera image center, and uses registered
+   hand RGB/ToF components for fine translation. Connected brown surfaces are
+   separated by depth jumps and a shape check. A 3 cm radius prior estimates the
+   fruit center from its visible surface; this has residual localization error.
+5. After switching to hand depth, stops on missing/stale measurements instead of
+   reverting to uncertain monocular range. Three fresh aligned measurements are
+   required before closing. The underlying 12 cm capture rule is unchanged.
+
+The baseline defaults to 192×192 images; archived CNN checkpoints used 64×64
+head+hand RGB (6 channels per frame). The current packet is **hand RGB + hand ToF
+only** (3 RGB channels per frame). Old visual checkpoints cannot be loaded into
+this observation space. The PPO observation keys/actions are otherwise unchanged, but **corrected images and the removed head camera change the
+sensor contract**. Old visual checkpoints must not be assumed valid after this
+fix; their source snapshots remain archived. The PPO trainer does not secretly
+execute the scripted controller or receive its estimated fruit positions.
+
+```bash
+MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_visual_kiwi_env -v
+python scripts/check_visual_approach.py --relic ../relic \
+  --output output/body-first --mode body_first --standoff .7 --seconds 30 \
+  --seeds 83000 83001 83002 83003 --video
+python scripts/check_visual_approach.py --relic ../relic \
+  --output output/directly-under --standoff 0 --seconds 30 \
+  --seeds 83000 83001 83002 83003 --video
+```
+
+Use `--mode fixed` to disable body-positioning commands, `--mode simultaneous`
+to allow body/fine-hand motion together, `--physics-hz 2000` for timestep checks,
+and `--ablation all|hand|tof` for sensor blackouts. `--mode learned --size 64
+--checkpoint PATH` explicitly replays an archived CNN against corrected images;
+this is evaluation under a changed sensor model, not retraining. Outputs include
+per-seed traces, all failures, source snapshots/hashes, first-fixed-seed videos,
+maximum single-contact force, contact duration and maximum fruit penetration.
+These are rigid-simulation diagnostics, not calibrated force or bruising limits.
+
+The completed four-seed body-positioning screen (83000–83003, 30 s, 192×192,
+1 kHz) scored 1/4 with no body-positioning commands, 0/4 directly underneath,
+2/4 at a 0.5 m estimated stand-off, 2/4 at 0.7 m, and 1/4 with simultaneous
+body/hand motion. Those archived scores used a chassis head RGB size prior that
+is no longer in the sensor packet. The 0.7 m result fell to 1/4 at 2 kHz; this is not robust.
+All final scripted study episodes recorded zero fruit contact and arm–basket
+overlap, relying on the existing attachment assistance rather than contact grasp.
+Both camera-blackout and ToF-blackout checks scored 0/4. Medium-distance seeds
+83100–83103 improved from 0/4 without body commands to 1/4 with body-first control;
+the successful case moved 0.562 m. Earlier pilots include collision failures and
+a 33.7 N contactful capture. The old CNN still collided with corrected images
+(22.0 N in seed 82000); changing the camera is not a trained-policy fix.
+The study and its source snapshots are preserved in
+`/home/fran/Thekenyos-visual-body-study-01` and remote `visual-body-study-01-*`
+directories. These are scripted feasibility experiments, not new PPO training.
+
+### Arm-only close-fruit camera lesson
+
+`Thekenyos/StationaryKiwi-v0` (`treesim/stationary_kiwi_env.py`) is a camera-only
+**grab** lesson. Walking and wrist-rotation commands are disabled. The actor sees
+stacked wrist RGB-D, noisy proprioception, phase and grasp/place flags; fruit
+coordinates, IDs and segmentation remain excluded. The critic reads privileged
+99-D basket state. This is assisted retention with an artificial grip weld, not
+contact-only grasping, basket collection or damage validation. It does not replace
+the walking visual task.
+
+The robot spawn is identical at every level. **Stage 0 (S0v)** places one fruit
+inside the wrist depth FOV at **20–40 cm** and scores pregrasp. Stages 1–3 place
+fruit at **24, 32, then 44 cm** along the initial gripper axis, with a
+**body-YZ offset of 18–20, 19–22, then 20–24 cm**. That later offset is larger
+than the 12 cm assist weld plus standing-gait drift, so a constant
+body-forward reach cannot solve those levels. Wrist cameras use the Boston
+Dynamics gripper vertical FOV (46.4° RGB, 44° depth) and a 0.15 m ToF cutoff.
+S0v promotes after one monitoring pass with at least 80% arm-only pregrasps,
+cameras on. Later levels need two consecutive ≥75% arm-only assisted holds
+(net body travel below 10 cm, more than 1.5 cm of hand motion). Closing the jaw
+in place does not solve the lesson. Training turns on view in-view/centering
+rewards and turns off privileged distance/capture shaping; evaluation turns view
+shaping off too. Actions are three categorical Cartesian steps
+(−0.1575, 0, +0.1575 m/s) plus a binary jaw command. Episodes last 6 s.
+
+```bash
+MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_stationary_kiwi_env -v
+python scripts/train_assisted_kiwi.py --relic ../relic --stationary \
+  --output output/stationary-grab-s0v --steps 32768 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0001 --entropy .002 \
+  --eval-every 4096 --eval-episodes 8 --heldout-seed 86000 \
+  --policy-device cuda --record-video
+```
+
+`--stationary` forces `--vision --visual-lesson grab --start-phase pick`. Do not
+warm-start a 10-action walking visual checkpoint into this 4-action contract, or
+the reverse. Evaluations disable shaping, keep sensor noise, keep cameras on,
+and score `stationary_success` rather than walking grabs. Increase
+fruit distance only after the S0v cameras-on gate passes. The
+archived on-axis run (`stationary-kiwi-ppo-01`) and the previous off-axis
+head-camera run (`stationary-kiwi-ppo-offaxis-01`) are different lessons.
+Do not treat those checkpoints as this wrist-FOV task.
+
+Replay a checkpoint with sensor-inset video (not training):
+
+```bash
+python scripts/replay_assisted_kiwi.py --relic ../relic \
+  --checkpoint output/stationary-grab/policy-00004096.zip \
+  --output output/stationary-replay --device cuda --seeds 84000 84001 84002 84003
+```
+
+After the arm-only lesson, walking uses a **new** 10-action camera policy.
+The standing 4-action actor cannot be loaded into it. Copy only the camera CNN
+with `--encoder-warm-start`, then teach body motion on the close-start grab
+lesson before asking for basket deposits. After that encoder copy, walking
+action means start at zero and motion exploration is capped at 0.15 so a
+random arm command does not immediately fail on the rear basket. Jumping from
+the standing encoder straight to three hanging fruit at 0.75–1.60 m asks
+untrained walking and deposit heads to solve pick, release and settling
+together.
+
+```bash
+python scripts/train_assisted_kiwi.py --relic ../relic --vision \
+  --visual-lesson grab --output output/visual-walk-grab --steps 32768 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0001 --entropy .002 \
+  --exploration-std .3 --gripper-std .4 --eval-every 4096 --eval-episodes 8 \
+  --heldout-seed 85000 --policy-device cuda --record-video --episode-seconds 30 \
+  --encoder-warm-start output/stationary-grab/policy-00032768.zip
+```
+
+Walking grab defaults to **30 s**. Fifteen seconds used the full horizon with the
+hand already inside the 12 cm assist radius on some seeds and the jaw still
+open. Stationary close-fruit stays 6 s; collect stays 90–120 s.
+Queue the walking grab, then one-fruit collect, then three-fruit collect with
+`scripts/queue_visual_harvest.py`. It waits for an existing trainer PID, never
+signals other processes, and full-weight warm-starts a later stage only if
+that parent’s held-out evaluation actually succeeded.
+
+```bash
+python scripts/queue_visual_harvest.py --relic ../relic \
+  --stationary-checkpoint output/stationary-grab/policy-00032768.zip \
+  --output-root output --wait-for-trainers --queue-dir output/visual-harvest-queue-01
+```
+
+### Estimated-target assisted PPO
+
+`treesim.estimated_kiwi_env` keeps the **78-value, 7-action** assisted contract
+and the frozen RELIC gait, but replaces the first six observations (fruit in the
+TCP and chassis frames) with `visual_servo.estimate_fruit` from delayed hand
+RGB and hand ToF. Missing detections propagate the last body-frame point with
+odometry, or a far dummy if nothing has been seen; they do not fall back to
+simulator fruit coordinates. Diagnostic `estimate_error_m` is info-only.
+Captured/hold flags remain for space compatibility. Workspace shaping still uses
+the privileged target during grab training and is zero at evaluation. Held fruit
+uses the gripper TCP, not simulator coordinates. `--estimate --basket` keeps this
+78-D actor and scores a free rear-basket deposit with 0.5 s settling; it does not
+load a 99-input basket checkpoint. This is still an artificial grip weld, not
+contact-only grasping or damage validation.
+
+Warm-start the privileged walking policy (`assisted-kiwi-ppo-04`), then retrain
+on noisy camera estimates. The hand-only rerun is `estimated-kiwi-ppo-02` from
+`estimated-kiwi-ppo-01/policy-00028672.zip`; do not overwrite ppo-01. After
+close-range grab held-out succeeds, warm-start `--estimate --basket --picks 1`
+from that grab checkpoint. Evaluations include camera blackouts before claiming
+that success depends on the images. Sparse pixel-SAC (`pixel_obs` /
+`pixel_sac`) is a shared observation/reward contract, not this PPO launcher.
+
+```bash
+MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_estimated_kiwi_env -v
+python scripts/train_assisted_kiwi.py --relic ../relic --estimate --camera-size 96 \
+  --warm-start output/assisted-kiwi-ppo-04/policy-00032768.zip \
+  --workspace-weight 1 --output output/estimated-kiwi-ppo-01 --steps 32768 \
+  --num-envs 4 --rollout-steps 128 --batch-size 128 --learning-rate .0001 \
+  --entropy .002 --exploration-std .3 --gripper-std .15 --eval-every 4096 \
+  --eval-episodes 8 --heldout-seed 90000 --policy-device cuda --record-video \
+  --episode-seconds 30
+python scripts/train_assisted_kiwi.py --relic ../relic --estimate --basket --picks 1 \
+  --camera-size 96 --warm-start output/estimated-kiwi-ppo-01/policy-00028672.zip \
+  --output output/estimated-basket-1fruit-01 --steps 32768 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0001 --entropy .002 \
+  --exploration-std .3 --gripper-std .15 --eval-every 4096 --eval-episodes 4 \
+  --heldout-seed 91000 --policy-device cuda --record-video --episode-seconds 90
+```
+
+Queue after an existing collect run with `scripts/queue_estimated_target.py`.
+It waits for `train_assisted_kiwi.py` and `queue_visual_harvest.py`, never
+signals other processes, and does not pre-create the trainer output directory.
+Hand-only camera source is `/home/ubuntu/Thekenyos-estimated-training-v2`;
+preserve `Thekenyos-estimated-training-v1`, stationary and visual-training
+snapshots.
+
+```bash
+python scripts/queue_estimated_target.py --relic ../relic \
+  --checkpoint output/assisted-kiwi-ppo-04/policy-00032768.zip \
+  --output output/estimated-kiwi-ppo-01 \
+  --queue-dir output/estimated-target-queue-01 --wait-for-jobs
+```
+
+Multi-fruit **pick and basket deposit** uses `--visual-lesson collect --start-phase pick`.
+Requested hanging fruit are placed in front of the robot at about **0.75, 1.15 and
+1.60 m** (then farther if `--picks` is larger). Success still requires assisted
+pick, free release, full-ellipsoid basket containment and 0.5 s settling. Review
+videos default to **10 fps**, one frame per 10 Hz control step, so playback matches
+simulated time. The older 8 fps setting made motion look 25% slow.
+
+```bash
+python scripts/train_assisted_kiwi.py --relic ../relic --vision \
+  --visual-lesson collect --start-phase pick --picks 1 --episode-seconds 90 \
+  --output output/visual-collect-1 --steps 32768 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0001 --entropy .002 \
+  --exploration-std .3 --gripper-std .4 --eval-every 8192 --eval-episodes 4 \
+  --heldout-seed 88000 --policy-device cuda --record-video \
+  --warm-start output/visual-walk-grab/policy-00032768.zip
+python scripts/train_assisted_kiwi.py --relic ../relic --vision \
+  --visual-lesson collect --start-phase pick --picks 3 --episode-seconds 90 \
+  --output output/visual-collect --steps 65536 --num-envs 4 \
+  --rollout-steps 128 --batch-size 128 --learning-rate .0001 --entropy .002 \
+  --exploration-std .3 --gripper-std .4 --eval-every 8192 --eval-episodes 4 \
+  --heldout-seed 89000 --policy-device cuda --record-video \
+  --warm-start output/visual-collect-1/policy-00032768.zip
+```
+
+Do not load a grab-only checkpoint as proof of collection. If a parent stage
+has no held-out successes, keep `--encoder-warm-start` from the standing camera
+CNN rather than copying a failed walking head. Weight-only warm starts may
+change lesson, count and horizon if the camera contract matches.
+
+Dayone run `/home/ubuntu/visual-collect-ppo-02` jumped from the standing encoder
+straight to three-fruit collect and was stopped at 65,536 steps with 0 picks.
+See [why that failed](docs/visual-collect-ppo-02-failure.md).
+
+Source snapshot: `/home/ubuntu/Thekenyos-stationary-training-v1`. Preserve the
+archived visual-training snapshots and their hashes.
+
 ### Fixed-base harvesting environment
 
 See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
@@ -1018,7 +1393,13 @@ RGB-D, map, recurrent memory, intent, and action/event modules. The separate
 privileged teacher in `teacher.py` can provide confidence-masked supervision
 without sharing its hidden state or gradients with the student. These model
 components are unit-tested, including CUDA updates and checkpoint round-trips;
-they are **not yet an integrated harvesting trainer**.
+they are **not yet an integrated harvesting trainer**. The sparse wrist-camera
+SAC lane (`pixel_obs.py`, `pixel_sac.py`) shares one `build_observation(state)`
+between demo recording and training, gives that camera stack to actor **and**
+critic, and relabels reward from privileged state only
+(`compute_reward_batch` takes no images). It does not add in-view or centering
+shaping. Archived 6-channel head+hand visual PPO checkpoints are a different
+contract.
 
 The isolated deformable investigation uses MuJoCo/MuJoCo-Warp 3.13.0 and Warp
 1.15.0. It does not upgrade the legacy `environment.yml` runtime. The CUDA

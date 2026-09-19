@@ -230,3 +230,114 @@ turns off the new task's shaping. Warm starts between basket lessons may change
 start phase and requested count, but all environment/basket hashes and physical
 settings must match. Never load a 78-input reach checkpoint as a 99-input basket
 policy. Basket source snapshots use `/home/ubuntu/Thekenyos-assisted-training-v4`.
+
+## Camera-policy assisted task
+
+`treesim.visual_kiwi_env` isolates camera observations and ten-action wrist-aim
+control from archived ideal-state tasks. There is no chassis head camera. Hand
+RGB/ToF offsets and optical direction reference the commented sensor frames in
+the external RELIC URDF. Named MuJoCo cameras `ee_cam`/`ee_depth` use the Boston
+Dynamics gripper vertical FOV (46.4° RGB, 44° depth). Keep self-occlusion, actual
+rendered depth, validity masks, latency, frame history, and independent seeded
+sensor randomness. Actor RGB is 3 channels per history frame (wrist only). Archived
+6-channel head+hand visual checkpoints cannot load or encoder-warm-start.
+Never use diagnostic target overlays, segmentation, fruit coordinates or IDs in
+actor inputs. The actor may see phase / has_grasped / has_placed; the critic
+reads privileged 99-D basket state. Body twist/attitude are still noisy estimator
+surrogates, not calibrated sensors.
+
+Run `MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest
+ tests.test_visual_kiwi_env -v` (one line). It checks metric rendered depth,
+no hidden-state observation/camera tracking, frame delay, camera blackout versus
+physics equivalence, bounded wrist commands and free deposition at both rates.
+Use `train_assisted_kiwi.py --vision --visual-lesson grab|collect`; grab is an
+assisted-retention lesson, not collection. Stationary evaluations keep cameras
+on. Keep the original grasp/basket tests and harvesting-interface regressions.
+Dayone visual experiments used `/home/ubuntu/Thekenyos-visual-training-v1`; the
+first post-training snapshot is `/home/ubuntu/Thekenyos-visual-training-v2`.
+The latter additionally allows an explicit visual weight-only warm start to
+change the episode horizon for longer collection lessons; exact resume and
+physical success criteria remain strict. Preserve the original experiment
+snapshot and its source hashes.
+
+Camera geometry follow-up uses `/home/ubuntu/Thekenyos-visual-training-v4`;
+`v3` contains development pilots. The scene's old 6.644 cm rendering near plane
+clipped geometry at the hand TCP. Keep the robot-camera-only 5 mm near-plane
+fix and matching metric-depth conversion, restore shared visual settings after
+rendering, and retain the independent 0.15 m ToF validity cutoff. Preserve off-axis
+projection and close-surface occlusion regressions. Never confuse camera axial
+depth, Euclidean range, visible surface position and gripper-relative fruit center.
+
+`visual_servo.py` and `check_visual_approach.py` are an explicit scripted baseline,
+not learned PPO actions. The sensor packet contains only images and calibrated
+robot geometry/odometry; no target IDs or simulator fruit coordinates. It retains
+capture-time camera transforms for latency compensation. RGB-derived brown masks
+are not simulator segmentation. There is no head-camera size prior. The remaining
+hand RGB/ToF color heuristic is not validated real-kiwi perception. Stop translation on missing depth and do not revert to
+monocular range after hand-depth acquisition. Keep all failed/contactful attempts,
+matched body-position comparisons and camera ablations; a brief assisted hold
+still does not validate contact-only grasping, basket collection or damage safety.
+
+## Stationary close-fruit camera lesson
+
+`treesim.stationary_kiwi_env` is an arm-only camera grab lesson, not a walking
+policy, physical grasp test or basket collector. Stage 0 (S0v) places fruit in
+the wrist depth FOV at 20–40 cm and scores pregrasp. Stages 1–3 place fruit along
+the starting TCP axis after the usual robot spawn, then offset in the chassis YZ
+plane by more than the 12 cm assist radius, so the base pose stays the same while
+distance increases and a constant body-forward reach cannot capture. Zero the body and
+wrist-rotation commands; keep the frozen standing gait. Actor observations stay
+on the visual sensor contract: no fruit coordinates, segmentation or target IDs.
+The critic may read privileged basket state. Categorical XYZ plus jaw actions must
+not be mixed with archived 10-action visual checkpoints.
+
+Run `MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest
+ tests.test_stationary_kiwi_env -v` (one line). Preserve identical-pose/farther-fruit,
+off-axis placement, hand-depth visibility, passive-closure failure, open-loop
+miss and scripted capture at both rates. `train_assisted_kiwi.py --stationary`
+trains that lesson with privileged distance/capture shaping off and view shaping
+on. Evaluations use `stationary_success` with cameras on and view shaping off.
+S0v promotes on one ≥80% in-FOV pregrasp pass; later levels need two consecutive
+≥75% arm-only assisted holds across 24/32/44 cm (body travel <0.10 m, arm motion
+>0.015 m). Walking is a separate `--vision --visual-lesson grab`
+run with ten continuous actions and 30 s episodes; do not load the 4-action actor into it.
+`--encoder-warm-start` may copy only the visual CNN. After that copy, walking
+action means start at zero and motion log-std is capped at 0.15 so random arm
+commands do not immediately fail on the rear basket. Do not jump from that
+standing encoder to three-fruit collect: queue walking grab, one-fruit collect,
+then three-fruit collect with `scripts/queue_visual_harvest.py`, waiting for any
+existing trainer PID and never signalling other processes. Full-weight warm
+starts require held-out success. `scripts/replay_assisted_kiwi.py`
+writes deterministic sensor-inset videos for
+review at 10 fps (one frame per 10 Hz control step); it is not training. Collect+pick places requested fruit at
+increasing chassis-forward distances (`COLLECT_FORWARD_M`, about 0.75/1.15/1.60 m
+for three picks) and keeps the basket deposit rules. Do not treat a grab checkpoint
+as collection. Dayone source is
+`/home/ubuntu/Thekenyos-stationary-training-v1`; do not overwrite visual-training
+snapshots or `assisted-kiwi-venv`. The off-axis standing lesson is a new
+run; do not overwrite `stationary-kiwi-ppo-01`.
+
+## Estimated-target assisted task
+
+`treesim.estimated_kiwi_env` wraps `assisted_kiwi_env` or `basket_kiwi_env` so the
+78-D / 7-action policy sees camera-estimated fruit XYZ instead of simulator fruit
+coordinates. Keep delayed hand RGB/ToF packets, brown-mask estimates, odometry hold and
+a far dummy on never-seen fruit; never restore privileged fruit pose when detection
+fails. A held fruit uses gripper TCP, not the simulator kiwi. `estimate_error_m` is
+diagnostic info only. Workspace shaping may stay on the privileged target during
+grab training; evaluations set that weight to zero and still require camera
+blackouts. `--estimate --basket` keeps that 78-D actor and scores free rear-basket
+deposit; do not expand it to a 99-input basket checkpoint. This is not a visual
+CNN policy and not contact-only grasping.
+
+Run `MUJOCO_GL=egl ASSISTED_KIWI_RELIC=../relic python -B -m unittest
+ tests.test_estimated_kiwi_env -v` (one line).
+`train_assisted_kiwi.py --estimate` trains the grab wrap. `--estimate --basket
+--picks 1` trains one-fruit collection. Weight-only warm start from a matching
+78-input assisted or estimated-grab checkpoint may add estimator/basket source
+files and change the episode horizon; assisted/spot hashes, capture/hold/physics
+and the 7-action space must still match. Do not load a 10-action visual checkpoint
+or a 99-input basket policy. Queue behind existing harvest jobs with
+`scripts/queue_estimated_target.py` and never signal them. Hand-only camera
+source is `/home/ubuntu/Thekenyos-estimated-training-v2`; preserve
+`Thekenyos-estimated-training-v1`, stationary, and visual-training snapshots.

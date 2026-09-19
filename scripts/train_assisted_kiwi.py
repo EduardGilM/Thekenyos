@@ -35,6 +35,9 @@ class WorkspaceApproach(gym.Wrapper):
     def set_stage(self, stage):
         self.unwrapped.set_stage(stage)
 
+    def set_ablation(self, mode):
+        self.env.set_ablation(mode)
+
     def _error(self):
         env = self.unwrapped
         forward = env.data.xmat[env.chassis].reshape(3, 3)[:2, 0]
@@ -81,7 +84,7 @@ class WorkspaceApproach(gym.Wrapper):
         return obs, reward+shaping, term, trunc, info
 
     def _info(self):
-        return self._metrics(self.unwrapped._info())
+        return self._metrics(self.env._info())
 
 
 ENV_SOURCES = ('treesim/assisted_kiwi_env.py', 'treesim/spot.py')
@@ -94,15 +97,44 @@ def emit(path, record):
 
 
 def checkpoint_compatible(saved, manifest, mode):
-    if mode not in ('resume', 'warm_start'):
+    if mode not in ('resume', 'warm_start', 'encoder'):
         raise ValueError('Unknown checkpoint loading mode')
+    old_vision, new_vision = json.loads(json.dumps(saved.get('vision') or {})), json.loads(json.dumps(manifest.get('vision') or {}))
+    if mode == 'encoder':
+        if not old_vision or not new_vision:
+            raise ValueError('Encoder transfer requires a camera checkpoint')
+        old_vision.pop('lesson', None)
+        new_vision.pop('lesson', None)
+        if old_vision != new_vision:
+            raise ValueError('Checkpoint sensor contract mismatch')
+        encoder = 'treesim/visual_kiwi_policy.py'
+        if saved.get('source_sha256', {}).get(encoder) != manifest['source_sha256'].get(encoder):
+            raise ValueError('Visual encoder source mismatch')
+        return
+    if bool(saved.get('stationary', False)) != bool(manifest.get('stationary', False)):
+        raise ValueError('Checkpoint stationary/action contract mismatch')
+    if mode == 'resume' and bool(saved.get('estimated_target')) != bool(manifest.get('estimated_target')):
+        raise ValueError('Checkpoint estimated-target contract mismatch')
     expected = manifest['source_sha256']
     names = tuple(name for name in expected if mode == 'resume' or name != 'scripts/train_assisted_kiwi.py')
+    if mode == 'warm_start' and manifest.get('estimated_target'):
+        required = ['treesim/assisted_kiwi_env.py', 'treesim/spot.py']
+        if 'treesim/basket_kiwi_env.py' in saved.get('source_sha256', {}) and 'treesim/basket_kiwi_env.py' in expected:
+            required.extend(('treesim/basket_kiwi_env.py', 'treesim/basket.py'))
+        names = tuple(name for name in names if name in required)
     if any(name not in saved['source_sha256'] or saved['source_sha256'][name] != expected[name] for name in names):
         raise ValueError('Checkpoint source mismatch; environment and physics compatibility are required')
+    if mode == 'warm_start' and old_vision and new_vision:
+        old_vision.pop('lesson', None)
+        new_vision.pop('lesson', None)
+    if old_vision != new_vision:
+        raise ValueError('Checkpoint sensor contract mismatch')
     old_task, new_task = dict(saved['task']), dict(manifest['task'])
     if mode == 'warm_start':
-        for name in ('stage', 'start_phase', 'picks'):
+        curriculum_fields = ('stage', 'start_phase', 'picks')
+        if (old_vision and new_vision) or manifest.get('estimated_target'):
+            curriculum_fields += ('time_limit_s', 'settle_time_s')
+        for name in curriculum_fields:
             old_task.pop(name, None)
             new_task.pop(name, None)
     if old_task != new_task:
@@ -111,18 +143,44 @@ def checkpoint_compatible(saved, manifest, mode):
         raise ValueError('Resume requires matching training configuration; use explicit weight-only warm start')
 
 
+def transfer_visual_encoder(model, previous):
+    source = getattr(previous.policy, 'pi_features_extractor', None) or previous.policy.features_extractor
+    dest = getattr(model.policy, 'pi_features_extractor', None) or model.policy.features_extractor
+    weights, target = source.state_dict(), dest.state_dict()
+    if weights.keys() != target.keys() or any(weights[key].shape != target[key].shape for key in weights):
+        raise ValueError('Visual encoder architecture mismatch')
+    dest.load_state_dict(weights, strict=True)
+
+
+def initialize_walking_policy(policy, exploration_std, gripper_std, *, encoder_transfer):
+    import torch
+    with torch.no_grad():
+        if encoder_transfer:
+            policy.action_net.weight.zero_()
+            policy.action_net.bias.zero_()
+        policy.log_std.fill_(float(np.log(exploration_std)))
+        policy.log_std[-1] = float(np.log(gripper_std))
+        if encoder_transfer:
+            policy.log_std[:-1] = float(np.log(min(exploration_std, .15)))
+
+
 @dataclass
 class Curriculum:
     stage: int
     passing_evaluations: int = 0
     require_workspace: bool = False
+    require_stationary: bool = False
 
     def update(self, report, fixed=False):
         successes = report['combined_successes'] if self.require_workspace else report['successes']
+        if self.require_stationary:
+            successes = report['stationary_successes']
         if report['stage'] != self.stage or not 0 <= successes <= report['successes'] <= report['episodes'] or report['episodes'] <= 0:
             raise ValueError('Invalid curriculum evaluation')
-        self.passing_evaluations = self.passing_evaluations+1 if successes/report['episodes'] >= .75 else 0
-        promoted = not fixed and self.passing_evaluations >= 2 and self.stage < 2
+        s0v = self.require_stationary and self.stage == 0
+        threshold, needed, last = (.8, 1, 3) if s0v else (.75, 2, 3 if self.require_stationary else 2)
+        self.passing_evaluations = self.passing_evaluations+1 if successes/report['episodes'] >= threshold else 0
+        promoted = not fixed and self.passing_evaluations >= needed and self.stage < last
         if promoted:
             self.stage += 1
             self.passing_evaluations = 0
@@ -130,18 +188,39 @@ class Curriculum:
 
 
 def score(report):
-    return (report['successes']/report['episodes'], report.get('mean_retained_count', 0.),
-            report.get('combined_successes', 0)/report['episodes'],
-            -report.get('mean_best_workspace_error_m', 0.), -report['mean_best_distance_m'])
+    result = (report['successes']/report['episodes'], report.get('mean_retained_count', 0.),
+              report.get('combined_successes', 0)/report['episodes'],
+              -report.get('mean_best_workspace_error_m', 0.), -report['mean_best_distance_m'])
+    return (report['stationary_successes']/report['episodes'], *result) if 'stationary_successes' in report else result
 
 
-def make_env(relic, task, workspace_weight=0., basket=False):
+def make_env(relic, task, workspace_weight=0., basket=False, vision=None, stationary=False,
+             estimate=False, estimate_vision=None, guidance_weight=1., view_weight=0.):
     from stable_baselines3.common.monitor import Monitor
     from treesim.assisted_kiwi_env import AssistedKiwiEnv, AssistedTask
+    if vision is not None:
+        from treesim.basket_kiwi_env import BasketTask
+        from treesim.visual_kiwi_env import VisualKiwiEnv, VisionConfig
+        env_class = VisualKiwiEnv
+        if stationary:
+            from treesim.stationary_kiwi_env import StationaryKiwiEnv
+            env_class = StationaryKiwiEnv
+        return Monitor(env_class(relic, task=BasketTask(**task), vision=VisionConfig(**vision),
+                                 guidance_weight=guidance_weight, view_weight=view_weight))
     if basket:
         from treesim.basket_kiwi_env import BasketKiwiEnv, BasketTask
-        return Monitor(BasketKiwiEnv(relic, task=BasketTask(**task)))
-    return Monitor(WorkspaceApproach(AssistedKiwiEnv(relic, task=AssistedTask(**task)), workspace_weight))
+        env = BasketKiwiEnv(relic, task=BasketTask(**task))
+        if estimate:
+            from treesim.estimated_kiwi_env import EstimatedTarget
+            from treesim.visual_kiwi_env import VisionConfig
+            env = EstimatedTarget(env, vision=VisionConfig(**(estimate_vision or {})))
+        return Monitor(env)
+    env = AssistedKiwiEnv(relic, task=AssistedTask(**task))
+    if estimate:
+        from treesim.estimated_kiwi_env import EstimatedTarget
+        from treesim.visual_kiwi_env import VisionConfig
+        env = EstimatedTarget(env, vision=VisionConfig(**(estimate_vision or {})))
+    return Monitor(WorkspaceApproach(env, workspace_weight))
 
 
 def frame(env, label):
@@ -157,16 +236,25 @@ def frame(env, label):
               f"workspace {info.get('workspace_error_m', 0.):.2f} m")
     draw.text((15, 64), f"target {info['target_index']} | gap {info['distance_m']:.3f} m | body {info['base_travel_m']:.2f} m | "
               f"{detail} | {info['outcome']}", fill='white', font=font)
+    if hasattr(env, 'sensor_image'):
+        image.paste(env.sensor_image().resize((640, 235)), (640, 485))
+        lesson = (f'ARM ONLY | level {env.stage} | body commands OFF' if info.get('stationary_lesson') else
+                  f'{env.vision.lesson} lesson | provisional sensors')
+        draw.text((15, 104), f'CAMERA POLICY | {lesson}', fill='white', font=font)
     return image
 
 
 def snapshot(env, path, label):
     frame(env, label).save(path)
+    if hasattr(env, 'sensor_image'):
+        env.sensor_image().save(path.with_name(path.stem+'-sensors.png'))
 
 
-def evaluate(model, env, seeds, out, label, images, record_video=False):
+def evaluate(model, env, seeds, out, label, images, record_video=False, video_limit=1, video_fps=10):
     records = []
     saved_success = False
+    if video_limit < 1 or video_fps not in range(5, 13):
+        raise ValueError('video_limit must be at least 1; video_fps must be 5-12')
     for index, seed in enumerate(seeds):
         encoder = None
         obs, info = env.reset(seed=seed)
@@ -174,11 +262,13 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
             snapshot(env, out/f'{label}-start.png', f'{label} | seed {seed} | initial state')
         total, events = 0., []
         try:
-            if record_video and index == 0:
+            if record_video and index < video_limit:
+                # One RGB frame per 10 Hz control step; default video_fps=10 is realtime.
+                name = f'{label}.mp4' if index == 0 else f'{label}-seed-{seed}.mp4'
                 encoder = subprocess.Popen(['ffmpeg', '-n', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                    '-s', '1280x720', '-r', '10', '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                    '-movflags', '+faststart', str(out/f'{label}.mp4')], stdin=subprocess.PIPE)
-                encoder.stdin.write(np.asarray(frame(env, f'{label} | first fixed seed {seed}')).tobytes())
+                    '-s', '1280x720', '-r', str(video_fps), '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart', str(out/name)], stdin=subprocess.PIPE)
+                encoder.stdin.write(np.asarray(frame(env, f'{label} | seed {seed} | initial state')).tobytes())
             while True:
                 action, _ = model.predict(obs, deterministic=True)
                 obs, reward, term, trunc, info = env.step(action)
@@ -214,6 +304,14 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
                   targets=sorted({r['target_index'] for r in records}),
                   failures={name: sum(r['outcome'] == name for r in records)
                             for name in sorted({r['outcome'] for r in records})}, records=records)
+    if 'estimate_error_m' in records[0]:
+        report.update(mean_estimate_error_m=float(np.mean([r['estimate_error_m'] for r in records])),
+                      estimate_valid_episodes=sum(int(r.get('estimate_valid', False)) for r in records))
+    if records[0].get('stationary_lesson'):
+        report.update(stationary_successes=sum(int(r['stationary_success']) for r in records),
+                      mean_arm_motion_m=float(np.mean([r['arm_motion_m'] for r in records])),
+                      max_base_travel_m=max(r['base_travel_m'] for r in records),
+                      peak_fruit_contact_force_N=max(r['peak_fruit_contact_force_N'] for r in records))
     with (out/f'{label}.json').open('x') as stream:
         json.dump(report, stream, indent=2, allow_nan=False)
     return report
@@ -225,8 +323,13 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--steps', type=int, default=32768)
     parser.add_argument('--seed', type=int, default=22)
-    parser.add_argument('--stage', type=int, choices=range(3), default=0)
+    parser.add_argument('--stage', type=int, default=0)
     parser.add_argument('--basket', action='store_true')
+    parser.add_argument('--vision', action='store_true')
+    parser.add_argument('--estimate', action='store_true')
+    parser.add_argument('--stationary', action='store_true')
+    parser.add_argument('--visual-lesson', choices=('grab', 'collect'), default='grab')
+    parser.add_argument('--camera-size', type=int, choices=(64, 84, 96), default=64)
     parser.add_argument('--picks', type=int, choices=range(1, 7), default=6)
     parser.add_argument('--start-phase', choices=('pick', 'carry', 'release'), default='pick')
     parser.add_argument('--fixed-stage', action='store_true')
@@ -248,10 +351,34 @@ def main():
     loading = parser.add_mutually_exclusive_group()
     loading.add_argument('--resume', type=Path)
     loading.add_argument('--warm-start', type=Path)
+    loading.add_argument('--encoder-warm-start', type=Path)
     parser.add_argument('--no-images', action='store_true')
     parser.add_argument('--record-video', action='store_true')
     parser.add_argument('--smoke', action='store_true')
     args = parser.parse_args()
+    vision = None
+    estimate_vision = None
+    if args.stationary:
+        args.vision = True
+        if args.visual_lesson != 'grab' or args.start_phase != 'pick':
+            parser.error('Stationary training is an arm-only grab lesson')
+        if args.stage not in range(4):
+            parser.error('Stationary stage must be 0-3 (S0v, then 24/32/44 cm)')
+    elif args.stage not in range(3):
+        parser.error('Stage must be 0-2')
+    if args.vision:
+        from treesim.visual_kiwi_env import VisionConfig
+        args.basket = True
+        if args.visual_lesson == 'grab':
+            args.picks = 1
+        vision = asdict(VisionConfig(size=args.camera_size, lesson=args.visual_lesson))
+        if args.visual_lesson == 'grab' and args.start_phase != 'pick':
+            parser.error('Visual grab lessons require --start-phase pick')
+    if args.estimate and (args.vision or args.smoke or args.encoder_warm_start):
+        parser.error('Estimated-target training is not a visual CNN; do not combine with --vision, --smoke or --encoder-warm-start')
+    if args.estimate:
+        from treesim.visual_kiwi_env import VisionConfig
+        estimate_vision = asdict(VisionConfig(size=args.camera_size, lesson='grab'))
     if min(args.steps, args.eval_every, args.eval_episodes, args.num_envs, args.rollout_steps, args.batch_size) <= 0 or args.seed < 0:
         parser.error('Counts must be positive; seed nonnegative')
     rollout_size = args.num_envs*args.rollout_steps
@@ -268,8 +395,12 @@ def main():
     if not args.basket and args.start_phase != 'pick':
         parser.error('Carry/release curriculum requires --basket')
     from treesim.assisted_kiwi_env import AssistedKiwiEnv, AssistedTask, SCOPE
-    args.episode_seconds = args.episode_seconds if args.episode_seconds is not None else (120. if args.basket else 15.)
-    task = AssistedTask(time_limit_s=args.episode_seconds, physics_hz=args.physics_hz, stage=args.stage)
+    default_seconds = 120. if args.basket and not (args.vision and args.visual_lesson == 'grab') else 30.
+    if args.stationary:
+        default_seconds = 6.
+    args.episode_seconds = args.episode_seconds if args.episode_seconds is not None else default_seconds
+    task = AssistedTask(time_limit_s=args.episode_seconds, physics_hz=args.physics_hz,
+                        stage=0 if args.stationary else args.stage)
     if args.basket:
         from treesim.basket_kiwi_env import BasketKiwiEnv, BasketTask, SCOPE
         task = BasketTask(**asdict(task), picks=args.picks, start_phase=args.start_phase)
@@ -278,6 +409,12 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     source = Path(__file__).resolve().parents[1]
     names = ENV_SOURCES+('treesim/basket_kiwi_env.py', 'treesim/basket.py') if args.basket else ENV_SOURCES
+    if args.vision:
+        names += ('treesim/visual_kiwi_env.py', 'treesim/visual_kiwi_policy.py', 'treesim/visual_servo.py')
+    if args.stationary:
+        names += ('treesim/stationary_kiwi_env.py',)
+    if args.estimate:
+        names += ('treesim/estimated_kiwi_env.py', 'treesim/visual_kiwi_env.py', 'treesim/visual_servo.py')
     paths = [Path(__file__).resolve(), *(source/name for name in names)]
     training_config = dict(num_envs=args.num_envs, rollout_steps=args.rollout_steps, batch_size=args.batch_size,
                            learning_rate=args.learning_rate, entropy=args.entropy,
@@ -307,6 +444,60 @@ def main():
                               render_mode=None if args.no_images else 'rgb_array') if args.basket else
                 WorkspaceApproach(AssistedKiwiEnv(args.relic, task=replace(task),
                                                  render_mode=None if args.no_images else 'rgb_array')))
+    if args.vision:
+        from treesim.visual_kiwi_env import VisualKiwiEnv, VisionConfig, SCOPE
+        eval_env.close()
+        env_class = VisualKiwiEnv
+        if args.stationary:
+            from treesim.stationary_kiwi_env import StationaryKiwiEnv, GAPS_M, OFF_AXIS_M, SCOPE
+            env_class = StationaryKiwiEnv
+        eval_env = env_class(args.relic, task=replace(task), vision=VisionConfig(**vision), guidance_weight=0.,
+                                 view_weight=0., render_mode=None if args.no_images else 'rgb_array')
+        manifest.update(scope=SCOPE, vision=vision,
+                        observations='Actor: stacked wrist RGB-D, 22-D proprioception, phase, grasp/place flags and ages. '
+                                     'Critic: privileged 99-D basket state plus proprioception. No fruit XYZ, IDs or segmentation on the actor',
+                        actions='10Hz body velocity x/y/yaw, Cartesian hand velocity XYZ, nullspace wrist angular XYZ, jaw; '
+                                'bounded IK and unchanged joint torque/collision limits',
+                        sensing='Named MuJoCo ee_cam/ee_depth on the wrist; Boston Dynamics gripper vertical FOV 46.4deg RGB and 44deg depth; '
+                                'no chassis head camera; 10Hz, one-frame delay, four-frame history; 5% frame loss, 3% depth dropout, '
+                                '0.15-3m optical-axis ToF; pose/light/color/gain DR; cameras on at train and eval',
+                        scene_randomization='Independent fruit XYZ reset offsets after arm initialization; any unpicked fruit may be captured',
+                        workspace='No workspace wrapper or action teacher; oracle-only distance shaping disabled at evaluation',
+                        evaluation_view_weight=0.)
+    if args.stationary:
+        for key in ('exploration_std', 'gripper_std'):
+            training_config.pop(key)
+        training_config.update(distribution='MultiCategorical', share_features_extractor=False,
+                               guidance_weight=0., view_weight=1., policy='AsymmetricVisualPolicy')
+        manifest.update(stationary=True, scope=SCOPE, training_guidance_weight=0., training_view_weight=1.,
+                        actions='Categorical Cartesian XYZ (-.1575,0,.1575 m/s) and binary open/close; body and wrist angular commands zero',
+                        stationary_curriculum=dict(s0v_range_m=(.20, .40), tcp_gaps_m=GAPS_M, off_axis_m=OFF_AXIS_M,
+                            promotion='S0v: one >=80% in-FOV pregrasp pass, cameras on; then two consecutive >=75% arm-only assisted holds at 24/32/44 cm'),
+                        scene_randomization='Same robot spawn at every level; stage 0 places fruit in the wrist FOV at 20-40 cm; later levels offset in body YZ beyond the 12 cm weld; '
+                                            'constant body-+X reach cannot capture later levels; low hanging practice fixture, not full canopy harvesting',
+                        workspace='No workspace wrapper; privileged distance/capture shaping off; view in_view/centering/view_loss on in training, off at evaluation')
+    if args.estimate:
+        from treesim.estimated_kiwi_env import EstimatedTarget, SCOPE
+        from treesim.visual_kiwi_env import VisionConfig
+        eval_env.close()
+        inner = (BasketKiwiEnv(args.relic, task=replace(task), guidance_weight=0.,
+                               render_mode=None if args.no_images else 'rgb_array') if args.basket else
+                 AssistedKiwiEnv(args.relic, task=replace(task),
+                                 render_mode=None if args.no_images else 'rgb_array'))
+        estimated = EstimatedTarget(inner, vision=VisionConfig(**estimate_vision))
+        eval_env = estimated if args.basket else WorkspaceApproach(estimated, 0.)
+        manifest.update(scope=SCOPE, estimated_target=True, estimate_cameras=estimate_vision,
+                        observations='Camera-estimated fruit XYZ in TCP and chassis frames plus proprioception; '
+                                     'no simulator fruit coordinates in actor inputs',
+                        sensing='Provisional hand RGB and hand ToF; delayed packet; odometry hold on missed detections; '
+                                'held fruit uses gripper TCP, not simulator pose; far dummy if never seen; '
+                                'diagnostic estimate_error_m is info-only',
+                        workspace='Training-only privileged workspace shaping on grab lessons; evaluation shaping disabled')
+        if args.basket:
+            manifest.update(observations='78-D estimated fruit XYZ plus proprioception; basket extras are not actor inputs; '
+                                         'success is free rear-basket deposit and 0.5 s settling',
+                            basket='Existing 1.2kg chassis-mounted geometry; independent fruit; drops/spills fail',
+                            workspace='No workspace wrapper; basket progress rewards only; evaluation guidance disabled')
     train_env = None
     try:
         if args.smoke:
@@ -335,33 +526,51 @@ def main():
         if args.policy_device.startswith('cuda') and not torch.cuda.is_available():
             raise RuntimeError('CUDA policy device requested but unavailable; no silent fallback')
         manifest['versions'].update({n: version(n) for n in ('torch', 'stable-baselines3')})
-        parent = args.resume or args.warm_start
+        parent = args.resume or args.warm_start or args.encoder_warm_start
         saved = None
         if parent:
             saved = json.loads(parent.with_suffix('.json').read_text())
-            checkpoint_compatible(saved, manifest, 'resume' if args.resume else 'warm_start')
+            mode = 'resume' if args.resume else 'encoder' if args.encoder_warm_start else 'warm_start'
+            checkpoint_compatible(saved, manifest, mode)
             manifest['parent_checkpoint'] = dict(path=str(parent.resolve()), sha256=hashlib.sha256(parent.read_bytes()).hexdigest(),
-                                                  parent_steps=saved['steps'], mode='resume' if args.resume else 'weights_only')
+                                                  parent_steps=saved['steps'],
+                                                  mode='resume' if args.resume else 'encoder' if args.encoder_warm_start else 'weights_only')
         (args.output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
-        makers = [partial(make_env, str(args.relic.resolve()), asdict(task), args.workspace_weight, args.basket) for _ in range(args.num_envs)]
+        makers = [partial(make_env, str(args.relic.resolve()), asdict(task), args.workspace_weight, args.basket, vision,
+                          args.stationary, args.estimate, estimate_vision, 0. if args.stationary else 1.,
+                          1. if args.vision else 0.)
+                  for _ in range(args.num_envs)]
+        policy_kwargs = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
+        policy_class = 'MlpPolicy'
+        if args.vision:
+            from treesim.visual_kiwi_policy import ActorVisualExtractor, AsymmetricVisualPolicy
+            policy_class = AsymmetricVisualPolicy
+            policy_kwargs.update(features_extractor_class=ActorVisualExtractor, share_features_extractor=False,
+                                 ortho_init=False)
         train_env = DummyVecEnv(makers) if args.num_envs == 1 else SubprocVecEnv(makers, start_method='spawn')
         train_env.seed(args.seed)
         model = (PPO.load(parent, env=train_env, device=args.policy_device) if args.resume else
-                 PPO('MlpPolicy', train_env, device=args.policy_device, seed=args.seed,
+                 PPO(policy_class, train_env, device=args.policy_device, seed=args.seed,
                      n_steps=args.rollout_steps, batch_size=args.batch_size, n_epochs=5, learning_rate=args.learning_rate,
                      gamma=.99, gae_lambda=.95, ent_coef=args.entropy, clip_range=.15, target_kl=.02,
-                     policy_kwargs=dict(net_arch=dict(pi=[128, 128], vf=[128, 128])), verbose=0))
+                     policy_kwargs=policy_kwargs, verbose=0))
         if args.warm_start:
             previous = PPO.load(parent, device=args.policy_device)
             if previous.observation_space != model.observation_space or previous.action_space != model.action_space:
                 raise ValueError('Checkpoint observation/action spaces differ')
             model.policy.load_state_dict(previous.policy.state_dict(), strict=True)
             del previous
-        if not args.resume:
-            with torch.no_grad():
-                model.policy.log_std.fill_(np.log(args.exploration_std))
-                model.policy.log_std[-1] = np.log(args.gripper_std)
-        curriculum = Curriculum(saved['stage'] if args.resume else args.stage, require_workspace=args.workspace_weight > 0)
+        if args.encoder_warm_start:
+            previous = PPO.load(parent, device=args.policy_device)
+            if previous.observation_space != model.observation_space:
+                raise ValueError('Encoder transfer requires matching camera observations')
+            transfer_visual_encoder(model, previous)
+            del previous
+        if not args.resume and not args.stationary:
+            initialize_walking_policy(model.policy, args.exploration_std, args.gripper_std,
+                                     encoder_transfer=bool(args.encoder_warm_start))
+        curriculum = Curriculum(saved['stage'] if args.resume else args.stage, require_workspace=args.workspace_weight > 0,
+                                require_stationary=args.stationary)
         train_env.env_method('set_stage', curriculum.stage)
         eval_env.set_stage(curriculum.stage)
         model.set_logger(configure(str(args.output), ['csv']))
@@ -371,7 +580,8 @@ def main():
         initial_report = evaluate(model, eval_env, seeds, args.output, 'initial', not args.no_images)
         emit(args.output/'progress.jsonl', dict(event='baseline', **initial_report))
         (args.output/'initial-policy.json').write_text(json.dumps(dict(source_sha256=manifest['source_sha256'],
-            task=manifest['task'], training_config=training_config, stage=curriculum.stage,
+            task=manifest['task'], vision=vision, stationary=args.stationary, estimated_target=args.estimate,
+            training_config=training_config, stage=curriculum.stage,
             steps=model.num_timesteps, schema='assisted-training/v2'), indent=2)+'\n')
         started = time.monotonic()
         best = {curriculum.stage: dict(checkpoint='initial-policy.zip', score=score(initial_report), evaluation='initial')}
@@ -416,7 +626,8 @@ def main():
                     raise FileExistsError(checkpoint)
                 model.save(checkpoint)
                 checkpoint.with_suffix('.json').write_text(json.dumps(dict(source_sha256=manifest['source_sha256'],
-                    task=manifest['task'], training_config=training_config, stage=curriculum.stage,
+                    task=manifest['task'], vision=vision, stationary=args.stationary, estimated_target=args.estimate,
+                    training_config=training_config, stage=curriculum.stage,
                     steps=self.num_timesteps, schema='assisted-training/v2'), indent=2)+'\n')
                 if curriculum.stage not in best or score(report) > tuple(best[curriculum.stage]['score']):
                     best[curriculum.stage] = dict(checkpoint=checkpoint.name, score=score(report), evaluation=label)
@@ -440,9 +651,12 @@ def main():
             baseline = evaluate(initial_model, eval_env, heldout_seeds, args.output, f'heldout-initial-stage-{stage}', False)
             selected = PPO.load(args.output/best[stage]['checkpoint'], device=args.policy_device)
             result = evaluate(selected, eval_env, heldout_seeds, args.output, f'heldout-best-stage-{stage}',
-                              not args.no_images, record_video=args.record_video)
+                              not args.no_images, record_video=args.record_video, video_limit=4)
             comparison = dict(stage=stage, initial_successes=baseline['successes'], trained_successes=result['successes'],
                               episodes=result['episodes'], checkpoint=best[stage]['checkpoint'])
+            if args.stationary:
+                comparison.update(initial_stationary_successes=baseline['stationary_successes'],
+                                  trained_stationary_successes=result['stationary_successes'])
             heldout.append(comparison)
             emit(args.output/'progress.jsonl', dict(event='heldout_comparison', **comparison))
         cross_stage = []
@@ -450,24 +664,41 @@ def main():
         recommended = best[selected_stage]['checkpoint']
         if args.eval_all_stages:
             selected = PPO.load(args.output/recommended, device=args.policy_device)
-            for stage in range(3):
+            for stage in range(4 if args.stationary else 3):
                 eval_env.set_stage(stage)
                 baseline = evaluate(initial_model, eval_env, heldout_seeds, args.output, f'cross-initial-stage-{stage}', False)
                 result = evaluate(selected, eval_env, heldout_seeds, args.output, f'cross-trained-stage-{stage}',
-                                  not args.no_images, record_video=args.record_video)
+                                  not args.no_images, record_video=args.record_video, video_limit=4)
                 comparison = dict(stage=stage, initial_successes=baseline['successes'], trained_successes=result['successes'],
                                   initial_workspace=baseline['workspace_settled'], trained_workspace=result['workspace_settled'],
                                   initial_combined=baseline['combined_successes'], trained_combined=result['combined_successes'],
                                   episodes=result['episodes'], checkpoint=recommended)
+                if args.stationary:
+                    comparison.update(initial_stationary_successes=baseline['stationary_successes'],
+                                      trained_stationary_successes=result['stationary_successes'])
                 cross_stage.append(comparison)
                 emit(args.output/'progress.jsonl', dict(event='cross_stage_comparison', **comparison))
+        ablations = []
+        if (args.vision or args.estimate) and not args.stationary:
+            selected = PPO.load(args.output/recommended, device=args.policy_device)
+            eval_env.set_stage(selected_stage)
+            for mode in ('none', 'all', 'hand', 'tof'):
+                eval_env.set_ablation(mode)
+                report = evaluate(selected, eval_env, heldout_seeds, args.output, f'camera-ablation-{mode}',
+                                  not args.no_images and mode in ('none', 'all'),
+                                  record_video=args.record_video and mode in ('none', 'all'), video_limit=2)
+                comparison = dict(mode=mode, episodes=report['episodes'], successes=report['successes'],
+                                  mean_best_distance_m=report['mean_best_distance_m'], failures=report['failures'])
+                ablations.append(comparison)
+                emit(args.output/'progress.jsonl', dict(event='camera_ablation', **comparison))
+            eval_env.set_ablation('none')
         if hashlib.sha256((args.relic/'source/relic/relic/assets/spot/pretrained/policy.onnx').read_bytes()).hexdigest() != manifest['frozen_gait_sha256']:
             raise RuntimeError('Frozen RELIC weights changed during training')
         summary = dict(event='finished', steps=model.num_timesteps, steps_this_run=args.steps, parameter_change_l2=change,
                        recommended_checkpoint=recommended, cross_stage=cross_stage, frozen_gait_unchanged=True,
                        wall_seconds=time.monotonic()-started, final_stage=curriculum.stage,
                        evaluated_stages=sorted(best), best=best, heldout=heldout,
-                       scope=SCOPE, generalization_validated=False)
+                       scope=SCOPE, camera_ablations=ablations, generalization_validated=False)
         emit(args.output/'progress.jsonl', summary)
         (args.output/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
     except Exception as exc:
