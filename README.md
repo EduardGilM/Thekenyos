@@ -461,6 +461,25 @@ uses a 20 mm displacement tolerance during 1.7–2.7 s, no early ground contact,
 bilateral contact during the run and contact-free release
 to the floor. Test results apply to this one initial pose and fruit geometry.
 
+### Gripper showreel clips
+
+```bash
+MUJOCO_GL=glfw .venv/bin/python scripts/render_showreel.py --relic ../relic \
+  --output output/showreel --post
+```
+
+`scripts/render_showreel.py` renders short stylised clips of the same native
+gripper bench with a **rigid surrogate fruit** at a 0.5 ms timestep: an
+orbiting-camera grasp, a mocap wrist "waltz" (the pinch does not retain the
+fruit under lateral acceleration; the slip is recorded), a kiwi rain onto the
+open jaws, a zero-gravity catch and a macro slow-motion jaw closure. `--post`
+adds ffmpeg cutouts (slow motion, reverse, kaleidoscope, hue cycle, edge
+detect), picks up `stem_snap.mp4`, `deformable_grip.mp4` and
+`canopy_flythrough.mp4` from the same directory if present, and concatenates
+everything with title cards into `showreel.mp4` plus `manifest.json`. Every
+frame is labelled as scripted; these are visual material, not validation.
+EGL is unavailable on CPU-only hosts, hence `MUJOCO_GL=glfw` (needs a display).
+
 ### Fixed-base harvesting environment
 
 See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
