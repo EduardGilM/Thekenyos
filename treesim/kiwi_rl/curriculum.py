@@ -76,9 +76,9 @@ EASY_PRESET = {
     'start_y_span_m': 0.10,
     'start_z_span_m': 0.08,
     'ik_accept_err_m': 0.025,
-    'n_hold_levels': 8,
-    'hold_close_min': 0.40,
-    'hold_close_max': 1.00,
+    'n_hold_levels': 10,
+    'hold_close_min': 0.25,
+    'hold_close_max': 0.70,
     'far_horizon_updates': 200,
     'default_shaping_coef': 2.0,
 }

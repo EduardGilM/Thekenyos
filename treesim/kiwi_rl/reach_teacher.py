@@ -471,9 +471,10 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
 
     If several static holds keep the fruit without crossing the load gate, take
     one step tighter than the lightest keeper so a moving carry is less likely
-    to drop it. If nothing retains, take the tightest close still under 15 N
-    rather than the lightest slip that still dumps. Do not slam past 15 N.
-    ``max_load_N`` is a rigid-sim contact result, not a tissue-safe force.
+    to drop it. If every keeper is over 15 N, take the lightest of those rather
+    than an empty close that dumps. If nothing retains, take the tightest
+    close still under 15 N. ``max_load_N`` is a rigid-sim contact result, not a
+    tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
         raise ValueError('hold sweep rows must be a non-empty sequence')
@@ -501,6 +502,9 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         ordered = sorted(viable, key=lambda row: row['close_frac'])
         idx = 1 if len(ordered) > 1 else 0
         return ordered[idx]
+    keepers = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok]
+    if keepers:
+        return min(keepers, key=lambda row: (row['max_load_N'], row['close_frac']))
     under = [row for row in cleaned if row['max_load_N'] <= load_limit]
     contacting = [row for row in under if row['max_load_N'] >= 0.5]
     if contacting:
