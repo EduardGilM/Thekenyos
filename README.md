@@ -129,6 +129,56 @@ python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
   --pergola-rows 5 --pergola-columns 4
 ```
 
+#### Continuous leaf roof (render-only)
+
+For a continuous **visual leaf roof**, `--canopy-spacing .08` adds overlapping
+leaf blades across the entire post footprint, rather than only along the sparse
+fruiting canes. The spacing is in metres; zero (the default) keeps the original
+foliage. This is a seeded artistic canopy approximation, not a measured crop or
+additional physical branches. The extra leaves are massless, non-colliding,
+attached to supported cane bodies, and follow the canopy slope. The option is
+pergola-only and cannot be combined with `--foliage-physics` or disabled foliage.
+Use cropped plots: the additional layer is capped at 100,000 leaves, and increases
+rendering/build cost even though it adds no physical bodies or degrees of freedom.
+
+A single local frame, with the same camera and terrain as the visual experiments:
+
+```bash
+.venv/bin/python -B scripts/grow_tree.py --preset pergola --foliage --leaves 32 \
+  --canopy-spacing .08 --seed 42 --pergola-rows 3 --pergola-columns 3 \
+  --fruit-count 40 --terrain --terrain-seed 202 --terrain-amplitude .05 \
+  --terrain-wavelength 1.8 --terrain-extent 6 --device cpu --substeps 40 \
+  --viewer gl --headless --frames 1 --snapshot output/kiwi-canopy-roof.png
+```
+
+This recipe produces a 1920x1080 PNG after one simulation frame. Its 3x3 posts
+at 5 m centres enclose 100 m²: 15,625 infill leaves plus 1,152 twig leaves, or
+16,777 leaves total. The 40 kiwis remain separate physical fruit (0.4 fruit/m²);
+adding the visual roof does not add fruit or fruit attachment sites.
+
+How the roof is generated:
+
+- `scripts/grow_tree.py` maps `--canopy-spacing` to
+  `cfg.foliage.canopy_spacing_m`. **This is the control that closes the gaps**;
+  `--leaves 32` alone only thickens the existing cane lines. Zero disables infill;
+  nonzero spacing must be finite and at least 0.03 m. Larger spacing reduces
+  coverage and cost; leaf count scales approximately with `1 / spacing²`.
+- `treesim/foliage.py::place_canopy_leaves` fills the horizontal skeleton bounds
+  with `ceil(width / spacing) * ceil(length / spacing)` cells, one leaf per cell.
+  A separate RNG (`scene seed + 1777`) jitters leaf centres within their cells,
+  so the arrangement is reproducible without perturbing fruit sampling.
+- Leaf centres sit 4–18 cm above a plane fitted to the supported canes, following
+  the canopy slope. Random heading, tilt and roll break up the flat-grid look;
+  overlapping blades, rather than a solid opaque sheet, form the roof.
+- `treesim/builder.py` attaches each placement to the supported cane with the
+  nearest midpoint and reuses three leaf-size mesh classes. The CLI's nominal
+  kiwi blade is 22x17 cm; the size classes scale it by 0.72, 1.0 and 1.35.
+  No extra physical branches, joints, leaf mass or leaf contacts are introduced.
+
+Geometry, CLI and unchanged-mass/contact/one-step regressions are included in
+`python -B -m unittest tests.test_pergola -v`. This preview is neither PBR
+postprocessing nor a learned rollout; it changes only the rendered foliage.
+
 The trellis has fixed transverse support wires. Main cane sections are tied
 rigidly to this frame; only the final 0.35 m tips bend. This is an ideal-support
 assumption, not calibrated wire tension or tie compliance. It replaces the

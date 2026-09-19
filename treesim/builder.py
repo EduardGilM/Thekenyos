@@ -294,6 +294,12 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
             raise ValueError("terrain_kind must be noise or orchard")
         if config.physics.terrain_kind == "orchard" and config.lsystem.kind != "pergola":
             raise ValueError("orchard terrain requires the pergola preset")
+    spacing = config.foliage.canopy_spacing_m
+    if not np.isfinite(spacing) or spacing < 0 or 0 < spacing < .03:
+        raise ValueError("canopy_spacing_m must be zero or finite and at least 0.03 m")
+    if spacing and (config.lsystem.kind != "pergola" or config.foliage.physics
+                    or not config.foliage.enabled):
+        raise ValueError("canopy infill requires enabled, render-only pergola foliage")
     rng = np.random.default_rng(config.seed)
     builder = newton.ModelBuilder()
     builder.gravity = config.physics.gravity   # along -up (Z)
@@ -537,6 +543,8 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         leaf_col = tuple(getattr(fp, "leaf_color", (0.18, 0.42, 0.12)))
         placements = (leaf_placements if leaf_placements is not None
                       else _foliage.place_leaves(skeleton, fp, seed=config.seed))
+        if spacing and leaf_placements is None:
+            placements.extend(_foliage.place_canopy_leaves(skeleton, fp, seed=config.seed))
         if fp.physics:
             # each leaf = its own body on a compliant petiole (flutters; EXPENSIVE:
             # +1 body & joint per leaf, so keep leaf counts small in this mode)

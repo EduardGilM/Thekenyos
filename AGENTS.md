@@ -151,3 +151,18 @@ In mixed rigid/flex GPU contacts, valid geom IDs take precedence over stale flex
 IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
 than identifying fruit contact from `contact.flex` alone. Numerical overflow,
 nonfinite states and element inversion must remain latched across substeps.
+
+## Continuous visual leaf roof
+
+The reproducible local capture and generation details are in README.md under
+"Continuous leaf roof (render-only)". Use `--canopy-spacing .08` for area-wide
+infill; increasing `--leaves` alone only thickens the existing sparse cane lines.
+The recipe uses a 3x3 post grid, scene seed 42, terrain seed 202 and 40 kiwis.
+`treesim/foliage.py::place_canopy_leaves` generates the seeded placements;
+`treesim/builder.py` attaches shared visual meshes to supported cane bodies.
+Keep this optional layer massless and non-colliding, with no extra bodies/DOFs;
+it is neither physical shoot growth nor PBR postprocessing. Default spacing zero
+preserves the original foliage, and apple placement must remain unaffected.
+The layer is capped at 100,000 leaves; use cropped plots rather than enabling it
+blindly over the commercial field. Run `python -B -m unittest tests.test_pergola -v`
+after changing it, and inspect a newly generated image as well.

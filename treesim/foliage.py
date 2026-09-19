@@ -97,6 +97,49 @@ def _frame_quat(H, L, U):
     return _frame_to_quat(H / np.linalg.norm(H), L / np.linalg.norm(L), U / np.linalg.norm(U))
 
 
+def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
+                        seed: int = 0) -> list[LeafPlacement]:
+    spacing = fp.canopy_spacing_m
+    if not np.isfinite(spacing) or spacing < .03:
+        raise ValueError("canopy_spacing_m must be finite and at least 0.03 m")
+    if fp.physics:
+        raise ValueError("canopy infill is render-only")
+    if not all(np.isfinite(v) and v > 0 for v in (fp.leaf_length, fp.leaf_width)):
+        raise ValueError("canopy leaf dimensions must be finite and positive")
+    canes = [s for s in skel if s.order == 2 and s.supported]
+    if not canes:
+        raise ValueError("canopy infill requires supported pergola canes")
+    lo, hi = skel.bounds()
+    nx, ny = (max(1, int(np.ceil(span / spacing))) for span in (hi - lo)[:2])
+    if nx * ny > 100000:
+        raise ValueError("canopy infill exceeds 100000 leaves; crop the pergola or increase spacing")
+    rng = np.random.default_rng(seed + 1777)
+    grid = np.stack(np.meshgrid(np.arange(nx), np.arange(ny)), axis=-1).reshape(-1, 2)
+    cell_m = (hi - lo)[:2] / np.array([nx, ny])
+    xy = lo[:2] + (grid + .5 + rng.uniform(-.3, .3, grid.shape)) * cell_m
+    points = np.array([p for s in canes for p in (s.start, s.end)])
+    plane = np.linalg.lstsq(np.column_stack((points[:, :2], np.ones(len(points)))),
+                           points[:, 2], rcond=None)[0]
+    z = xy @ plane[:2] + plane[2] + rng.uniform(.04, .18, len(xy))
+    from scipy.spatial import cKDTree
+    parents = cKDTree(np.array([s.midpoint[:2] for s in canes])).query(xy)[1]
+    out = []
+    for center, parent in zip(np.column_stack((xy, z)), parents):
+        yaw = rng.uniform(0., 2 * np.pi)
+        tilt = rng.uniform(-.2, .2)
+        heading = np.array([np.cos(yaw) * np.cos(tilt),
+                            np.sin(yaw) * np.cos(tilt), np.sin(tilt)])
+        left = np.array([-np.sin(yaw), np.cos(yaw), 0.])
+        left = _rodrigues(left, heading, rng.uniform(-.25, .25))
+        out.append(LeafPlacement(
+            parent_seg=canes[int(parent)].index,
+            attach=center - .5 * fp.leaf_length * heading,
+            frame=_frame_quat(heading, left, np.cross(heading, left)),
+            length=fp.leaf_length, width=fp.leaf_width,
+        ))
+    return out
+
+
 def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
                  seed: int = 0) -> list[LeafPlacement]:
     """Return leaf placements for all eligible twigs."""

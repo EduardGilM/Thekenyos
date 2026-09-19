@@ -282,6 +282,112 @@ class PergolaTest(unittest.TestCase):
         self.assertEqual(cfg.physics.terrain_kind, 'orchard')
         self.assertIsNone(cfg.physics.terrain_seed)
 
+    def test_canopy_infill_is_seeded_and_spans_gaps(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_canopy_leaves
+        from treesim.pergola import generate as pergola
+        from treesim.builder import _qrot
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           canopy_spacing_m=.10)
+        skel = pergola(rows=2, columns=2, seed=42)
+        before = np.array([s.end.copy() for s in skel])
+        a = place_canopy_leaves(skel, fp, seed=42)
+        b = place_canopy_leaves(skel, fp, seed=42)
+        c = place_canopy_leaves(skel, fp, seed=43)
+        np.testing.assert_array_equal([p.attach for p in a], [p.attach for p in b])
+        np.testing.assert_array_equal([p.frame for p in a], [p.frame for p in b])
+        self.assertFalse(np.array_equal([p.attach for p in a], [p.attach for p in c]))
+        np.testing.assert_array_equal(before, [s.end for s in skel])
+        self.assertEqual(len(a), 2500)
+        centers = np.array([p.attach + _qrot(p.frame, np.array([0., 0., .11]))
+                            for p in a])
+        counts, _, _ = np.histogram2d(centers[:, 0], centers[:, 1], bins=20,
+                                      range=[[-2.5, 2.5], [-2.5, 2.5]])
+        self.assertTrue((counts > 0).all())
+        self.assertTrue(((centers[:, 2] > 1.63) & (centers[:, 2] < 1.79)).all())
+        np.testing.assert_allclose(np.linalg.norm([p.frame for p in a], axis=1), 1.)
+        self.assertTrue(all(skel[p.parent_seg].supported for p in a))
+        self.assertTrue(all(skel[p.parent_seg].order == 2 for p in a))
+        for spacing in (-.1, .001, float('nan'), float('inf')):
+            fp.canopy_spacing_m = spacing
+            with self.subTest(spacing=spacing), self.assertRaises(ValueError):
+                place_canopy_leaves(skel, fp)
+        fp.canopy_spacing_m = .1
+        with self.assertRaisesRegex(ValueError, '100000'):
+            place_canopy_leaves(pergola(rows=10, columns=10), fp)
+
+    def test_canopy_infill_follows_sloped_canopy(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_canopy_leaves
+        from treesim.pergola import generate as pergola
+        from treesim.builder import _qrot
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           canopy_spacing_m=.2)
+        skel = pergola(rows=2, columns=2, canopy_z=lambda x, y: 1.6+.03*x-.02*y)
+        for leaf in place_canopy_leaves(skel, fp, seed=42):
+            center = leaf.attach + _qrot(leaf.frame, np.array([0., 0., .11]))
+            offset = center[2] - (1.6 + .03*center[0] - .02*center[1])
+            self.assertGreater(offset, .03)
+            self.assertLess(offset, .19)
+
+    def test_canopy_infill_preserves_physics(self):
+        import newton
+        from treesim import builder
+        from treesim.config import TreeConfig
+        from treesim.sim import Sim
+        cfg = TreeConfig.compliant('pergola')
+        cfg.device, cfg.seed = 'cpu', 42
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+        cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        cfg.foliage.enabled = True
+        cfg.foliage.leaf_length, cfg.foliage.leaf_width = .22, .17
+        baseline = builder.generate_and_build(cfg)
+        cfg.foliage.canopy_spacing_m = .16
+        covered = builder.generate_and_build(cfg)
+        for name in ('body_mass', 'body_inertia', 'body_com', 'body_q',
+                     'joint_q', 'joint_qd', 'joint_type', 'joint_parent', 'joint_child'):
+            np.testing.assert_array_equal(getattr(baseline.model, name).numpy(),
+                                          getattr(covered.model, name).numpy(), err_msg=name)
+        self.assertEqual(covered.model.body_count, baseline.model.body_count)
+        self.assertEqual(covered.leaf_bodies, [])
+        masks = [(tree.model.shape_flags.numpy() & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0
+                 for tree in (baseline, covered)]
+        for name in ('shape_type', 'shape_transform', 'shape_scale', 'shape_body'):
+            np.testing.assert_array_equal(getattr(baseline.model, name).numpy()[masks[0]],
+                                          getattr(covered.model, name).numpy()[masks[1]])
+        states = []
+        for tree in (baseline, covered):
+            sim = Sim(tree, substeps=40, collisions=True)
+            sim.step()
+            self.assertEqual(sim.apples.broken_count, 0)
+            states.append(sim.state_0.body_q.numpy())
+        np.testing.assert_allclose(*states, rtol=0, atol=1e-7)
+        cfg.foliage.physics = True
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+        cfg.foliage.physics = False
+        cfg.lsystem = preset('apple')
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+
+    def test_cli_canopy_infill_is_opt_in_and_visual_only(self):
+        import io
+        from unittest.mock import patch
+        from scripts.grow_tree import make_config, parse_args
+        command = ['grow_tree.py', '--preset', 'pergola']
+        with patch('sys.argv', command):
+            self.assertEqual(make_config(parse_args()).foliage.canopy_spacing_m, 0.)
+        with patch('sys.argv', command + ['--canopy-spacing', '.08']):
+            self.assertEqual(make_config(parse_args()).foliage.canopy_spacing_m, .08)
+        for extra in (['--canopy-spacing', '-.1'], ['--canopy-spacing', 'nan'],
+                      ['--canopy-spacing', '.001'],
+                      ['--canopy-spacing', '.08', '--foliage-physics'],
+                      ['--canopy-spacing', '.08', '--foliage-density', '0'],
+                      ['--canopy-spacing', '.08', '--preset', 'apple']):
+            with self.subTest(extra=extra), patch('sys.argv', command + extra), \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+                parse_args()
+
     def test_height_and_existing_presets(self):
         params = preset("pergola")
         params.target_height = 1.8

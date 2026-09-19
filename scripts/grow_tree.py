@@ -114,6 +114,7 @@ def make_config(args) -> TreeConfig:
     if args.leaves is not None:                 # explicit per-twig count overrides the dial
         cfg.foliage.leaves_per_terminal = args.leaves
     cfg.foliage.physics = args.foliage_physics
+    cfg.foliage.canopy_spacing_m = args.canopy_spacing
 
     cfg.fruit.enabled = args.apples
     cfg.fruit.max_count = args.apple_count if args.apple_count is not None else 40
@@ -227,6 +228,9 @@ def parse_args():
                    help="leaves flutter on their own bodies (EXPENSIVE: +1 body/leaf, ~5x slower)")
     fo.add_argument("--leaves", type=int, default=None,
                    help="explicit leaves-per-twig (overrides --foliage-density's leaf count)")
+    fo.add_argument("--canopy-spacing", type=float, default=0.,
+                   help="pergola-only visual leaf-roof spacing [m]; 0 disables infill, "
+                        ".08 gives a dense roof; requires render-only foliage")
 
     ap = p.add_argument_group("fruit")
     ap.add_argument("--apples", action="store_true",
@@ -340,6 +344,11 @@ def parse_args():
         p.error("--camera-orbit must be finite")
     if args.camera_orbit and args.num_envs != 1:
         p.error("--camera-orbit currently supports a single environment")
+    if not math.isfinite(args.canopy_spacing) or args.canopy_spacing < 0 or 0 < args.canopy_spacing < .03:
+        p.error("--canopy-spacing must be zero or finite and at least 0.03 m")
+    if args.canopy_spacing and (args.preset != "pergola" or args.foliage_physics
+                               or (args.foliage_density is not None and args.foliage_density <= 0)):
+        p.error("--canopy-spacing requires enabled, render-only pergola foliage")
     if args.preset == "pergola":
         if args.auto:
             p.error("--auto uses the apple sphere detector; pergola autonomy is not implemented")
