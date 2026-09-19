@@ -694,8 +694,13 @@ at the tip avoids initial overlap at the fruit's attachment node.
 A separate MuJoCo point connection attaches the stalk to the fruit surface.
 The connection's tensile reaction and the **local stalk direction at the
 junction** drive the angle-dependent abscission rule. Breaking that connection
-leaves the stalk's bodies and collisions active. There is no fruit-to-hand
-attachment. The fixed world fixture receives the branch-end reaction.
+leaves the stalk's bodies and collisions active. By default there is no fruit-to-hand
+attachment. The explicitly requested `--rigid --ideal-grip` diagnostic adds
+a hand/fruit weld after bilateral jaw contact at closure. It matches the
+current pose before activation, keeps stalk collisions and load-triggered
+detachment active, and labels the video as assisted. This isolates extraction
+assuming a secure grasp; it does not validate real grip strength, tissue
+damage or an unassisted harvesting policy. The fixed world fixture receives the branch-end reaction.
 This native prototype has **not yet replaced the orchard/Newton force-only
 stem representation**; the old orchard path does not provide stem collisions.
 Do not claim orchard or GPU parity from these native checks.
@@ -727,6 +732,18 @@ The elastic run with the 5.8 s transition also completed 10 s and verified
 and slipped out of the jaws (71 mm net fruit-centre motion relative to the
 wrist); peak stem load was 27.82 N and maximum contact overlap 0.814 mm.
 Reports and motion traces are in `output/extraction-vertical-pull` on JP.
+
+For the explicitly assisted extraction fixture, add `--rigid --ideal-grip`
+and use `--pull-after 4`. The 20 µs run activated the attachment after bilateral
+contact at 2 s, detached at 4.034 s (29.54 N, 137.52°) and retained the fruit.
+The 10 µs repeat also passed, detaching at 29.537 N versus 29.545 N at 20 µs.
+Both retained the fruit with less than 4 µm relative drift. These used rigid
+fruit and an artificial grip: 346–362 N transient jaw reactions were recorded,
+so this is not evidence of safe fruit handling. An initial
+misaligned-site activation was rejected; the fixed implementation verifies
+coincident site frames before enabling the attachment. Accepted-run artifacts
+are under `output/extraction-ideal-grip-aligned`, with the timestep repeat in
+`output/extraction-ideal-grip-half`.
 The contact-force setpoint is neither a hard force bound nor a measured safe
 fruit limit. This privileged controller is separate from the outcome-only RL
 evaluator; no angle target or prescribed motion is added to the RL reward.
