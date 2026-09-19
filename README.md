@@ -731,6 +731,24 @@ single best sample is closer. Initial and subsequent checkpoints are preserved;
 `best_reach_checkpoint` identifies the lowest average closest-distance checkpoint,
 which is a reaching metric, not proof of harvesting success.
 
+Every update appends `training.jsonl` and rewrites `monitor/index.html` with
+inline SVG charts of every numeric field. `--video-every 10` (0 disables)
+spawns a **CPU** MuJoCo clip of that checkpoint so recording does not sit on
+the training GPU: third-person viewer plus a yellow-boxed overlay of the
+gripper `hand_color_sensor` RGB the policy sees. Clips are labelled as a
+progress preview, not a harvest demonstration. A sidecar can attach to a run
+that is already writing jsonl:
+
+```bash
+python -B scripts/watch_training.py --run /path/to/run \
+  --hub /path/to/training/monitor --video-every 10 --poll-seconds 2
+```
+
+The page refreshes every two seconds from `training.jsonl`. If Jupyter already
+owns the tunneled port, open `monitor/index.html` through `/files/...`. Use
+`--http-port` only when that port is free. Distance, loss and
+`harvest_successes` on the dashboard are still not harvest proof.
+
 `benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
 and `--camera`. It reports policy transitions/s separately from physics steps/s.
 Training reports also include optimizer time and optimized sample count. A

@@ -8,6 +8,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train_physical_smoke import build_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
+from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 
 
 def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False):
@@ -121,6 +122,7 @@ def run(args):
     log = TrainingLog(args.output, config, wandb_mode=args.wandb_mode,
         wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
         wandb_name=args.wandb_name, upload_checkpoints=args.upload_checkpoints)
+    dashboard = LiveDashboard(args.output, hub=args.monitor_hub)
     try:
         runtime = FastRuntime(args.scene, worlds=args.worlds, camera='hand_color_sensor',
                               nconmax=args.nconmax, njmax=args.njmax)
@@ -142,6 +144,10 @@ def run(args):
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0))
         baseline = evaluate(runtime, policy, gait, args.steps, args.camera_every)
         log.log(baseline, step=0)
+        dashboard.refresh()
+        if args.video_every:
+            spawn_progress_video(initial_checkpoint, dashboard.video_path(0),
+                                 steps=args.video_steps, camera_every=args.camera_every)
         evaluations = [dict(update=0, **baseline)]
         best_distance = baseline['evaluation/mean_closest_distance_m']
         best_checkpoint = str(initial_checkpoint)
@@ -177,6 +183,10 @@ def run(args):
                 if distance < best_distance:
                     best_distance, best_checkpoint = distance, str(checkpoint)
             log.log(metrics, step=iteration+1)
+            dashboard.refresh()
+            if args.video_every and (iteration + 1) % args.video_every == 0:
+                spawn_progress_video(checkpoint, dashboard.video_path(iteration + 1),
+                                     steps=args.video_steps, camera_every=args.camera_every)
             reports.append(metrics)
             print(json.dumps(metrics), flush=True)
         log.log_checkpoint(checkpoint)
@@ -185,7 +195,9 @@ def run(args):
                       best_mean_closest_distance_m=best_distance,
                       elapsed_seconds=time.monotonic()-start, wandb_url=log.url, numerical=runtime.check())
         (args.output/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+        dashboard.refresh()
     except BaseException:
+        dashboard.refresh()
         log.finish(success=False)
         raise
     log.finish()
@@ -207,9 +219,12 @@ def main():
     p.add_argument('--njmax', type=int, default=512)
     p.add_argument('--seed', type=int, default=42)
     add_training_log_args(p)
+    add_monitor_args(p)
     a = p.parse_args()
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
+    if not 0 <= a.video_every <= 10000 or not 8 <= a.video_steps <= 256:
+        p.error('Invalid video-every or video-steps')
     run(a)
 
 
