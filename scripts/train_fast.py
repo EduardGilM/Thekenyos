@@ -55,6 +55,21 @@ def should_persist_checkpoint(update_index, *, updates, eval_every, checkpoint_e
     return bool(video_every) and update_index % video_every == 0
 
 
+def apply_speedrun_cli(args, *, video_default=10):
+    """Apply the wall-clock preset. Explicit --video-every, including 0, wins."""
+    if not getattr(args, 'speedrun', False):
+        return args
+    preset = apply_speedrun_preset({})
+    args.eval_every = preset['eval_every']
+    args.checkpoint_every = preset['checkpoint_every']
+    args.entropy_coef = preset['entropy_coef']
+    args.eval_profile = preset['eval_profile']
+    args.mask_idle_locomotion = preset['mask_idle_locomotion']
+    if args.video_every == video_default:
+        args.video_every = preset['video_every']
+    return args
+
+
 def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, carry=None,
             reset_all=False, dim_mask=None):
     import torch
@@ -537,14 +552,7 @@ def main():
     add_training_log_args(p)
     add_monitor_args(p)
     a = p.parse_args()
-    if a.speedrun:
-        preset = apply_speedrun_preset({})
-        a.eval_every = preset['eval_every']
-        a.checkpoint_every = preset['checkpoint_every']
-        a.entropy_coef = preset['entropy_coef']
-        a.video_every = preset['video_every']
-        a.mask_idle_locomotion = preset['mask_idle_locomotion']
-        a.eval_profile = preset['eval_profile']
+    apply_speedrun_cli(a)
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
     if not 1 <= a.checkpoint_every <= 10000:

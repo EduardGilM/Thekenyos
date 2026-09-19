@@ -81,6 +81,23 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertTrue(should_persist_checkpoint(1, updates=2000, eval_every=50,
                                                  checkpoint_every=1, video_every=10, promoted=False))
 
+    def test_speedrun_keeps_explicit_zero_video_every(self):
+        import argparse
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import apply_speedrun_cli
+        kept = apply_speedrun_cli(argparse.Namespace(
+            speedrun=True, video_every=0, eval_every=50, checkpoint_every=1,
+            entropy_coef=0.005, eval_profile='default', mask_idle_locomotion=True))
+        self.assertEqual(kept.eval_every, 100)
+        self.assertEqual(kept.checkpoint_every, 50)
+        self.assertEqual(kept.entropy_coef, 0.01)
+        self.assertEqual(kept.eval_profile, 'speedrun')
+        self.assertEqual(kept.video_every, 0)
+        filled = apply_speedrun_cli(argparse.Namespace(
+            speedrun=True, video_every=10, eval_every=50, checkpoint_every=1,
+            entropy_coef=0.005, eval_profile='default', mask_idle_locomotion=True))
+        self.assertEqual(filled.video_every, 50)
+
 
 if __name__ == '__main__':
     unittest.main()
