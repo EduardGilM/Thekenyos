@@ -35,8 +35,16 @@ not approval of the basket geometry or loaded workspace.
 | RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
 | RL training | Earlier diagnostic pilot used faulty CPU hand collision filtering; checkpoint retained for regression only. Training paused for physics validation |
 
+The upstream harvesting demo uses a hand-to-fruit spring as a grip assist,
+including stronger recentring after detachment (`treesim/fruit.py`). That is
+useful demo behavior, but does not validate whether Spot's jaws can retain a
+kiwi using contact and friction alone. `KiwiField.hold()` explicitly rejects
+that assist. We reuse the orchard framework, not its grasp success as physical
+validation. Native deformable-gripper tests are our additions.
+
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
-bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
+bench deforms against Spot jaw meshes, but is not yet integrated into the GPU
+orchard or full-arm control.
 Neither model is a validated predictor of bruising. Layered skin/core,
 viscoelastic/plastic constitutive laws, calibrated wet friction and
 calibrated angle/torque-dependent abscission remain open work. Research ranges are not
@@ -399,7 +407,7 @@ New rigid-fruit training requires `transfer_accepted=true`; archived checkpoint
 evaluation remains available. This agreement is necessary, not a complete
 physical-calibration or deployment approval.
 
-The native benches now use a 0.2 ms numerical contact time. The compression
+The ideal-pad compression bench uses a 0.2 ms numerical contact time. The compression
 pad-gap command accounts for the flex's 0.3 mm collision radius on each side,
 so requested tissue strain is not confused with the inflated contact envelope.
 The gripper bench now defaults to count 9 (387 vertices), with matched rigid
@@ -427,6 +435,88 @@ Raw reports on JP are `output/compression-refined/summary.json`,
 `output/contact-refined/summary.json`, `output/detachment-native.json` and
 `output/detachment-native-halfstep.json`. Reports include executed source hashes
 where available. Generated artifacts stay outside Git.
+
+The native stem-attached diagnostic is `scripts/check_grasp_pull.py`.
+It uses Spot's jaw collision meshes, an unpinned fruit and a collidable stalk.
+`treesim/native_stem.py` builds four massive capsule segments with bending,
+torsional and axial spring joints. Mean He2024 length, diameter, density and
+modulus determine segment mass and EA/EI/GJ stiffness. Joint damping and contact
+friction remain engineering assumptions. This is a reduced beam model, not a
+calibrated stalk fracture or viscoelastic model. The 0.4 mm collision clearance
+at the tip avoids initial overlap at the fruit's attachment node.
+
+A separate MuJoCo point connection attaches the stalk to the fruit surface.
+The connection's tensile reaction and the **local stalk direction at the
+junction** drive the angle-dependent abscission rule. Breaking that connection
+leaves the stalk's bodies and collisions active. There is no fruit-to-hand
+attachment. The fixed world fixture receives the branch-end reaction.
+This native prototype has **not yet replaced the orchard/Newton force-only
+stem representation**; the old orchard path does not provide stem collisions.
+Do not claim orchard or GPU parity from these native checks.
+
+```bash
+MUJOCO_GL=egl python scripts/check_grasp_pull.py --relic ../relic \
+  --output output/grasp-pull --torque 3 --grasp-x .175 \
+  --target-fsa 60 --grip-force 15 --roll-speed .4 --video
+# Add --rigid for the diagnostic surrogate; repeat with --timestep .00001.
+# --duration 1 is a numerical smoke check, not a harvest-success test.
+
+# Generate a rigid scene with the command above plus --rigid, then:
+MUJOCO_GL=egl python scripts/check_stem_contacts.py \
+  --scene output/grasp-pull/scene.xml --output output/stem-contacts --video
+# Repeat at --timestep .00001 and with a generated elastic-fruit scene.
+```
+
+The ideal controller closes the jaws, rotates around the observed attachment
+and waits for measured fruit–stem angle to remain within 3° of its target for
+100 ms before pulling at 9 mm/s. Wrist rotation is not fruit–stem angle.
+The contact-force setpoint is neither a hard force bound nor a measured safe
+fruit limit. This privileged controller is separate from the outcome-only RL
+evaluator; no angle target or prescribed motion is added to the RL reward.
+
+The direct contact regression first moves the actual hand into the stalk,
+stops after 0.5 mm additional travel, and withdraws it. The second case starts
+with the fruit detached and lets it strike the stalk. Gravity is disabled in
+these collision-isolation checks; they are not harvesting demonstrations.
+Both require nonzero contact force, stalk motion, sub-millimetre penetration
+and no numerical warning. The elastic check also rejects collapsed elements.
+The initial unrestricted prescribed-hand sweep became numerically unstable;
+it is archived under `output/physical-stem-contacts` and is not a passing case.
+
+The final palm/stalk and fruit/stalk checks passed with both rigid and elastic
+fruit at 20 and 10 µs. Elastic peak loads were 1.980/1.985 N for the hand and
+0.26024/0.26015 N for the fruit; peak-force changes were below 0.4% across
+all four matched cases. Maximum stalk-contact overlap was 0.366 mm. The elastic
+minimum tetrahedral volume ratio stayed above 0.9978. A separate small-load
+beam check matched continuum tip deflection within 3.2%; this checks the
+reduction, not biological calibration. Run it with
+`python -m unittest tests.test_native_stem -v`.
+Raw contact reports are `output/stem-verified-{rigid,flex}-{20,10}/metrics.json`
+on JP. `--hand-surface jaw` provides an additional, less occluded contact view.
+
+The earlier force-only-stem rigid demonstration detached at 62.27° and 6.02 N,
+then retained the fruit. **That result is superseded:** adding stalk collisions
+changed the outcome. An early stalk prototype released around 114° and dropped
+the fruit. The refined stalk released at 110.24° and retained it, but the
+prescribed wrist drove into the stalk (10.4 mm peak overlap). That run is
+rejected. The fixture now stops immediately if hand/stalk penetration or
+attachment error exceeds 1 mm. The picking motion still needs collision-aware
+control; numerical completion alone is not acceptance.
+The force-only elastic runs slipped, and an unregulated 3 Nm run collapsed a
+tetrahedron. Do not use these as physically verified demonstrations for RL.
+Preserve the failed cases while improving the physical model and controller.
+
+These benches use MPR collision (`nativeccd=disable`) as a scoped workaround
+for intermittent native CCD failures; their root cause is not established.
+The free-fruit bench uses a 4 ms numerical contact response, the grasp/pull
+fixture 2 ms, and the ideal-pad compression bench 0.2 ms. These values are
+solver settings, not measured tissue compliance. The jaw controller uses
+kp=20, kv=0.2 and a torque limit; these are not identified Spot hardware gains.
+Hold drift is measured after closure, with settling reported separately.
+The pull check measures retention relative to the wrist and rejects excessive
+hand/stalk penetration or attachment error. `numerically_completed` and
+harvest `passed` are separate results; neither establishes absence of bruising.
+The mixed Xuxiang tissue / Hayward abscission model remains uncalibrated.
 
 Continue the agreed sequence above after the numerical contact gate passes.
 Real-world calibration remains pending while the project is simulation-only.

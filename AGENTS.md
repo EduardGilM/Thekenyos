@@ -32,6 +32,10 @@ already present. State a short plan before substantial implementation.
   Do not make basket fruit visual ballast or glue it to the robot to hide spills.
 - Basket geometry must attach to the chassis and contribute the intended mass
   and inertia. The liner is a simplified collision surface, not the visual vents.
+- A force-only stem or rendered line does not establish physical stem contact.
+  Native stalk changes require hand/stalk and fruit/stalk contact checks at two
+  timesteps, including after detachment. Keep native and orchard/GPU support
+  separate: the current collidable stalk exists only in the native bench.
 - A stem must transmit load at its attachment site. Apply equal/opposite forces
   and moment arms. Detachment must respond to physical contact as well as pulls.
 - Damage and spill state must be irreversible within an episode. Penalize a
