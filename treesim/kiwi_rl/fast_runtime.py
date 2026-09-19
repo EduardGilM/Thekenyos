@@ -69,7 +69,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
-                     basket_center: wp.vec3, dt: float, gamma_step: float,
+                     basket_center: wp.vec3, hover_offset: wp.vec3, dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
                      w_grasp: float, w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float,
@@ -98,9 +98,11 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     if length <= 0.0:
         length = 0.25
     if use_basket != 0 and shape_hand_fruit[0] != 0:
+        hover_world = basket_world + rotation @ hover_offset
+        d_hover = wp.length(fruit_world - hover_world)
         tcp_diff = tcp - basket_world
         d_hand_xy = wp.sqrt(tcp_diff[0] * tcp_diff[0] + tcp_diff[1] * tcp_diff[1])
-        phi = 0.5 * (wp.exp(-d_basket / length) + wp.exp(-d_hand_xy / length))
+        phi = 0.5 * (wp.exp(-d_hover / length) + wp.exp(-d_hand_xy / length))
     else:
         phi = wp.exp(-d_shape / length)
     shaped = float(0.)
@@ -219,8 +221,9 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
                           shaping_length: wp.array(dtype=float),
                           site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                           xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
-                          chassis: int, basket_center: wp.vec3,
-                          shape_hand_fruit: wp.array(dtype=int)):
+                          chassis: int, basket_center: wp.vec3, hover_offset: wp.vec3,
+                          shape_hand_fruit: wp.array(dtype=int),
+                          fruit_bodies: wp.array(dtype=int), active_fruit: wp.array(dtype=int)):
     world = wp.tid()
     if mask[world] == 0:
         return
@@ -231,10 +234,16 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
         length = 0.25
     if use_basket != 0 and shape_hand_fruit[0] != 0:
         basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+        hover_world = basket_world + xmat[world, chassis] @ hover_offset
+        idx = active_fruit[world]
+        if idx < 0 or idx >= MAX_FRUITS:
+            idx = 0
+        fruit = fruit_bodies[idx]
+        d_hover = wp.length(xpos[world, fruit] - hover_world)
         tcp = site_xpos[world, tcp_site]
         d_hand_xy = wp.sqrt((tcp[0] - basket_world[0]) * (tcp[0] - basket_world[0])
                             + (tcp[1] - basket_world[1]) * (tcp[1] - basket_world[1]))
-        previous_potential[world] = 0.5 * (wp.exp(-d_shape / length) + wp.exp(-d_hand_xy / length))
+        previous_potential[world] = 0.5 * (wp.exp(-d_hover / length) + wp.exp(-d_hand_xy / length))
     else:
         previous_potential[world] = wp.exp(-d_shape / length)
     shaping_ref[world] = use_basket
@@ -614,6 +623,10 @@ class FastRuntime:
             from treesim.basket import CENTER, SIZE
             self._basket_center = wp.vec3(*CENTER)
             self._open_rim_z_m = float(SIZE[2])
+            # Floor-to-hover: SIZE.z + 28 cm. A 10 cm-over-hole TCP puts the
+            # ~0.20 m wrist through the liner; this is the known-safe IK height.
+            self._hover_offset = wp.vec3(
+                0.0, 0.0, float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -708,7 +721,8 @@ class FastRuntime:
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
-                          self.task.deposited, self.task.loss_paid, self._basket_center, self.control_dt,
+                          self.task.deposited, self.task.loss_paid, self._basket_center,
+                          self._hover_offset, self.control_dt,
                           self._gamma_step, self._deposit_w, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
                           self._shape_hand_fruit], device=self.device)
@@ -934,11 +948,12 @@ class FastRuntime:
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
         Does not weld fruit, spawn the arm inside the liner, or write fruit
-        into the liner. Starts stay outside the crate. Shaping pulls fruit
-        and hand toward the basket centre; the script opens there. Eval
-        still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw
-        close fractions are a rigid contact sweep, not a calibrated
-        tissue-safe force.
+        into the liner.         Starts stay outside the crate. Shaping pulls fruit 3D and hand
+        XY toward the open hover (rim + 28 cm), not the liner floor, so
+        the wrist is not paid to ram the crate. The script opens when
+        both XY sit over the hole. Eval still sets guidance_weight=0
+        and must keep teacher_mix at 0. Jaw close fractions are a rigid
+        contact sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
@@ -1026,6 +1041,8 @@ class FastRuntime:
             'grasp_local_m': None if not self._easy else [float(x) for x in self._grasp_local_host],
             'shape_hand_and_fruit': shape_both,
             'release_at_center': release_center,
+            'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
+            'shape_to_hover': shape_both,
             'weld': False,
             'scope': ('kiwi starts in the jaws; scripted hold/open under 15 N; '
                       'student arm deposits; fruit stays free; no weld'),
@@ -1162,7 +1179,8 @@ class FastRuntime:
                               self._basket_distance, self._episode_time, self._timed_out,
                               self._shaping_length, self.data.site_xpos, int(self.tcp_site),
                               self.data.xpos, self.data.xmat, self.chassis, self._basket_center,
-                              self._shape_hand_fruit], device=self.device)
+                              self._hover_offset, self._shape_hand_fruit,
+                              self.task.fruit_body, self.task.active_fruit], device=self.device)
         return self.observe()
 
     def drain_faults(self):

@@ -29,10 +29,12 @@ W_OBSTACLE_CONTACT_PER_S = -1.0
 
 
 def approach_center_potential(fruit_xyz, tcp_xyz, basket_xyz, length_m=0.60):
-    """Mean of fruit-to-centre and hand-XY-to-centre potentials.
+    """Mean of fruit-to-target and hand-XY-to-target potentials.
 
-    Fruit uses 3D distance so it is pulled into the crate. The hand uses
-    XY only so the wrist is not rewarded for diving through the liner.
+    Easy mode passes the open hover (rim + 28 cm), not the liner floor:
+    a 10 cm-over-hole TCP puts the ~0.20 m wrist through the crate, and
+    paying fruit 3D to the floor taught the arm to ram the walls. Hand
+    stays XY-only so PPO is not paid to dive the wrist after release.
     Engineering shaping, not a measured harvest value.
     """
     fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(3)

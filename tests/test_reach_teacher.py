@@ -3,9 +3,10 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
-    hover_tcp_world_m, basket_chassis_aabb_m, easy_over_opening_local_m,
-    easy_start_local_m, grasp_local_near_tcp, hold_close_fracs, jaw_hold_q,
-    jaw_open_closed_from_gaps, offset_grasp_local, scripted_jaw_target,
+    hover_tcp_local_m, hover_tcp_world_m, basket_chassis_aabb_m,
+    easy_over_opening_local_m, easy_start_local_m, grasp_local_near_tcp,
+    hold_close_fracs, jaw_hold_q, jaw_open_closed_from_gaps,
+    level_wrist_local_m, offset_grasp_local, scripted_jaw_target,
     select_hold_close, tcp_outside_basket, tcp_over_opening_above_rim,
 )
 
@@ -29,6 +30,17 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertEqual(float(step[0]), 0.)
         self.assertGreater(float(step[1]), 0.)
         self.assertGreater(float(step[2]), 0.)
+
+    def test_low_over_hole_puts_level_wrist_inside_crate(self):
+        lo, hi = basket_chassis_aabb_m()
+        low_wrist = level_wrist_local_m(hover_tcp_local_m(0.10))
+        high_wrist = level_wrist_local_m(hover_tcp_local_m(0.28))
+        self.assertTrue(lo[0] < float(low_wrist[0]) < hi[0])
+        self.assertTrue(lo[1] < float(low_wrist[1]) < hi[1])
+        self.assertLess(float(low_wrist[2]) - float(hi[2]), 0.15)
+        self.assertGreater(float(high_wrist[2]) - float(hi[2]), 0.25)
+        with self.assertRaises(ValueError):
+            level_wrist_local_m([0.0, 0.0, 0.5], tcp_to_wrist_m=0.0)
 
     def test_hover_tcp_is_above_basket_not_inside_liner(self):
         from treesim.basket import CENTER, SIZE

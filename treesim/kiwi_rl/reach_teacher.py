@@ -5,6 +5,21 @@ from __future__ import annotations
 import numpy as np
 
 
+def level_wrist_local_m(tcp_local, tcp_to_wrist_m=0.195):
+    """Chassis-frame wrist if the hand points −X, level, over ``tcp_local``.
+
+    ``hand_tcp`` sits ~0.195 m forward of ``arm_link_wr1``. A level carry
+    toward the crate therefore puts the wrist ~0.20 m behind the TCP in +X.
+    Used to show a 10 cm-over-hole TCP puts the wrist inside the liner XY;
+    not a measured link frame.
+    """
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    offset = float(tcp_to_wrist_m)
+    if not np.isfinite(tcp).all() or not np.isfinite(offset) or not 0.05 <= offset <= 0.35:
+        raise ValueError('level wrist inputs must be finite, offset in [0.05, 0.35] m')
+    return tcp + np.array([offset, 0.0, 0.0], dtype=np.float64)
+
+
 def hover_tcp_local_m(clearance_m=0.12):
     """Chassis-frame TCP *drop* target above the open basket rim.
 

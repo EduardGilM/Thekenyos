@@ -70,8 +70,10 @@ EASY_PRESET = {
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
     # Carry from the original outside-crate start. Reward fruit 3D and hand
-    # XY toward the basket centre; force the jaw open once both are over
-    # the hole. Over-opening starts stay available behind this flag.
+    # XY toward the *open hover* (rim + 28 cm), not the liner floor: a
+    # low swing over the hole puts the wrist through the crate. Force the
+    # jaw open once both XY sit over the hole. Over-opening starts stay
+    # available behind this flag.
     # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
     # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,

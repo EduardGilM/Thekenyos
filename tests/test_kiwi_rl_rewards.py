@@ -58,6 +58,11 @@ class LedgerTest(unittest.TestCase):
         self.assertGreater(near, far)
         hand_only = approach_center_potential([1.0, 0.0, 0.2], [0.04, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
         self.assertGreater(hand_only, far)
+        from treesim.basket import CENTER, SIZE
+        hover = np.asarray(CENTER, dtype=np.float64) + np.array([0.0, 0.0, float(SIZE[2]) + 0.28])
+        at_hover = approach_center_potential(hover, hover, hover, 0.60)
+        dive = approach_center_potential(CENTER, CENTER + np.array([0.0, 0.0, 0.10]), hover, 0.60)
+        self.assertGreater(at_hover, dive)
         with self.assertRaises(ValueError):
             approach_center_potential([np.nan, 0, 0], [0, 0, 0], [0, 0, 0])
 
