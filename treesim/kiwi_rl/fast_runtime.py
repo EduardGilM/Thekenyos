@@ -313,6 +313,32 @@ def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
 
 
 @wp.kernel
+def _easy_airdrop(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                  qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
+                  targets: wp.array2d(dtype=float), fruit_qposadr: wp.array(dtype=int),
+                  fruit_dofadr: wp.array(dtype=int), jaw_qposadr: int, jaw_open: float,
+                  xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                  chassis: int, spawn_local: wp.vec3):
+    """Open the jaw and place a free fruit over the basket opening, above the rim.
+
+    The arm stays on the 40 cm outside-crate start. Not a liner teleport.
+    """
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 1:
+        return
+    qadr = fruit_qposadr[0]
+    dadr = fruit_dofadr[0]
+    spawn = xpos[world, chassis] + xmat[world, chassis] @ spawn_local
+    qpos[world, qadr + 0] = spawn[0]
+    qpos[world, qadr + 1] = spawn[1]
+    qpos[world, qadr + 2] = spawn[2]
+    for i in range(6):
+        qvel[world, dadr + i] = 0.0
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
+
+
+@wp.kernel
 def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                                chassis: int, fruit_bodies: wp.array(dtype=int),
                                active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
@@ -454,8 +480,14 @@ class FastRuntime:
             jaw_range = np.asarray(self.model.jnt_range[self.control.contract.joints[18]], dtype=np.float32)
             self._jaw_closed = float(jaw_range[0] if np.isfinite(jaw_range[0]) else 0.0)
             self._jaw_open = float(jaw_range[1] if np.isfinite(jaw_range[1]) else 0.8)
-            from treesim.basket import CENTER
+            from treesim.basket import CENTER, SIZE
             self._basket_center = wp.vec3(*CENTER)
+            above = float(EASY_PRESET['airdrop_above_rim_m'])
+            if not np.isfinite(above) or not 0 < above <= 0.3:
+                raise ValueError('airdrop_above_rim_m must be finite in (0, 0.3] m')
+            spawn_local = np.asarray(CENTER, dtype=np.float64) + np.array(
+                [0.0, 0.0, float(SIZE[2]) + above], dtype=np.float64)
+            self._airdrop_local = wp.vec3(*spawn_local)
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -690,7 +722,7 @@ class FastRuntime:
         }
 
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
-        """Train-only facilitation: outside-crate carry reset + stronger shaping.
+        """Train-only facilitation: outside-crate arm + airdrop + stronger shaping.
 
         Does not weld fruit, spawn the arm inside the crate, or write fruit
         into the liner. Eval still sets guidance_weight=0; the caller must
@@ -718,7 +750,8 @@ class FastRuntime:
             'easy_start_error_m': float(self.easy_start_error_m),
             'n_start_poses': int(self._easy_start_q.shape[0]),
             'weld': False,
-            'scope': 'experimental privileged deposit facilitation; fruit stays free; arm starts outside the crate',
+            'scope': ('experimental privileged deposit facilitation; fruit stays free; '
+                      'arm starts outside the crate; fruit airdrops over the opening'),
         }
 
     def privileged_deposit_action(self):
@@ -790,6 +823,14 @@ class FastRuntime:
                 device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
+            if self._easy:
+                wp.launch(_easy_airdrop, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
+                    self._fruit_qposadrs, self._fruit_dofadrs, self._jaw_qposadr, self._jaw_open,
+                    self.data.xpos, self.data.xmat, self.chassis, self._airdrop_local],
+                    device=self.device)
+                mw.forward(self.gpu_model, self.data)
+                self._refresh(mw)
             self._measure_reward(mask_wp)
             wp.launch(_basket_distance, dim=self.worlds,
                       inputs=[self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,

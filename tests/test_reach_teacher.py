@@ -3,7 +3,8 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
-    basket_chassis_aabb_m, easy_start_local_m, tcp_outside_basket,
+    basket_chassis_aabb_m, easy_airdrop_world_m, easy_start_local_m,
+    tcp_outside_basket,
 )
 
 
@@ -62,6 +63,22 @@ class ReachTeacherMathTest(unittest.TestCase):
             easy_start_local_m(-0.1)
         with self.assertRaises(ValueError):
             easy_start_local_m(1.1)
+
+    def test_easy_airdrop_is_over_opening_not_tcp(self):
+        from treesim.basket import CENTER, SIZE
+        from treesim.kiwi_rl.curriculum import EASY_PRESET
+        xpos = np.array([1.0, 2.0, 3.0])
+        xmat = np.eye(3)
+        pos = easy_airdrop_world_m(xpos, xmat)
+        above = float(EASY_PRESET['airdrop_above_rim_m'])
+        self.assertAlmostEqual(float(pos[0]), 1.0 + float(CENTER[0]))
+        self.assertAlmostEqual(float(pos[1]), 2.0 + float(CENTER[1]))
+        self.assertAlmostEqual(float(pos[2]), 3.0 + float(CENTER[2] + SIZE[2] + above))
+        self.assertGreater(float(pos[2] - xpos[2]), float(CENTER[2] + SIZE[2]))
+        with self.assertRaises(ValueError):
+            easy_airdrop_world_m(xpos, xmat, above_rim_m=0.0)
+        with self.assertRaises(ValueError):
+            easy_airdrop_world_m(xpos, xmat, above_rim_m=0.4)
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

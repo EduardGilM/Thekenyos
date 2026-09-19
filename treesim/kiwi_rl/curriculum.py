@@ -69,6 +69,7 @@ EASY_PRESET = {
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
+    'airdrop_above_rim_m': 0.06,
     'start_margin_m': 0.40,
     'start_clearance_m': 0.28,
     'n_start_poses': 8,

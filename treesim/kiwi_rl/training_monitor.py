@@ -698,19 +698,29 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     if easy and reset_mode == 1:
         apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
-        tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
-        data.qpos[qposadr:qposadr + 3] = tcp
+        if easy:
+            from treesim.kiwi_rl.reach_teacher import easy_airdrop_world_m
+            spawn = easy_airdrop_world_m(
+                data.xpos[controller.chassis], data.xmat[controller.chassis])
+            data.qpos[qposadr:qposadr + 3] = spawn
+            opened = float(model.jnt_range[int(controller.joints[18]), 1])
+            if not np.isfinite(opened):
+                opened = 0.8
+            data.qpos[int(controller.qids[18])] = opened
+            controller.targets[18] = opened
+        else:
+            tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+            data.qpos[qposadr:qposadr + 3] = tcp
+            closed = float(model.jnt_range[int(controller.joints[18]), 0])
+            if not np.isfinite(closed):
+                closed = 0.0
+            data.qpos[int(controller.qids[18])] = closed
+            controller.targets[18] = closed
         data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)
         data.qvel[dofadr:dofadr + 6] = 0.0
         equality = fruit.get('equality')
         if equality:
             data.eq_active[int(model.equality(equality).id)] = 0
-        jaw_joint = int(controller.joints[18])
-        closed = float(model.jnt_range[jaw_joint, 0])
-        if not np.isfinite(closed):
-            closed = 0.0
-        data.qpos[int(controller.qids[18])] = closed
-        controller.targets[18] = closed
     if reset_mode == 2:
         jaw_joint = int(controller.joints[18])
         opened = float(model.jnt_range[jaw_joint, 1])
