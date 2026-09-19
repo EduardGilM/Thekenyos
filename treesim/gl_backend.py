@@ -49,13 +49,20 @@ def bind_mujoco_gl(mode: str = "auto", require_gpu: bool = False) -> str:
         raise RuntimeError(
             "MUJOCO_GL=egl was requested but no NVIDIA device is visible"
         )
-    os.environ.pop("MUJOCO_GL", None)
-    import mujoco  # noqa: F401  — bind backend after import
     if mode == "osmesa":
         backend = "osmesa"
     elif mode == "egl" or has_gpu:
         backend = "egl"
     else:
         backend = "osmesa"
-    os.environ["MUJOCO_GL"] = backend
+    # MuJoCo 3.8.1 picks the platform library at import. OSMesa must not be
+    # selected before import (it can abort). EGL must be selected before import
+    # or Renderer falls through to GLFW and needs a DISPLAY.
+    if backend == "egl":
+        os.environ["MUJOCO_GL"] = "egl"
+        import mujoco  # noqa: F401
+    else:
+        os.environ.pop("MUJOCO_GL", None)
+        import mujoco  # noqa: F401
+        os.environ["MUJOCO_GL"] = backend
     return backend

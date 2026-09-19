@@ -111,14 +111,31 @@ the procedural noise floor, or `--terrain --terrain-kind orchard` for the
 retained orchard floor (grassed aisles, planting strips, slope and noise). The native compression bench writes its own generated
 MuJoCo XML to its output directory.
 
-On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
-render-only foliage). This is a scripted flyover, not Spot gait. The flag
-refuses a CPU fallback:
+On a 4 GB GTX 1650, record a cropped hillside kiwi block with MuJoCo EGL
+(render-only cordate leaves, no extra bodies). This is a scripted flyover,
+not Spot gait. The flag refuses a CPU fallback:
 
 ```bash
 python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
-  --video output/orchard-mujoco.mp4
+    --hillside --canopy-spacing .15 --pergola-rows 9 --pergola-columns 7 \
+    --fruit-count 800 --video output/orchard-mujoco.mp4
 ```
+
+The hillside is an assumed rolling landform (value-noise / Perlin-like octaves
+plus a mild residual tilt), not a surveyed DEM and not a single inclined plane.
+Dense infill stays inside the 100,000-leaf cap by cropping the post grid; do
+not enable ``.15`` m spacing on the default 45×40 commercial field. The
+recording enters from the south margin along a grass aisle and stays under the
+leaf roof so the camera does not dive through the canopy; a visual earth bulk
+sits under the heightfield so the hillside is not a floating card. The walking
+surface is one heightfield; the loam bulk is the hillside cut, not a second
+lawn. Albedo bakes 0.35 m grass/soil tiles plus an irregular under-tree dapple
+(dark canopy body and sun flecks, offset along the sun XY). Classic-GL shadow
+maps on the leaf roof alias into a grid, so they stay off; this dapple is not a
+realtime leaf shadow. pip MuJoCo 3.8.1 is still classic GL, not Filament.
+
+The full 45×40 structural grid without the leaf roof is still available with
+``--flat --canopy-spacing 0 --pergola-rows 45 --pergola-columns 40``.
 
 Newton GL with foliage is a separate viewer. A 4 GB card should crop the
 grid; a larger NVIDIA GPU can keep the commercial default:

@@ -134,6 +134,9 @@ def make_config(args) -> TreeConfig:
         cfg.foliage.min_order_for_leaves = 2
         cfg.foliage.leaf_length = 0.22
         cfg.foliage.leaf_width = 0.17
+        cfg.foliage.leaf_shape = "cordate"
+        cfg.foliage.leaf_color = (0.14, 0.36, 0.10)
+        cfg.foliage.leaves_per_terminal = max(cfg.foliage.leaves_per_terminal, 8)
 
     cfg.physics.terrain = args.terrain
     cfg.physics.terrain_amplitude = args.terrain_amplitude
@@ -141,6 +144,13 @@ def make_config(args) -> TreeConfig:
     cfg.physics.terrain_extent = args.terrain_extent
     cfg.physics.terrain_seed = args.terrain_seed
     cfg.physics.terrain_kind = args.terrain_kind
+    if getattr(args, "hillside", False):
+        cfg.physics.terrain = True
+        cfg.physics.terrain_kind = "orchard"
+        cfg.physics.orchard_slope_deg = (3.5, 3.5)
+        cfg.physics.orchard_slope_azimuth_deg = (38.0, 38.0)
+        cfg.physics.orchard_landform_m = 2.4
+        cfg.physics.orchard_landform_wavelength_m = 18.0
     if args.terrain and args.preset == "pergola" and args.terrain_kind == "noise" and args.terrain_seed is None:
         import random
         cfg.physics.terrain_seed = random.SystemRandom().randrange(2**31)
@@ -276,6 +286,10 @@ def parse_args():
     t.add_argument("--terrain-seed", type=int, default=None,
                    help="fixed terrain seed for replay; omitted picks fresh random kiwi "
                         "noise each launch (orchard/apple use the scene --seed)")
+    t.add_argument("--hillside", action="store_true",
+                   help="pergola orchard floor with rolling value-noise landform "
+                        "and a mild residual tilt (assumed hillside, not a surveyed "
+                        "block); implies --terrain --terrain-kind orchard")
 
     r = p.add_argument_group("render/sim")
     r.add_argument("--viewer", default="gl", choices=["gl", "rtx", "usd", "null"],
@@ -349,6 +363,8 @@ def parse_args():
     if args.canopy_spacing and (args.preset != "pergola" or args.foliage_physics
                                or (args.foliage_density is not None and args.foliage_density <= 0)):
         p.error("--canopy-spacing requires enabled, render-only pergola foliage")
+    if args.hillside and args.preset != "pergola":
+        p.error("--hillside requires --preset pergola")
     if args.preset == "pergola":
         if args.auto:
             p.error("--auto uses the apple sphere detector; pergola autonomy is not implemented")
