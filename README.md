@@ -689,6 +689,15 @@ uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
 python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
 ```
 
+W&B logging is available in `scripts/train_physical_smoke.py`. Add
+`--wandb-mode online --wandb-project Thekenyos --wandb-entity juampab`
+to the training command after authenticating with `wandb login` on the host.
+Logs include losses, rewards, policy transitions per second, evaluation distance,
+and fall fraction. Every run also appends local `training.jsonl`; `offline`
+queues W&B data locally, and `disabled` needs no W&B connection. Checkpoint
+uploads require `--upload-checkpoints`. Run outputs and W&B caches stay under
+`--output`; credentials are never stored in the repository.
+
 `scripts/check_deformable_backend.py` checks real flex contact against ground,
 other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
 jaw, applies gravity, holds, opens, and checks release. Device-side checks latch
