@@ -205,9 +205,16 @@ class EpisodeProgress:
         self.graph_best = torch.maximum(self.graph_best, score)
         self.graph_forward += (self.graph_stage > previous_stage).long()
         self.graph_backward += (self.graph_stage < previous_stage).long()
-        for i, name in enumerate(STAGE_NAMES):
+        detached = self.graph_detached
+        settling = detached & ~now['touching'] & (now['settle_time'] > 0)
+        activity = dict(position=~now['enclosed'] & ~detached,
+            grip=now['enclosed'] & ~self.graph_grip & ~detached,
+            extract=(self.graph_grip & ~detached) | (detached & ~self.graph_grip & ~settling),
+            carry=detached & self.graph_grip,
+            deposit=settling & ~now['success'], complete=now['success'])
+        for name in STAGE_NAMES:
             self.graph_progress_reward[name] = self.gamma*self.graph_components[name] - previous_components[name]
-            active = (score < 2) if i == 0 else ((score >= (2,3,3.6,5,6)[i-1]) & (score < (3,3.6,5,6,7)[i-1]))
+            active = activity[name]
             self.graph_time[name] += active.float()*self.control_dt
             self.graph_reached[name] |= active
 

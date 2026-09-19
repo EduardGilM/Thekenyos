@@ -213,3 +213,11 @@ class ContinuousGraphTest(unittest.TestCase):
             torch.testing.assert_close(p.stale,torch.tensor([0,150,0,150]))
             p.stale.fill_(150)
             self.assertIsNone(queue.begin(runtime,collector,torch.nn.Linear(1,1),0))
+
+
+    def test_intact_drop_does_not_report_controlled_carry(self):
+        p=progress(state(insertion=.4),reward_profile=GRAPH_PROFILE)
+        step(p,detached=True,ground_contact=True)
+        self.assertTrue(p.graph_reached['extract'].item())
+        self.assertFalse(p.graph_reached['carry'].item())
+        self.assertEqual(p.graph_time['carry'].item(),0.)
