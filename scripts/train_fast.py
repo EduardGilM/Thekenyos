@@ -11,6 +11,7 @@ from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
     EASY_PRESET, apply_easy_preset, apply_speedrun_preset, easy_start_far_frac,
+    easy_teacher_mix,
     evaluate_skills, evaluation_horizon_steps, fruit_block_reason,
     idle_locomotion_mask, next_stage, promotion_ready, sample_world_skills,
     stage_named, summarise_stage,
@@ -129,6 +130,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
     memory0 = memory.clone()
     recovered_total = 0
     overflow_total = 0
+    nonfinite_total = 0
     teacher_used = 0
     rows = []
     for index in range(steps):
@@ -151,6 +153,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             faults = runtime.drain_faults()
             recovered_total += faults['recovered_worlds']
             overflow_total += faults['overflow_worlds']
+            nonfinite_total += int(faults.get('nonfinite_worlds', 0))
             if faults['recovered_worlds']:
                 reward = reward.clone()
                 reward[faults['mask']] = 0
@@ -189,6 +192,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
     carry['memory'], carry['reset'], carry['rgbd'] = memory, reset, rgbd
     carry['recovered_worlds'] = recovered_total
     carry['overflow_worlds'] = overflow_total
+    carry['nonfinite_worlds'] = nonfinite_total
     carry['teacher_actions'] = teacher_used
     return rows, bootstrap, carry
 
@@ -312,6 +316,7 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     terminals = 0
     recovered_total = 0
     overflow_total = 0
+    nonfinite_total = 0
     for index in range(horizon):
         r84 = runtime.observe()
         if index % camera_every == 0:
@@ -326,6 +331,7 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
             faults = runtime.drain_faults()
             recovered_total += faults['recovered_worlds']
             overflow_total += faults['overflow_worlds']
+            nonfinite_total += int(faults.get('nonfinite_worlds', 0))
             if faults['recovered_worlds']:
                 done = done | faults['mask']
             dist = info['distance_m']
@@ -369,6 +375,7 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/mean_harvested': float(harvested_peak.mean()),
         'evaluation/recovered_worlds': recovered_total,
         'evaluation/overflow_worlds': overflow_total,
+        'evaluation/nonfinite_worlds': nonfinite_total,
         'evaluation/eval_profile': eval_profile,
         'evaluation/worlds': worlds,
     }
@@ -440,6 +447,7 @@ def run(args):
                   speedrun=bool(getattr(args, 'speedrun', False)),
                   easy=easy,
                   teacher_mix=teacher_mix,
+                  teacher_horizon_updates=int(EASY_PRESET['teacher_horizon_updates']) if easy else 0,
                   shaping_coef=shaping_coef,
                   weld=False,
                   eval_profile=eval_profile,
@@ -475,8 +483,9 @@ def run(args):
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
         apply_stage(runtime, stage, numpy_rng)
+        warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
-                teacher_mix=teacher_mix)
+                teacher_mix=warmup_mix)
         torch.cuda.synchronize()
         start = time.monotonic()
         reports = []
@@ -508,11 +517,13 @@ def run(args):
                 far_frac = easy_start_far_frac(iteration)
                 start_info = runtime.set_easy_progress(far_frac, numpy_rng)
                 config['easy_far_frac'] = start_info['easy_far_frac']
+                mix = easy_teacher_mix(iteration, start_mix=teacher_mix)
             else:
                 start_info = {}
+                mix = teacher_mix
             rows, bootstrap, carry = collect(runtime, policy, gait, args.steps, args.camera_every,
                                              carry=carry, reset_all=False, dim_mask=dim_mask,
-                                             teacher_mix=teacher_mix)
+                                             teacher_mix=mix)
             torch.cuda.synchronize()
             rollout_seconds = time.monotonic() - began
             metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
@@ -534,12 +545,13 @@ def run(args):
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
                 recovered_worlds=int(carry.get('recovered_worlds', 0)),
                 overflow_worlds=int(carry.get('overflow_worlds', 0)),
+                nonfinite_worlds=int(carry.get('nonfinite_worlds', 0)),
                 curriculum_stage=stage.name, curriculum_index=stage.index,
                 guidance_weight=stage.guidance_weight,
                 eval_profile=eval_profile,
                 idle_locomotion_masked=int(dim_mask is not None),
                 easy=int(easy),
-                teacher_mix=teacher_mix,
+                teacher_mix=mix,
                 teacher_actions=int(carry.get('teacher_actions', 0)),
                 shaping_coef=shaping_coef,
                 hover_error_m=float(runtime.hover_error_m),
@@ -612,13 +624,17 @@ def run(args):
                 checkpoint_every=checkpoint_every, video_every=args.video_every,
                 promoted=promoted)
             checkpoint = last_checkpoint
+            ckpt_models = {'student': policy}
+            ckpt_opt = {'student': optimizer}
+            ckpt_rng = {'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state_all()}
+            meta = dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
+                        model_sha256=manifest['model_sha256'], config=config,
+                        completed_updates=iteration+1, curriculum_stage=stage.name)
+            save_checkpoint(args.output / 'latest.pt', ckpt_models, ckpt_opt, ckpt_rng, meta,
+                            replace=True)
             if persist:
                 checkpoint = args.output / f'checkpoint-{iteration+1:04d}.pt'
-                meta = dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
-                            model_sha256=manifest['model_sha256'], config=config,
-                            completed_updates=iteration+1, curriculum_stage=stage.name)
-                save_checkpoint(checkpoint, {'student':policy}, {'student':optimizer},
-                    {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()}, meta)
+                save_checkpoint(checkpoint, ckpt_models, ckpt_opt, ckpt_rng, meta)
                 last_checkpoint = checkpoint
                 if 'evaluation/mean_closest_distance_m' in metrics:
                     distance = metrics['evaluation/mean_closest_distance_m']

@@ -261,12 +261,16 @@ def ppo_epoch_loss(new_logp_c, new_logp_e, old_logp, adv, ret, val,
 
 
 def save_checkpoint(path, models: dict, optimizers: dict, rng_state: dict,
-                    meta: dict):
+                    meta: dict, *, replace=False):
     """Atomic checkpoint: state_dicts + RNG + schema/config hashes."""
     torch = _torch()
     path = Path(path)
     sidecar_path = Path(str(path) + '.json')
-    if path.exists() or sidecar_path.exists():
+    if replace:
+        for existing in (path, sidecar_path):
+            if existing.exists():
+                existing.unlink()
+    elif path.exists() or sidecar_path.exists():
         raise FileExistsError(f'Preserve existing checkpoint: {path}')
     buf = {
         'format': 'kiwi-checkpoint/v1',

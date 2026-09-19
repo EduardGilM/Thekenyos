@@ -61,6 +61,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
         self.assertIn('evaluate_mission', source)
         self.assertIn('drain_faults', source)
+        self.assertIn('easy_teacher_mix', source)
         self.assertIn('--speedrun', source)
         self.assertIn('--easy', source)
         self.assertIn('should_persist_checkpoint', source)
@@ -126,8 +127,11 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('ground_contact_worlds', run_src)
         self.assertIn('basket_distance_mean_m', run_src)
         self.assertIn('easy_far_frac', run_src)
+        self.assertIn('easy_teacher_mix', run_src)
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
+        self.assertIn('latest.pt', run_src)
+        self.assertIn('nonfinite_worlds', run_src)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):
@@ -145,6 +149,16 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(float(mixed10[0, 0]), 0.25)
         self.assertAlmostEqual(float(mixed10[0, 3]), float(torch.atanh(torch.tensor(0.5))), places=5)
         self.assertEqual(float(mixed10[1, 3]), 0.0)
+
+
+class FastRuntimeFaultTest(unittest.TestCase):
+    def test_drain_faults_recovers_sparse_nonfinite(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('FLAG_NONFINITE | FLAG_OVERFLOW | FLAG_BAD_ACTION', src)
+        self.assertIn('NONFINITE_ABORT_FRACTION', src)
+        self.assertIn('nonfinite_worlds', src)
+        self.assertNotIn('flags={self._flags.numpy().tolist()}', src)
 
 
 if __name__ == '__main__':

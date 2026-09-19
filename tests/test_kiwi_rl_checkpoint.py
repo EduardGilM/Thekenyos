@@ -44,6 +44,10 @@ class CheckpointTest(unittest.TestCase):
                 ppo.save_checkpoint(path, {'actor': model}, {}, {}, {})
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(len(json.loads(Path(str(path) + '.json').read_text())['sha256']), 64)
+            ppo.save_checkpoint(path, {'actor': model}, {}, {}, {'schema': 'replaced'},
+                                replace=True)
+            self.assertNotEqual(path.read_bytes(), original)
+            self.assertEqual(json.loads(Path(str(path) + '.json').read_text())['schema'], 'replaced')
 
     def test_single_sample_loss_is_finite(self):
         value = torch.zeros(1, requires_grad=True)

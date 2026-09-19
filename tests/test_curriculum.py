@@ -112,7 +112,9 @@ class CurriculumTest(unittest.TestCase):
             evaluation_horizon_s(deposit, profile='cheat')
 
     def test_easy_preset_does_not_change_gates_or_weld(self):
-        from treesim.kiwi_rl.curriculum import EASY_PRESET, apply_easy_preset, easy_start_far_frac
+        from treesim.kiwi_rl.curriculum import (
+            EASY_PRESET, apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
+        )
         from treesim.kiwi_rl.reach_teacher import (
             basket_chassis_aabb_m, easy_start_local_m, hover_tcp_local_m, tcp_outside_basket,
         )
@@ -121,6 +123,7 @@ class CurriculumTest(unittest.TestCase):
         preset = apply_easy_preset({'gate_success_rate': deposit.gate_success_rate,
                                     'gate_episodes': deposit.gate_episodes})
         self.assertEqual(preset['teacher_mix'], 0.4)
+        self.assertEqual(preset['teacher_horizon_updates'], 60)
         self.assertEqual(preset['shaping_coef'], 5.0)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertEqual(preset['start_margin_m'], 0.40)
@@ -151,6 +154,11 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(easy_start_far_frac(100), 0.5)
         self.assertEqual(easy_start_far_frac(200), 1.0)
         self.assertEqual(easy_start_far_frac(800), 1.0)
+        self.assertAlmostEqual(easy_teacher_mix(0), 0.4)
+        self.assertAlmostEqual(easy_teacher_mix(30), 0.2)
+        self.assertAlmostEqual(easy_teacher_mix(60), 0.0)
+        self.assertAlmostEqual(easy_teacher_mix(90), 0.0)
+        self.assertAlmostEqual(easy_teacher_mix(0, start_mix=0.0), 0.0)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)

@@ -65,6 +65,7 @@ SPEEDRUN_PRESET = {
 # Eval still uses guidance_weight=0 and teacher_mix=0.
 EASY_PRESET = {
     'teacher_mix': 0.4,
+    'teacher_horizon_updates': 60,
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
@@ -330,6 +331,26 @@ def easy_start_far_frac(update_index, horizon=None):
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
         raise ValueError('horizon must be a positive integer')
     return float(min(1.0, update_index / float(horizon)))
+
+
+def easy_teacher_mix(update_index, start_mix=None, horizon=None):
+    """Linearly drop privileged mix so the student must deposit before eval.
+
+    Eval still forces teacher_mix=0. A constant 0.4 mix through update 100
+    left A eval harvest at 0 with fruit already over the opening.
+    """
+    if start_mix is None:
+        start_mix = EASY_PRESET['teacher_mix']
+    if horizon is None:
+        horizon = EASY_PRESET['teacher_horizon_updates']
+    if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 0:
+        raise ValueError('update_index must be a non-negative integer')
+    start_mix = float(start_mix)
+    if not np.isfinite(start_mix) or not 0.0 <= start_mix <= 1.0:
+        raise ValueError('start_mix must be finite in [0, 1]')
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+        raise ValueError('horizon must be a positive integer')
+    return float(start_mix * max(0.0, 1.0 - update_index / float(horizon)))
 
 
 def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: int | None = None) -> bool:

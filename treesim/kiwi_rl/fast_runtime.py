@@ -22,12 +22,15 @@ from .rewards import (
     W_LOSS, W_SMOOTH, W_TIME_PER_S,
 )
 
-# Latched per-world bits. Nonfinite qpos/qvel abort the job; overflow and a
-# nonfinite action reset that world so one solver stall does not kill the batch.
+# Latched per-world bits. Overflow, a nonfinite action, or a single-world
+# nonfinite qpos/qvel reset that world so one solver stall does not kill the
+# batch. A systemic NaN (too many worlds) still aborts.
 FLAG_NONFINITE = 1
 FLAG_OVERFLOW = 2
 FLAG_BAD_ACTION = 4
-FLAG_RECOVERABLE = FLAG_OVERFLOW | FLAG_BAD_ACTION
+FLAG_RECOVERABLE = FLAG_NONFINITE | FLAG_OVERFLOW | FLAG_BAD_ACTION
+# Abort only when this fraction of the batch is nonfinite in one drain.
+NONFINITE_ABORT_FRACTION = 0.25
 
 
 @wp.kernel
@@ -799,19 +802,23 @@ class FastRuntime:
         return self.observe()
 
     def drain_faults(self):
-        """Reset overflow/bad-action worlds. Abort only on nonfinite qpos/qvel.
+        """Reset overflow, bad-action, and sparse nonfinite worlds.
 
         ``check()`` still raises on any latched flag so tests and the final
-        report keep the strict contract. Training calls this instead.
+        report keep the strict contract. Training calls this instead. Abort
+        only when nonfinite worlds exceed ``NONFINITE_ABORT_FRACTION``.
         """
         import torch
         flags = wp.to_torch(self._flags)
-        nonfinite = (flags & FLAG_NONFINITE) != 0
-        if bool(nonfinite.any()):
-            raise RuntimeError(f'GPU numerical failure flags={self._flags.numpy().tolist()}')
-        recoverable = (flags & FLAG_RECOVERABLE) != 0
+        nonfinite_worlds = int(((flags & FLAG_NONFINITE) != 0).sum().item())
         overflow_worlds = int(((flags & FLAG_OVERFLOW) != 0).sum().item())
         bad_action_worlds = int(((flags & FLAG_BAD_ACTION) != 0).sum().item())
+        if nonfinite_worlds > self.worlds * NONFINITE_ABORT_FRACTION:
+            hit = torch.nonzero((flags & FLAG_NONFINITE) != 0, as_tuple=False).flatten()
+            raise RuntimeError(
+                f'GPU nonfinite worlds={nonfinite_worlds}/{self.worlds} '
+                f'indices={hit[:16].tolist()}')
+        recoverable = (flags & FLAG_RECOVERABLE) != 0
         recovered = int(recoverable.sum().item())
         if recovered:
             mask = recoverable.to(dtype=torch.uint8)
@@ -826,6 +833,7 @@ class FastRuntime:
             'recovered_worlds': recovered,
             'overflow_worlds': overflow_worlds,
             'bad_action_worlds': bad_action_worlds,
+            'nonfinite_worlds': nonfinite_worlds,
             'mask': recoverable,
         }
 

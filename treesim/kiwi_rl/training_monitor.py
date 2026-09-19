@@ -212,15 +212,15 @@ _DASHBOARD_SCRIPT = r'''
 <script>
 const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_dim", "reward_mean",
   "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
-  "basket_distance_mean_m", "basket_xy_mean_m", "easy_far_frac",
+  "basket_distance_mean_m", "basket_xy_mean_m", "easy_far_frac", "teacher_mix",
   "evaluation/mean_closest_basket_distance_m",
-  "ground_contact_worlds", "evaluation/mean_closest_distance_m",
+  "ground_contact_worlds", "nonfinite_worlds", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
   "torch_peak_allocated_gb"];
 const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
   "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
-  "easy_far_frac", "easy_start_index_mean", "easy_start_index_max",
+  "easy_far_frac", "easy_start_index_mean", "easy_start_index_max", "teacher_mix",
   "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
   "ground_contact_worlds", "fallen_worlds", "failed_worlds", "hand_load_max_N",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
