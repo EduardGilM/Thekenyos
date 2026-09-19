@@ -52,7 +52,7 @@ class ReachTeacherMathTest(unittest.TestCase):
         np.testing.assert_allclose(hi[2], float(CENTER[2] + SIZE[2]))
         near = easy_start_local_m(0.0)
         far = easy_start_local_m(1.0)
-        self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.40) - 1e-9)
+        self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.22) - 1e-9)
         self.assertGreater(float(far[0]), float(near[0]))
         self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
         self.assertTrue(tcp_outside_basket(far, margin_m=0.04, above_rim_m=0.0))
@@ -139,8 +139,22 @@ class ReachTeacherMathTest(unittest.TestCase):
             jaw_open_closed_from_gaps(0.0, -1.5708, 0.14, 0.02)
 
     def test_scripted_jaw_holds_away_and_opens_over_basket(self):
+        from treesim.kiwi_rl.reach_teacher import fruit_in_release_zone
         self.assertAlmostEqual(scripted_jaw_target([1.0, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15), -1.2)
         self.assertAlmostEqual(scripted_jaw_target([0.05, 0.04], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15), 0.0)
+        # Hover-high over the opening must keep holding; open only below the rim.
+        self.assertAlmostEqual(
+            scripted_jaw_target([0.05, 0.04, 0.70], [0.0, 0.0, 0.145], -1.2, 0.0,
+                                open_xy_m=0.15, rim_z_m=0.28),
+            -1.2)
+        self.assertAlmostEqual(
+            scripted_jaw_target([0.05, 0.04, 0.30], [0.0, 0.0, 0.145], -1.2, 0.0,
+                                open_xy_m=0.15, rim_z_m=0.28),
+            0.0)
+        self.assertFalse(fruit_in_release_zone([0.05, 0.04, 0.70], [0.0, 0.0, 0.145],
+                                               open_xy_m=0.15, rim_z_m=0.28))
+        self.assertTrue(fruit_in_release_zone([0.05, 0.04, 0.30], [0.0, 0.0, 0.145],
+                                              open_xy_m=0.15, rim_z_m=0.28))
         with self.assertRaises(ValueError):
             scripted_jaw_target([np.nan, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15)
 

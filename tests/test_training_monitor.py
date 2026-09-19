@@ -184,6 +184,8 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
         self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
+        self.assertIn('fruit_in_release_zone', inspect.getsource(_record_progress_video_locked))
+        self.assertIn('rim_z_m', inspect.getsource(_record_progress_video_locked))
         self.assertIn('adapt_scripted_hold_q', inspect.getsource(_record_progress_video_locked))
         self.assertIn('jaw_open_closed_q', inspect.getsource(_record_progress_video_locked))
         self.assertIn('controller.qids[18]', inspect.getsource(_record_progress_video_locked))

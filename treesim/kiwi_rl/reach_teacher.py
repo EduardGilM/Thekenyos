@@ -458,11 +458,34 @@ def adapt_scripted_hold_q(hold, opened, closed, *, slip_m, over_basket,
     return float(np.clip(nxt, min(lo, hi), max(lo, hi)))
 
 
-def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m):
+def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m):
+    """True when the free fruit COM is over the opening and below the rim.
+
+    XY-only release at hover height dumps beside the liner. Floor is
+    ``basket_floor_xyz``; the rim is ``floor.z + rim_z_m``. Not a weld.
+    """
+    fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(-1)
+    basket = np.asarray(basket_floor_xyz, dtype=np.float64).reshape(-1)
+    radius = float(open_xy_m)
+    rim = float(rim_z_m)
+    if fruit.size < 3 or basket.size < 3:
+        raise ValueError('fruit and basket must include XYZ')
+    if not np.isfinite(fruit[:3]).all() or not np.isfinite(basket[:3]).all():
+        raise ValueError('fruit and basket XYZ must be finite')
+    if not np.isfinite([radius, rim]).all() or radius <= 0 or rim <= 0:
+        raise ValueError('open_xy_m and rim_z_m must be finite and > 0')
+    dx = float(fruit[0] - basket[0])
+    dy = float(fruit[1] - basket[1])
+    dz = float(fruit[2] - basket[2])
+    return bool((dx * dx + dy * dy) < radius * radius and 0.0 < dz < rim)
+
+
+def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m=None):
     """Hold while the fruit is away from the opening; open once it is over.
 
     Fruit stays a free body. ``open_xy_m`` is an XY radius around the basket
-    centre, not a validated release pose.
+    centre. When both arguments include Z and ``rim_z_m`` is set, open only
+    if the COM is also below the rim. That is not a validated release pose.
     """
     fruit = np.asarray(fruit_xy, dtype=np.float64).reshape(-1)
     basket = np.asarray(basket_xy, dtype=np.float64).reshape(-1)
@@ -475,9 +498,13 @@ def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m):
         raise ValueError('fruit and basket XY must be finite')
     if not np.isfinite([hold_q, open_q, radius]).all() or radius <= 0:
         raise ValueError('jaw targets and open_xy_m must be finite, radius > 0')
-    dx = float(fruit[0] - basket[0])
-    dy = float(fruit[1] - basket[1])
-    return open_q if (dx * dx + dy * dy) < radius * radius else hold_q
+    if fruit.size >= 3 and basket.size >= 3 and rim_z_m is not None:
+        over = fruit_in_release_zone(fruit[:3], basket[:3], open_xy_m=radius, rim_z_m=rim_z_m)
+    else:
+        dx = float(fruit[0] - basket[0])
+        dy = float(fruit[1] - basket[1])
+        over = (dx * dx + dy * dy) < radius * radius
+    return open_q if over else hold_q
 
 
 def jaw_hold_q(close_frac, jaw_open, jaw_closed):
@@ -772,7 +799,7 @@ def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_
     return local
 
 
-def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.40, clearance_m=0.28):
+def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.22, clearance_m=0.28):
     """Chassis-frame TCP start: frac 0 = clear of the crate, 1 = toward home.
 
     The near pose is on the robot side of the front wall with enough margin that

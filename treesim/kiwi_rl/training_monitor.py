@@ -909,7 +909,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     from treesim.kiwi_rl.control import NativeSpotControl, load_gait_artifact
     from treesim.kiwi_rl.spot_cameras import require_mujoco_gripper_cameras
     from treesim.kiwi_rl.ppo import load_checkpoint
-    from treesim.basket import CENTER
+    from treesim.basket import CENTER, SIZE
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
     from train_fast import build_policy
 
@@ -972,26 +972,29 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             arm = action[-7:]
             if preview.get('easy'):
                 from treesim.kiwi_rl.reach_teacher import (
-                    adapt_scripted_hold_q, jaw_hold_q, jaw_open_closed_q, scripted_jaw_target,
+                    adapt_scripted_hold_q, fruit_in_release_zone, jaw_hold_q,
+                    jaw_open_closed_q, scripted_jaw_target,
                 )
                 opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
                 frac = preview.get('hold_close_frac')
                 if easy_hold_q is None:
                     easy_hold_q = jaw_hold_q(0.6 if frac is None else float(frac), opened, closed)
                 hold = float(easy_hold_q)
-                fruit_xy = np.asarray(data.xpos[fruit_body], dtype=np.float64)[:2]
-                basket_xy = (
+                fruit_xyz = np.asarray(data.xpos[fruit_body], dtype=np.float64)
+                basket_xyz = (
                     np.asarray(data.xpos[chassis], dtype=np.float64)
                     + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
+                rim_z = float(SIZE[2])
                 desired = scripted_jaw_target(
-                    fruit_xy, basket_xy[:2], hold, opened, open_xy_m=0.15)
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z)
                 slip = float(np.linalg.norm(data.site_xpos[tcp_site] - data.xpos[fruit_body]))
-                over = float(np.linalg.norm(fruit_xy - basket_xy[:2])) < 0.15
+                over = fruit_in_release_zone(
+                    fruit_xyz, basket_xyz, open_xy_m=0.15, rim_z_m=rim_z)
                 hold = adapt_scripted_hold_q(
                     hold, opened, closed, slip_m=slip, over_basket=over)
                 easy_hold_q = hold
                 desired = scripted_jaw_target(
-                    fruit_xy, basket_xy[:2], hold, opened, open_xy_m=0.15)
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z)
                 arm = np.asarray(arm, dtype=np.float64).copy()
                 arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
             controller.update_gait(data, command)

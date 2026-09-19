@@ -69,10 +69,13 @@ EASY_PRESET = {
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    'start_margin_m': 0.40,
+    # 0.40 m + 0.32 m span put the mean start ~0.56 m in front of the rim;
+    # the 1.28 s PPO window then never sees a settled deposit. 0.12 m still
+    # clips the wrist through the liner. 0.22 m / 0.12 m span stays outside.
+    'start_margin_m': 0.22,
     'start_clearance_m': 0.28,
     'n_start_poses': 24,
-    'start_x_span_m': 0.32,
+    'start_x_span_m': 0.12,
     'start_y_span_m': 0.10,
     'start_z_span_m': 0.08,
     'ik_accept_err_m': 0.025,
