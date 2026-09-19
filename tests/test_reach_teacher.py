@@ -87,6 +87,11 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 1.0, 'slip_m': 0.16, 'max_load_N': 40.0, 'retained': False},
         ], slip_ok_m=0.04, load_limit_n=15.0)
         self.assertAlmostEqual(slipped['close_frac'], 0.4)
+        tied = select_hold_close([
+            {'close_frac': 0.4, 'slip_m': 0.15, 'max_load_N': 2.0, 'retained': False},
+            {'close_frac': 0.9, 'slip_m': 0.15, 'max_load_N': 12.0, 'retained': False},
+        ], slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(tied['close_frac'], 0.9)
         with self.assertRaises(ValueError):
             select_hold_close([])
 
@@ -100,6 +105,11 @@ class ReachTeacherMathTest(unittest.TestCase):
         np.testing.assert_allclose(pulled, [0.0, 0.0, 0.04], atol=1e-9)
         near = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.09]))
         np.testing.assert_allclose(near, [0.0, 0.0, 0.09], atol=1e-9)
+        tip = np.array([0.16, 0.0, 0.0])
+        np.testing.assert_allclose(offset_grasp_local(tip, np.array([0.21, 0.0, 0.0])), tip)
+        np.testing.assert_allclose(
+            offset_grasp_local(tip, np.array([0.21, 0.0, 0.0]), prefer_m=0.02),
+            [0.14, 0.0, 0.0], atol=1e-9)
         with self.assertRaises(ValueError):
             offset_grasp_local(tcp, [np.nan, 0.0, 0.0])
 

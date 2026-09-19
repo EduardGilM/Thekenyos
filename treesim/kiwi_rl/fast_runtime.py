@@ -804,6 +804,15 @@ class FastRuntime:
             'hold_close_frac': float(self._chosen_close_frac),
             'hold_sweep_slip_m': None if self._hold_sweep is None else self._hold_sweep.get('chosen_slip_m'),
             'hold_sweep_load_N': None if self._hold_sweep is None else self._hold_sweep.get('chosen_load_N'),
+            'hold_sweep_rows': None if self._hold_sweep is None else [
+                {
+                    'close_frac': float(row['close_frac']),
+                    'slip_m': float(row['slip_m']),
+                    'max_load_N': float(row['max_load_N']),
+                    'retained': bool(row['retained']),
+                }
+                for row in (self._hold_sweep.get('rows') or [])
+            ],
             'grasp_local_m': None if not self._easy else [float(x) for x in self._grasp_local_host],
             'weld': False,
             'scope': ('experimental privileged deposit facilitation; fruit stays free; '

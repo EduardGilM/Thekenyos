@@ -113,10 +113,11 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
 
 
 def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer_m=0.0):
-    """Keep a grasp offset near the TCP, toward the pads when they disagree.
+    """Keep a grasp offset in the jaw opening, never past the TCP tip.
 
-    Pure kinematics. The fruit stays a free body; this is not a measured grasp.
-    ``prefer_m=0`` keeps the TCP when the pad centre coincides with it.
+    Pad collision centres can sit in front of ``hand_tcp``. Placing fruit there
+    drops it. When the pad midpoint is at or past the tip, stay at the TCP or
+    take ``prefer_m`` toward the palm. Pure kinematics; fruit stays a free body.
     """
     tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
     pocket = np.asarray(pocket_local, dtype=np.float64).reshape(3)
@@ -125,13 +126,15 @@ def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer
     min_d, max_d, prefer = float(min_m), float(max_m), float(prefer_m)
     if not np.isfinite([min_d, max_d, prefer]).all() or not 0.0 <= min_d <= prefer <= max_d <= 0.12:
         raise ValueError('grasp offset bounds must be ordered in [0, 0.12] m')
+    tcp_n = float(np.linalg.norm(tcp))
+    if float(np.linalg.norm(pocket)) > tcp_n + 1e-9:
+        pocket = tcp.copy()
     delta = pocket - tcp
     dist = float(np.linalg.norm(delta))
     if dist < 1e-9:
         if prefer <= 1e-9:
             return tcp.copy()
-        n = float(np.linalg.norm(tcp))
-        direction = (-tcp / n) if n > 1e-9 else np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        direction = (-tcp / tcp_n) if tcp_n > 1e-9 else np.array([0.0, 0.0, -1.0], dtype=np.float64)
         return tcp + direction * prefer
     return tcp + (delta / dist) * min(max(dist, min_d), max_d)
 
@@ -222,12 +225,13 @@ def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.0):
     return offset_grasp_local(tcp_local, tcp_local, prefer_m=inset, min_m=0.0, max_m=max(inset, 0.05))
 
 
-def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.0):
+def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.02):
     """Grasp pocket in the TCP site's body frame, from pad collision geoms.
 
     Body origins of the jaw/finger links sit at the knuckle, ~12 cm behind the
     pads. Using those midpoints pulled fruit out of the grasp. Pad geom centres
-    are a few centimetres from the TCP; if they coincide, stay at the TCP.
+    can sit a few centimetres past ``hand_tcp``; those are clamped back to the
+    opening and given a 2 cm mouth inset so the COM is not on the teeth.
     """
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
@@ -246,7 +250,7 @@ def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.0):
     return offset_grasp_local(tcp_local, tcp_local, min_m=0.0, max_m=0.05, prefer_m=float(inset_m))
 
 
-def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.0):
+def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.02):
     """World COM for a free fruit sitting between the pads. Not a weld."""
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
@@ -292,9 +296,9 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
 
     If several static holds keep the fruit without crossing the load gate, take
     one step tighter than the lightest keeper so a moving carry is less likely
-    to drop it. If nothing retains, do not slam the jaw shut: keep the lightest
-    under-limit command with the smallest slip. ``max_load_N`` is a rigid-sim
-    contact result, not a tissue-safe force.
+    to drop it. If nothing retains, keep the under-limit command with the
+    smallest slip and, on a tie, the tighter close. Do not slam past 15 N.
+    ``max_load_N`` is a rigid-sim contact result, not a tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
         raise ValueError('hold sweep rows must be a non-empty sequence')
@@ -324,7 +328,7 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         return ordered[idx]
     under = [row for row in cleaned if row['max_load_N'] <= load_limit]
     if under:
-        return min(under, key=lambda row: (row['slip_m'], row['close_frac']))
+        return min(under, key=lambda row: (row['slip_m'], -row['close_frac']))
     return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
 
 

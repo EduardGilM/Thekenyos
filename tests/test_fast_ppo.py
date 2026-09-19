@@ -131,6 +131,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('easy_hold_close_mean', run_src)
         self.assertIn('hold_close_frac', run_src)
         self.assertIn('grasp_local_m', run_src)
+        self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
         self.assertIn('latest.pt', run_src)
