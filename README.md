@@ -842,25 +842,34 @@ Student distillation uses a frozen learned teacher on states visited by the
 sensor-only student. It requires successful evaluation evidence for the exact
 teacher checkpoint; an unverified scripted controller is not a substitute.
 
-Selective counterfactual training is available for the privileged teacher with
-`--cti --cti-worlds 16 --cti-every-seconds 120`. It runs a separate small batch
-with the same policy and scene. It rewinds before physical trouble or stalled
-progress, plus occasional exploratory roots, and compares the original action
-with short perturbed action segments under a frozen continuation policy.
-Branches use matched snapshot/RNG state and continue to an episode outcome.
-Unresolved timeouts and physically failed winners do not supply targets; merely
-postponing a stall is not an improvement. Successful collection and avoided
-physical failure are distinct outcomes, not interchangeable evidence of success.
+Selective counterfactual training v2 is available for the privileged teacher with
+`--cti --cti-worlds 16 --cti-every-seconds 120`. A separate runtime rewinds
+before trouble or stalled progress and tests coherent two-second interventions:
+policy actions, jaw closure, holding arm targets while closing, and a seeded
+alternative arm command with closure. Four-second branches use matched snapshots
+and noise, followed by a second matched-noise confirmation for potential winners.
 
-Accepted intervention actions feed a separate bounded-action imitation loss
-after factual PPO (`--cti-coef .1`). Branch rows never enter PPO. W&B logs CTI
-branch cost, selected worlds and loss separately. The launcher throttles CTI to
-a 15% amortized training wall-time target (one round can overshoot); the
-one-hour budget includes CTI work. Snapshots and the CTI runtime remain separate
-from the 4,096 main training worlds. This is an action-repair experiment, not
-proof of the Megaplan's high-level decision-head hypothesis or a learning gain.
-A reward-only control with matched total compute is still needed to measure CTI's
-contribution. Student observations and the teacher-distillation gate are unchanged.
+Scores combine discounted task reward with a bounded progress estimate retained
+through the final half-second. Partial improvements require continuation after
+the intervention and progress over both the root and baseline. Physical failures,
+lost fruit and unheld detachment cannot win. True terminal stalls have no leaf
+bonus. This short-horizon curriculum is a deliberate heuristic, not evidence of
+successful harvesting or an invariant reward transformation.
+
+Confirmed sampled actions feed a separate imitation update after factual PPO;
+branch rows never enter PPO. A factual-policy KL check rolls back both model and
+Adam state above 0.01 or on nonfinite updates. W&B separates selected candidates,
+applied updates and rejected updates. `cti-branches.jsonl` records branch scores
+and rejection reasons. CTI targets 10% amortized wall time; one round can overshoot.
+The one-hour budget includes CTI work. A matched-compute control remains necessary
+to measure learning benefit. Student observations and distillation gates are unchanged.
+
+To resume, use the same output directory and arguments plus `--resume-from` and
+`--wandb-run-id` for online W&B. The checkpoint must match the latest logged
+update. Weights, Adam, RNG and counters resume; physical episodes reset. The total
+`--train-seconds` budget includes prior logged training time, excluding the pause.
+The dashboard marks `phase-events.jsonl` boundaries. Create `pause-request.json`
+in the run directory to request a checkpoint and clean stop after the next update.
 
 Train the privileged recurrent teacher on a training scene and evaluate it on a
 distinct held-out scene. The report includes the exact checkpoint hash, episode

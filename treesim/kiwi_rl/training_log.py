@@ -21,6 +21,7 @@ class TrainingLog:
         wandb_entity: str | None = None,
         wandb_name: str | None = None,
         upload_checkpoints: bool = False,
+        wandb_run_id: str | None = None,
         wandb_module: Any | None = None,
     ) -> None:
         if wandb_mode not in {'online', 'offline', 'disabled'}:
@@ -55,6 +56,8 @@ class TrainingLog:
                 settings = getattr(module, 'Settings', None)
                 if settings is not None:
                     kwargs['settings'] = settings(disable_code=True, disable_git=True, console='off')
+                if wandb_run_id is not None:
+                    kwargs.update(id=wandb_run_id, resume='must')
                 self._run = module.init(**kwargs)
             except Exception as exc:
                 raise RuntimeError(

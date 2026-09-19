@@ -1,38 +1,65 @@
 import importlib.util
+import json
 import os
+from copy import deepcopy
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 
-from treesim.kiwi_rl.selective_cti import _choose_winners, update_cti
+from treesim.kiwi_rl.harvest_training import EpisodeProgress
+from treesim.kiwi_rl.selective_cti import SelectiveCTI, _choose_winners, update_cti
+def state(distance=.2, basket=.8, grasp=False, detached=False):
+    return dict(distance=torch.tensor([distance]), basket_distance=torch.tensor([basket]),
+                grasp=torch.tensor([grasp]), holding=torch.tensor([grasp]),
+                detached=torch.tensor([detached]), touching=torch.tensor([grasp]),
+                stem_force=torch.tensor([0.]), success=torch.tensor([False]),
+                failed=torch.tensor([False]))
+
+
+def outcome(distance=.2, holding=False, detached=False, score=0., **changes):
+    result = dict(score=torch.tensor([score]), distance=torch.tensor([distance]),
+                  basket_distance=torch.tensor([.8]), holding=torch.tensor([holding]),
+                  detached=torch.tensor([detached]), success=torch.tensor([False]),
+                  failed=torch.tensor([False]), numerical=torch.tensor([False]),
+                  lost_fruit=torch.tensor([False]), retained=torch.tensor([True]),
+                  triggered=torch.tensor([True]))
+    result['retained_potential'] = EpisodeProgress.potential(result)
+    for key, value in changes.items():
+        result[key] = torch.tensor([value])
+    return result
 
 
 class SelectiveChoiceTest(unittest.TestCase):
-    def test_requires_resolved_baseline_and_categorical_gain(self):
-        scores = torch.tensor([[0., 0., 0., 0.], [5., 2., 1., 10.]])
-        resolved = torch.tensor([[False, True, True, True], [True, True, True, True]])
-        physical_failure = torch.tensor([[False, False, True, True],
-                                         [False, False, False, True]])
-        success = torch.zeros_like(resolved)
-        self.assertEqual(_choose_winners(scores, resolved, physical_failure, success).tolist(),
-                         [-1, -1, 1, -1])
+    def test_retained_partial_grasp_can_win_without_task_success(self):
+        baseline, candidate = outcome(score=.05), outcome(holding=True, score=1.8)
+        winner, _ = _choose_winners([baseline, candidate], state())
+        self.assertEqual(winner.tolist(), [1])
 
-    def test_success_repair_still_requires_material_reward_improvement(self):
-        scores = torch.tensor([[0., 0.], [.25, 1.]])
-        resolved = torch.ones_like(scores, dtype=torch.bool)
-        failed = torch.tensor([[True, False], [False, False]])
-        success = torch.tensor([[False, False], [True, True]])
-        self.assertEqual(_choose_winners(scores, resolved, failed, success,
-                                         minimum_gain=.5).tolist(), [-1, 1])
+    def test_transient_touch_and_no_progress_cannot_win(self):
+        for candidate in (outcome(score=9.), outcome(holding=True, score=9., retained=False)):
+            winner, reasons = _choose_winners([outcome(), candidate], state())
+            self.assertEqual(winner.tolist(), [-1])
+            self.assertTrue(reasons[1][0])
 
-    def test_later_stall_cannot_win_by_discounted_return(self):
-        # Neither branch succeeds. The baseline did not physically fail, so a
-        # later stall with a higher discounted return is not a repair.
-        scores = torch.tensor([[0.], [3.]])
-        ended = torch.ones_like(scores, dtype=torch.bool)
-        physical_failure = torch.zeros_like(ended)
-        success = torch.zeros_like(ended)
-        self.assertEqual(_choose_winners(scores, ended, physical_failure, success).tolist(), [-1])
+    def test_failure_or_lost_fruit_cannot_win(self):
+        for changes in ({'failed': True}, {'numerical': True}, {'lost_fruit': True}):
+            candidate = outcome(holding=True, score=5., **changes)
+            winner, _ = _choose_winners([outcome(), candidate], state())
+            self.assertEqual(winner.tolist(), [-1])
+
+    def test_retained_approach_and_gain_threshold(self):
+        candidates = [outcome(distance=.19, score=1.), outcome(distance=.17, score=.05),
+                      outcome(distance=.17, score=.2)]
+        for candidate, expected in zip(candidates, (-1, -1, 1)):
+            winner, _ = _choose_winners([outcome(), candidate], state())
+            self.assertEqual(winner.item(), expected)
+
+    def test_progress_must_beat_root_and_baseline(self):
+        for root, baseline in ((state(grasp=True), outcome()), (state(), outcome(holding=True))):
+            winner, _ = _choose_winners([baseline, outcome(holding=True, score=4.)], root)
+            self.assertEqual(winner.item(), -1)
 
 
 class _TinyTeacher(torch.nn.Module):
@@ -42,20 +69,26 @@ class _TinyTeacher(torch.nn.Module):
 
     def forward(self, privileged, r84, memory):
         mean = self.actor(torch.cat((privileged, r84, memory), dim=-1))
-        return mean, torch.zeros(7, device=mean.device), torch.zeros(len(mean), device=mean.device), memory
+        return mean, torch.zeros(7, device=mean.device), torch.zeros(len(mean), device=mean.device), memory + 1
+
+
+def training_row():
+    return dict(privileged=torch.zeros(3, 32), r84=torch.zeros(3, 84),
+                memory=torch.zeros(3, 64), action=torch.ones(3, 7) * .5,
+                mask=torch.tensor([True, False, True]),
+                success_mask=torch.tensor([True, False, False]))
 
 
 class CTIUpdateTest(unittest.TestCase):
     def test_updates_only_selected_bounded_action_rows(self):
         policy = _TinyTeacher()
         optimizer = torch.optim.Adam(policy.parameters(), lr=.01)
-        row = dict(privileged=torch.zeros(3, 32), r84=torch.zeros(3, 84),
-                   memory=torch.zeros(3, 64), action=torch.ones(3, 7) * .5,
-                   mask=torch.tensor([True, False, True]),
-                   success_mask=torch.tensor([True, False, False]))
+        row = training_row()
+        row['action'][1] = float('nan')  # Masked values must not poison gradients.
         before = policy.actor.bias.detach().clone()
-        metrics = update_cti(policy, optimizer, [row], coef=.1)
+        metrics = update_cti(policy, optimizer, [row])
         self.assertTrue(metrics['updated'])
+        self.assertLessEqual(metrics['kl'], .01)
         self.assertEqual(metrics['selected_worlds'], 2)
         self.assertEqual(metrics['target_actions'], 2)
         self.assertFalse(torch.equal(before, policy.actor.bias))
@@ -63,72 +96,227 @@ class CTIUpdateTest(unittest.TestCase):
     def test_rejects_unbounded_targets_and_nonfinite_coefficient(self):
         policy = _TinyTeacher()
         optimizer = torch.optim.SGD(policy.parameters(), lr=.1)
-        row = dict(privileged=torch.zeros(1, 32), r84=torch.zeros(1, 84),
-                   memory=torch.zeros(1, 64), action=torch.ones(1, 7) * 2,
-                   mask=torch.ones(1, dtype=torch.bool))
+        row = training_row()
+        row['action'][:] = 2.
         with self.assertRaisesRegex(ValueError, 'finite and bounded'):
             update_cti(policy, optimizer, [row])
         with self.assertRaisesRegex(ValueError, 'nonnegative'):
             update_cti(policy, optimizer, [], coef=float('nan'))
 
+    def test_factual_kl_rejection_restores_policy_and_adam_state(self):
+        policy = _TinyTeacher()
+        optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
+        row = training_row()
+        self.assertTrue(update_cti(policy, optimizer, [row])['updated'])
+        optimizer.param_groups[0]['lr'] = 1.
+        policy_before, opt_before = deepcopy(policy.state_dict()), deepcopy(optimizer.state_dict())
+        anchor = {**row, 'privileged': torch.ones(3, 32)}
+        metrics = update_cti(policy, optimizer, [row], anchor_rows=[anchor])
+        self.assertTrue(metrics['rejected_update'])
+        self.assertFalse(metrics['updated'])
+        self.assertGreater(metrics['kl'], .01)
+        for key, value in policy.state_dict().items():
+            torch.testing.assert_close(value, policy_before[key], rtol=0, atol=0)
+        actual = optimizer.state_dict()
+        self.assertEqual(actual['param_groups'], opt_before['param_groups'])
+        for parameter, states in actual['state'].items():
+            for name, value in states.items():
+                torch.testing.assert_close(value, opt_before['state'][parameter][name], rtol=0, atol=0)
+
+    def test_recurrent_anchor_memory_is_fixed_before_update(self):
+        policy = _TinyTeacher()
+        memories = []
+        original = policy.forward
+        def record(priv, obs, memory):
+            memories.append(memory.clone())
+            return original(priv, obs, memory)
+        policy.forward = record
+        row = training_row()
+        anchors = [{key: value for key, value in row.items() if key != 'memory'} for _ in range(2)]
+        anchors[0]['initial_memory'] = torch.zeros(3, 64)
+        anchors[0]['reset'] = torch.tensor([False, True, False])
+        optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
+        self.assertTrue(update_cti(policy, optimizer, [row], anchor_rows=anchors)['updated'])
+        torch.testing.assert_close(memories[0], memories[-2])
+        torch.testing.assert_close(memories[1], memories[-1])
+        torch.testing.assert_close(memories[1], torch.ones(3, 64))
+
+    def test_nonfinite_post_step_kl_rolls_back_and_remains_json_serializable(self):
+        policy = _TinyTeacher()
+        optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
+        before = deepcopy(policy.state_dict())
+        step = optimizer.step
+        def corrupt_step():
+            step()
+            with torch.no_grad():
+                policy.actor.bias.fill_(float('nan'))
+        optimizer.step = corrupt_step
+        metrics = update_cti(policy, optimizer, [training_row()])
+        self.assertFalse(metrics['updated'])
+        self.assertTrue(metrics['rejected_update'])
+        self.assertTrue(metrics['nonfinite_update'])
+        json.dumps(metrics, allow_nan=False)
+        self.assertEqual(optimizer.state_dict()['state'], {})
+        for key, value in policy.state_dict().items():
+            torch.testing.assert_close(value, before[key])
+
+    def test_nonfinite_gradient_does_not_mutate_policy(self):
+        policy = _TinyTeacher()
+        optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
+        before = deepcopy(policy.state_dict())
+        hook = policy.actor.bias.register_hook(lambda grad: grad * float('nan'))
+        metrics = update_cti(policy, optimizer, [training_row()])
+        hook.remove()
+        self.assertTrue(metrics['rejected_update'])
+        self.assertTrue(metrics['nonfinite_update'])
+        json.dumps(metrics, allow_nan=False)
+        self.assertEqual(optimizer.state_dict()['state'], {})
+        for key, value in policy.state_dict().items():
+            torch.testing.assert_close(value, before[key])
+
 
 class CTISegmentTest(unittest.TestCase):
-    def test_targets_are_the_actual_winning_segment_not_resampled_actions(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        from treesim.kiwi_rl.selective_cti import SelectiveCTI
-        from treesim.kiwi_rl.harvest_training import EpisodeProgress
-        from tests.test_harvest_training import state
-
-        rt=SimpleNamespace(worlds=1,device_name='cpu',control_dt=.02,tick=0)
-        rt.check=lambda: None
-        rt.reset=lambda mask: None
-        cti=SelectiveCTI(rt,None,perturb_steps=2)
-        recorded=[]
+    def fixture(self, *, stall_steps=100, max_steps=100, reject_confirmation=False, transient=False):
+        rt = SimpleNamespace(worlds=1, device_name='cpu', control_dt=.02, tick=0, kind=None)
+        rt.check = lambda: None
+        rt.reset = lambda mask: None
+        cti = SelectiveCTI(rt, None, perturb_steps=2, horizon_seconds=.12,
+                           retention_seconds=.04)
+        recorded = []
         def restore_root(root):
-            rt.tick=0
+            rt.tick, rt.kind = 0, None
             torch.manual_seed(19)
             recorded.append([])
-            return torch.zeros(1,64),EpisodeProgress(state(),stall_steps=9,max_steps=10),torch.zeros(1)
-        cti._restore_app=restore_root
-        def act(policy,memory,*,explore,delta):
-            action=.1*torch.rand(1,7)+delta
+            return torch.zeros(1, 64), EpisodeProgress(state(), stall_steps=stall_steps,
+                                                      max_steps=max_steps), torch.zeros(1)
+        cti._restore_app = restore_root
+        def act(policy, memory, *, explore, intervention=None):
+            if rt.tick == 0:
+                rt.kind = intervention
+            action = .1 * torch.rand(1, 7)
+            if intervention:
+                action += .5
             recorded[-1].append(action.clone())
-            rt.safe=bool(action.mean()>.4)
-            return torch.full((1,84),float(rt.tick)),torch.zeros(1,32),memory.clone(),action,memory+1
-        cti._act=act
+            return torch.full((1, 84), float(rt.tick)), torch.zeros(1, 32), memory.clone(), action, memory + 1
+        cti._act = act
         def step(action):
-            rt.tick+=1
-            return None,None,torch.tensor([rt.tick==2]),None
-        rt.step=step
+            rt.tick += 1
+            return None, None, torch.tensor([False]), None
+        rt.step = step
         def observe(runtime):
-            now=state()
-            now['success'][:]=rt.tick==2 and rt.safe
-            now['failed'][:]=rt.tick==2 and not rt.safe
-            return now
-        with patch('treesim.kiwi_rl.selective_cti.signals',side_effect=observe):
-            examples,metrics=cti._episode(None,None,torch.tensor([True]),torch.zeros(1),
-                                        [torch.zeros(1,7),torch.full((1,7),.5)])
-        self.assertEqual(metrics['selected_worlds'],1)
-        self.assertEqual(len(examples),2)
-        for i,row in enumerate(examples):
-            torch.testing.assert_close(row['action'],recorded[1][i])
-            torch.testing.assert_close(recorded[1][i]-recorded[0][i],torch.full((1,7),.5))
-            self.assertEqual(row['r84'][0,0].item(),i)
-            self.assertTrue(row['mask'].item())
+            holding = bool(rt.kind) and rt.tick > 0
+            if reject_confirmation and torch.initial_seed() == 91009:
+                holding = False
+            if transient and rt.tick >= 5:
+                holding = False
+            return state(grasp=holding)
+        return cti, rt, recorded, observe
+
+    def test_actual_confirmed_segment_labels_and_matched_noise(self):
+        cti, rt, recorded, observe = self.fixture()
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(metrics['selected_worlds'], 1)
+        self.assertEqual(len(examples), 2)
+        # Restore before initial signals; then search pair; then confirmation pair.
+        for i, row in enumerate(examples):
+            torch.testing.assert_close(row['action'], recorded[4][i])
+            torch.testing.assert_close(recorded[4][i] - recorded[3][i], torch.full((1, 7), .5))
+            self.assertFalse(torch.equal(recorded[4][i], recorded[2][i]))
+            self.assertEqual(row['r84'][0, 0].item(), i)
+        json.dumps(metrics['branch_records'], allow_nan=False)
+
+    def test_second_seed_must_confirm_improvement(self):
+        cti, rt, recorded, observe = self.fixture(reject_confirmation=True)
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(metrics['provisional_worlds'], 1)
+        self.assertEqual(metrics['selected_worlds'], 0)
+        self.assertEqual(examples, [])
+
+    def test_grasp_retained_at_horizon_can_win_even_if_it_would_later_stall(self):
+        # Baseline stalls on step 6; the new grasp moves its stall to step 7.
+        # Step 6 is an explicit leaf, so the grasp is useful partial progress.
+        cti, rt, recorded, observe = self.fixture(stall_steps=6)
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(metrics['selected_worlds'], 1)
+        self.assertTrue(examples)
+        self.assertTrue(metrics['branch_records'][0]['stalled'])
+        self.assertTrue(metrics['branch_records'][1]['horizon'])
+        self.assertGreater(metrics['branch_records'][1]['leaf'], 2.)
+
+    def test_horizon_keeps_leaf_real_stall_clears_it(self):
+        for stall_steps, expected_stall in ((100, False), (3, True)):
+            cti, rt, recorded, observe = self.fixture(stall_steps=stall_steps)
+            with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+                result, _, _ = cti._branch(None, None, torch.tensor([True]), ('close_jaw', None))
+            self.assertEqual(result['stalled'].item(), expected_stall)
+            self.assertEqual(result['horizon'].item(), not expected_stall)
+            if expected_stall:
+                self.assertEqual(result['leaf'].item(), 0.)
+            else:
+                self.assertGreater(result['leaf'].item(), 2.)
+
+    def test_timeout_before_policy_continuation_cannot_supply_partial_labels(self):
+        cti, rt, recorded, observe = self.fixture(max_steps=3)
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(examples, [])
+        self.assertIn('incomplete_retention', metrics['branch_records'][1]['rejection_reasons'])
+
+    def test_transient_grasp_lost_before_leaf_is_rejected(self):
+        cti, rt, recorded, observe = self.fixture(transient=True)
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(examples, [])
+        candidate = metrics['branch_records'][1]
+        self.assertIn('no_retained_progress', candidate['rejection_reasons'])
+        self.assertEqual(candidate['hold_fraction'], 0.)
+
+    def test_numerical_failure_rejects_branch(self):
+        cti, rt, recorded, observe = self.fixture()
+        def fail():
+            raise RuntimeError('GPU numerical failure: flagged_worlds=1')
+        rt.check = fail
+        with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
+            examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
+                                             [None, ('close_jaw', None)])
+        self.assertEqual(examples, [])
+        self.assertTrue(metrics['branch_records'][1]['numerical'])
+        json.dumps(metrics['branch_records'], allow_nan=False)
+
+    def test_skill_actions_close_jaw_and_hold_targets(self):
+        rt = SimpleNamespace(worlds=1, device_name='cpu', control_dt=.02,
+                             observe=lambda: torch.zeros(1, 84), set_gait_actions=lambda a: None)
+        cti = SelectiveCTI(rt, lambda obs: torch.zeros(1, 12))
+        policy = _TinyTeacher()
+        with patch('treesim.kiwi_rl.selective_cti.privileged_observation', return_value=torch.zeros(1, 32)):
+            for skill in ('close_jaw', 'hold_arm_close_jaw', 'coherent_alternative'):
+                _, _, _, action, _ = cti._act(policy, torch.zeros(1, 64),
+                    intervention=(skill, torch.full((1, 7), .4)))
+                self.assertEqual(action[0, 6].item(), 1.)
+                if skill == 'hold_arm_close_jaw':
+                    self.assertTrue((action[0, :6] == 0).all())
+                if skill == 'coherent_alternative':
+                    torch.testing.assert_close(action[0, :6], torch.full((6,), .4))
 
 
-@unittest.skipUnless(os.environ.get('FAST_SCENE') and os.environ.get('GAIT_CHECKPOINT') and
+@unittest.skipUnless(os.environ.get('CTI_GPU_TEST') == '1' and os.environ.get('FAST_SCENE') and
+                     os.environ.get('GAIT_CHECKPOINT') and
                      all(importlib.util.find_spec(name) for name in ('warp', 'mujoco', 'mujoco_warp')) and
-                     torch.cuda.is_available(), 'FAST_SCENE, GAIT_CHECKPOINT and CUDA stack required')
+                     torch.cuda.is_available(), 'explicit CTI_GPU_TEST=1, scene, gait and CUDA required')
 class CTIGpuIntegrationTest(unittest.TestCase):
     def test_two_world_bounded_replay_and_auxiliary_update(self):
         import warp as wp
         from treesim.kiwi_rl.control import load_gait_artifact
         from treesim.kiwi_rl.fast_runtime import FastRuntime
         from treesim.kiwi_rl.fast_teacher import build_privileged_policy
-        from treesim.kiwi_rl.selective_cti import SelectiveCTI
-
         wp.init()
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
@@ -136,13 +324,13 @@ class CTIGpuIntegrationTest(unittest.TestCase):
             gait = load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
             policy = build_privileged_policy().cuda().eval()
             cti = SelectiveCTI(runtime, gait, stall_seconds=.1, max_episode_seconds=.2,
-                               perturb_steps=2)
+                               perturb_steps=2, horizon_seconds=.12, retention_seconds=.04)
             examples, metrics = cti.run(policy)
             self.assertGreater(metrics['transitions'], 0)
-            self.assertTrue(torch.isfinite(torch.tensor(metrics['seconds'])))
+            json.dumps(metrics['branch_records'], allow_nan=False)
             if examples:
                 result = update_cti(policy, torch.optim.Adam(policy.parameters(), lr=1e-4), examples)
-                self.assertTrue(result['updated'])
+                self.assertTrue(result['updated'] or result['rejected_update'])
 
 
 if __name__ == '__main__':

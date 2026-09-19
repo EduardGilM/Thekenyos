@@ -1,13 +1,10 @@
-"""Small, teacher-only matched counterfactual action search.
-
-This process-local auxiliary stream never creates PPO rollout rows. Its result
-is a masked action-regression example for the existing privileged teacher.
-"""
-
+"""Teacher-only retained-progress search; its examples never enter PPO rows."""
 from __future__ import annotations
 
-import time
+from collections import deque
+from copy import deepcopy
 import math
+import time
 
 import torch
 
@@ -16,51 +13,77 @@ from .harvest_training import EpisodeProgress, signals, HARVEST_GAMMA
 from .fast_teacher import privileged_observation
 
 
-def _choose_winners(scores, resolved, physical_failure, success, *, minimum_gain=0.5):
-    """Return per-world candidate indices; -1 means no verified improvement."""
-    scores = torch.as_tensor(scores)
-    resolved = torch.as_tensor(resolved, dtype=torch.bool, device=scores.device)
-    physical_failure = torch.as_tensor(physical_failure, dtype=torch.bool, device=scores.device)
-    success = torch.as_tensor(success, dtype=torch.bool, device=scores.device)
-    if (scores.ndim != 2 or scores.shape != resolved.shape or scores.shape != physical_failure.shape
-            or scores.shape != success.shape):
-        raise ValueError('candidate arrays must have matching [candidate, world] shapes')
-    baseline = scores[0]
-    baseline_success = success[0]
-    baseline_resolved = resolved[0]
-    categorical_gain = (success & ~baseline_success[None, :]) | (
-        ~physical_failure & ~success & physical_failure[0][None, :])
-    eligible = (resolved & baseline_resolved[None, :] & ~physical_failure &
-                categorical_gain & torch.isfinite(scores))
-    eligible[0] = False
-    gains = scores - baseline[None, :]
-    gains[~eligible] = -torch.inf
-    best_gain, winner = gains.max(dim=0)
-    return torch.where(best_gain >= minimum_gain, winner, torch.full_like(winner, -1))
+def _progress_over(candidate, reference, approach_gain=.015):
+    """Current retained outcomes only: historical contact is not a grasp."""
+    return ((candidate['success'] & ~reference['success']) |
+            (candidate['holding'] & ~reference['holding']) |
+            (candidate['holding'] & candidate['detached'] & ~reference['detached']) |
+            (~candidate['detached'] & ~reference['detached'] &
+             (candidate['distance'] <= reference['distance'] - approach_gain)) |
+            (candidate['holding'] & candidate['detached'] & reference['holding'] &
+             reference['detached'] &
+             (candidate['basket_distance'] <= reference['basket_distance'] - approach_gain)))
+
+
+def _choose_winners(outcomes, root, *, minimum_gain=.1, approach_gain=.015):
+    """Require a safe, retained gain over both the matched baseline and root."""
+    baseline = outcomes[0]
+    gains, reasons = [], []
+    for index, result in enumerate(outcomes):
+        reason = [[] for _ in range(len(result['score']))]
+        checks = {
+            'baseline': torch.full_like(result['success'], index == 0),
+            'failure': result['failed'] | result['numerical'],
+            'unheld_detachment_or_lost_fruit': result['lost_fruit'] & ~result['success'],
+            'incomplete_retention': ~result['retained'] & ~result['success'],
+            'no_retained_progress': ~(_progress_over(result, root, approach_gain) &
+                                      _progress_over(result, baseline, approach_gain)),
+            'no_root_potential_gain': (result['retained_potential'] <= EpisodeProgress.potential(root)) &
+                                      ~result['success'],
+            'insufficient_score_gain': result['score'] - baseline['score'] < minimum_gain,
+            'nonfinite_score': ~torch.isfinite(result['score']) | ~torch.isfinite(baseline['score']),
+            'unmatched_numerical_baseline': baseline['numerical'],
+            'inactive': ~result['triggered'],
+        }
+        eligible = torch.ones_like(result['success'])
+        for name, reject in checks.items():
+            eligible &= ~reject
+            for world in reject.nonzero(as_tuple=False).flatten().tolist():
+                reason[world].append(name)
+        gains.append(torch.where(eligible, result['score'] - baseline['score'], -torch.inf))
+        reasons.append(reason)
+    best_gain, winner = torch.stack(gains).max(dim=0)
+    return torch.where(torch.isfinite(best_gain), winner, -1), reasons
 
 
 class SelectiveCTI:
-    """Run bounded matched branches on a small, independent FastRuntime."""
-
+    """Bounded skill search on an independent runtime, followed by confirmation."""
     def __init__(self, runtime, gait, *, stall_seconds=4., max_episode_seconds=30.,
-                 minimum_gain=0.5, perturb_steps=10, root_spacing=20):
+                 minimum_gain=.1, perturb_steps=None, root_spacing=20,
+                 horizon_seconds=4., intervention_seconds=2., retention_seconds=.5,
+                 approach_gain=.015):
         if runtime.worlds > 64:
             raise ValueError('CTI runtime must use at most 64 worlds')
-        if stall_seconds <= 0 or max_episode_seconds <= 0 or minimum_gain < 0:
-            raise ValueError('invalid CTI episode limits or improvement threshold')
-        self.runtime, self.gait = runtime, gait
-        self.rounds = 0
+        values = (stall_seconds, max_episode_seconds, horizon_seconds,
+                  intervention_seconds, retention_seconds, approach_gain)
+        if any(not math.isfinite(v) or v <= 0 for v in values) or not math.isfinite(minimum_gain) or minimum_gain < 0:
+            raise ValueError('invalid CTI limits or improvement threshold')
+        self.runtime, self.gait, self.rounds = runtime, gait, 0
         self.stall_seconds, self.max_episode_seconds = stall_seconds, max_episode_seconds
-        self.minimum_gain, self.perturb_steps = float(minimum_gain), int(perturb_steps)
+        self.minimum_gain, self.approach_gain = minimum_gain, approach_gain
+        self.horizon_steps = max(1, round(horizon_seconds / runtime.control_dt))
+        self.perturb_steps = (max(1, round(intervention_seconds / runtime.control_dt))
+                              if perturb_steps is None else int(perturb_steps))
+        self.retention_steps = max(1, round(retention_seconds / runtime.control_dt))
         self.root_spacing = int(root_spacing)
-        if self.perturb_steps < 1 or self.root_spacing < 1:
-            raise ValueError('perturb_steps and root_spacing must be positive')
-
-    def _app(self, memory, progress, task_return):
-        return {'memory': memory, 'progress': progress, 'task_return': task_return}
+        # Short explicit configurations are for tests. Production defaults leave
+        # two seconds of original-policy continuation after intervention.
+        if self.perturb_steps < 1 or self.root_spacing < 1 or self.horizon_steps < self.perturb_steps + self.retention_steps:
+            raise ValueError('horizon must include intervention and a retention continuation')
 
     def _snapshot(self, memory, progress, task_return):
-        return capture(self.runtime, application_state=self._app(memory, progress, task_return))
+        return capture(self.runtime, application_state={
+            'memory': memory, 'progress': progress, 'task_return': task_return})
 
     def _restore_app(self, snapshot):
         app = restore(self.runtime, snapshot)
@@ -68,168 +91,225 @@ class SelectiveCTI:
 
     @staticmethod
     def _event_mask(rt, progress, now, previous_holding):
-        failed = now['failed']
-        unheld_detach = now['detached'] & ~now['holding']
-        lost_hold = previous_holding & ~now['holding']
-        nearing_stall = progress.stale >= max(1, progress.stall_steps - 20)
-        return failed | unheld_detach | lost_hold | nearing_stall
+        return (now['failed'] | (now['detached'] & ~now['holding']) |
+                (previous_holding & ~now['holding']) |
+                (progress.stale >= max(1, progress.stall_steps - 20)))
 
-    def _act(self, policy, memory, *, explore=False, delta=None):
+    def _act(self, policy, memory, *, explore=False, intervention=None):
         rt = self.runtime
         obs = rt.observe().detach().clone()
-        priv = privileged_observation(rt, obs).detach()
+        priv = privileged_observation(rt, obs).detach().clone()
         memory_in = memory.detach().clone()
         mean, logstd, _, next_memory = policy(priv, obs, memory)
         raw = mean + logstd.exp() * torch.randn_like(mean) if explore else mean
         action = raw.tanh()
-        if delta is not None:
-            action = (action + delta).clamp(-1., 1.)
+        if intervention is not None:
+            kind, alternative = intervention
+            if kind == 'hold_arm_close_jaw':
+                action[:, :6] = 0.  # Hold joint targets; this does not freeze physics.
+            elif kind == 'coherent_alternative':
+                action[:, :6] = alternative[:, :6]
+            action[:, 6] = 1.  # Positive velocity closes the jaw from -1 toward 0.
         rt.set_gait_actions(self.gait(obs).detach())
         return obs, priv, memory_in, action, next_memory.detach()
 
-    def _episode(self, policy, root, trigger_mask, prefix_return, candidates):
-        """Replay baseline and fixed first-ten-step action perturbations."""
+    def _branch(self, policy, root, trigger, intervention, noise_seed=None):
         rt = self.runtime
-        count, worlds = len(candidates), rt.worlds
-        scores = torch.full((count, worlds), float('nan'), device=rt.device_name)
-        resolved = torch.zeros((count, worlds), dtype=torch.bool, device=rt.device_name)
-        physical_failure = torch.zeros_like(resolved)
-        success = torch.zeros_like(resolved)
-        candidate_segments = [[] for _ in range(count)]
+        memory, progress, _ = self._restore_app(root)
+        if noise_seed is not None:
+            torch.manual_seed(noise_seed)
+        initial = signals(rt)
+        active = trigger.clone()
+        result = {key: torch.zeros_like(initial['distance']) for key in
+                  ('score', 'task_return', 'leaf', 'retained_potential', 'distance',
+                   'basket_distance', 'hold_fraction', 'steps')}
+        result.update({key: torch.zeros_like(trigger) for key in
+                       ('holding', 'detached', 'success', 'failed', 'stalled', 'truncated',
+                        'horizon', 'numerical', 'lost_fruit', 'retained')})
+        result['triggered'] = trigger.clone()
+        window, segment = deque(maxlen=self.retention_steps), []
         transitions = 0
-        for candidate_id, delta in enumerate(candidates):
-            memory, progress, task_return = self._restore_app(root)
-            active = trigger_mask.clone()
-            branch_return = prefix_return.clone()
-            step_index = 0
-            while bool(active.any()) and bool((progress.age[active] < progress.max_steps).any()):
-                obs, priv, memory_in, action, memory = self._act(
-                    policy, memory, explore=True,
-                    delta=delta if step_index < self.perturb_steps else None)
-                if step_index < self.perturb_steps:
-                    candidate_segments[candidate_id].append((
-                        priv.clone(), obs.clone(), memory_in.clone(), action.detach().clone(), active.clone()))
-                _, _, done, _ = rt.step(action)
-                rt.check()  # Inspect numerical latches before any world reset.
-                now = signals(rt)
-                reward, terminated, truncated, stalled = progress.step(now, done)
-                del reward
-                increment = progress.task_reward.detach()
-                branch_return += (HARVEST_GAMMA ** (progress.age - 1).float()) * increment
-                transitions += worlds
-                ended_all = terminated | truncated
-                ended = active & ended_all
-                actual = active & terminated
-                if bool(actual.any()):
-                    scores[candidate_id, actual] = branch_return[actual]
-                    resolved[candidate_id, actual] = True
-                    physical_failure[candidate_id, actual] = (done & ~now['success'])[actual]
-                    success[candidate_id, actual] = now['success'][actual]
-                if bool(ended_all.any()):
-                    rt.reset(ended_all.to(dtype=torch.uint8))
-                    progress.reset(ended_all, signals(rt))
-                    memory[ended_all] = 0
-                    active[ended] = False
-                step_index += 1
-        winners = _choose_winners(scores, resolved, physical_failure, success,
-                                  minimum_gain=self.minimum_gain)
-        if not candidate_segments[0]:
-            return [], {'transitions': transitions, 'selected_worlds': 0,
-                        'candidates': count, 'resolved_worlds': int(resolved.sum().item())}
-        mask = winners >= 0
-        if bool(mask.any()):
-            examples = []
-            for step in range(min(self.perturb_steps, max(map(len, candidate_segments)))):
-                available = torch.zeros(worlds, dtype=torch.bool, device=rt.device_name)
-                priv = torch.zeros((worlds, 32), device=rt.device_name)
-                obs = torch.zeros((worlds, 84), device=rt.device_name)
-                memory = torch.zeros((worlds, 64), device=rt.device_name)
-                action = torch.zeros((worlds, 7), device=rt.device_name)
-                for candidate_id, segment in enumerate(candidate_segments):
-                    if step >= len(segment):
-                        continue
-                    p, o, m, a, active_at_step = segment[step]
-                    selected = (winners == candidate_id) & active_at_step
-                    if bool(selected.any()):
-                        priv[selected], obs[selected] = p[selected], o[selected]
-                        memory[selected], action[selected] = m[selected], a[selected]
-                        available |= selected
-                if bool(available.any()):
-                    winner_success = torch.zeros(worlds, dtype=torch.bool, device=rt.device_name)
-                    ids = available.nonzero(as_tuple=False).flatten()
-                    winner_success[ids] = success[winners[ids], ids]
-                    examples.append(dict(privileged=priv.detach().clone(), r84=obs.detach().clone(),
-                                         memory=memory.detach().clone(), action=action.detach().clone(),
-                                         mask=available.detach().clone(),
-                                         success_mask=winner_success.detach().clone()))
-        else:
-            examples = []
-        return examples, {'transitions': transitions, 'selected_worlds': int(mask.sum().item()),
-                          'candidates': count, 'resolved_worlds': int(resolved.sum().item())}
+        for tick in range(self.horizon_steps):
+            if not bool(active.any()):
+                break
+            obs, priv, memory_in, action, memory = self._act(
+                policy, memory, explore=True,
+                intervention=intervention if tick < self.perturb_steps else None)
+            if tick < self.perturb_steps:
+                segment.append(dict(privileged=priv.clone(), r84=obs.clone(),
+                                    memory=memory_in.clone(), action=action.detach().clone(),
+                                    mask=active.clone()))
+            _, _, done, _ = rt.step(action)
+            transitions += rt.worlds
+            try:
+                rt.check()
+            except RuntimeError as error:
+                if 'GPU numerical failure' not in str(error):
+                    raise
+                result['numerical'] |= active
+                result['score'][active] = -torch.inf
+                result['numerical_error'] = str(error)
+                break
+            now = signals(rt)
+            _, terminated, truncated, stalled = progress.step(now, done)
+            result['task_return'][active] += HARVEST_GAMMA ** tick * progress.task_reward[active]
+            result['lost_fruit'] |= active & ~now['success'] & now['detached'] & ~now['holding']
+            window.append({key: value.clone() for key, value in now.items()})
+            finish = active & (terminated | truncated | (tick + 1 == self.horizon_steps))
+            if bool(finish.any()):
+                potential = torch.stack([EpisodeProgress.potential(s) for s in window]).amin(dim=0)
+                result['retained_potential'][finish] = potential[finish]
+                leaf = torch.where(terminated, 0., HARVEST_GAMMA ** (tick + 1) * potential)
+                result['leaf'][finish] = leaf[finish]
+                result['score'][finish] = (result['task_return'] + leaf)[finish]
+                for key in ('distance', 'basket_distance'):
+                    result[key][finish] = torch.stack([s[key] for s in window]).amax(dim=0)[finish]
+                holds = torch.stack([s['holding'] for s in window])
+                result['holding'][finish] = holds.all(dim=0)[finish]
+                result['hold_fraction'][finish] = holds.float().mean(dim=0)[finish]
+                result['detached'][finish] = torch.stack([s['detached'] for s in window]).all(dim=0)[finish]
+                result['success'][finish] = now['success'][finish]
+                result['failed'][finish] = (now['failed'] | (done & ~now['success']))[finish]
+                result['stalled'][finish] = stalled[finish]
+                result['truncated'][finish] = truncated[finish]
+                result['horizon'][finish] = (~terminated & ~truncated)[finish]
+                continuation = min(max(1, round(1. / rt.control_dt)),
+                                   self.horizon_steps - self.perturb_steps)
+                result['retained'][finish] = (len(window) == self.retention_steps and
+                                             tick + 1 >= self.perturb_steps + continuation)
+                result['steps'][finish] = tick + 1
+            active &= ~finish
+            # Ended worlds must not accumulate physics failures during another
+            # world's continuation. Their stored outcomes and labels are frozen.
+            if bool(finish.any()) and bool(active.any()):
+                rt.reset(finish.to(dtype=torch.uint8))
+                progress.reset(finish, signals(rt))
+                memory[finish] = 0
+        return result, segment, transitions
+
+    @staticmethod
+    def _records(outcomes, reasons, names, pass_name):
+        records = []
+        for candidate, outcome in enumerate(outcomes):
+            for world in range(len(outcome['score'])):
+                row = dict(pass_name=pass_name, candidate=candidate, skill=names[candidate],
+                           world=world, eligible=not reasons[candidate][world],
+                           rejection_reasons=reasons[candidate][world])
+                for key, value in outcome.items():
+                    item = value[world].item() if isinstance(value, torch.Tensor) else value
+                    row[key] = None if isinstance(item, float) and not math.isfinite(item) else item
+                records.append(row)
+        return records
+
+    def _episode(self, policy, root, trigger_mask, prefix_return, candidates):
+        # Prefix is identical in matched branches; root-relative discount keeps
+        # gains comparable across early and late decisions.
+        del prefix_return
+        self._restore_app(root)
+        initial = signals(self.runtime)
+        outcomes, transitions = [], 0
+        for candidate in candidates:
+            outcome, _, count = self._branch(policy, root, trigger_mask, candidate)
+            outcomes.append(outcome)
+            transitions += count
+        provisional, reasons = _choose_winners(outcomes, initial, minimum_gain=self.minimum_gain,
+                                               approach_gain=self.approach_gain)
+        names = ['policy' if item is None else item[0] for item in candidates]
+        records = self._records(outcomes, reasons, names, 'search')
+        confirmed = torch.full_like(provisional, -1)
+        examples = []
+        if bool((provisional >= 0).any()):
+            # A second policy-noise draw is matched within its own pair. Never
+            # compare a candidate under one noise seed to another seed's baseline.
+            seed = 91009 + self.rounds
+            baseline, _, count = self._branch(policy, root, trigger_mask, None, seed)
+            transitions += count
+            confirmation = [baseline]
+            segments = [[]]
+            for index, candidate in enumerate(candidates[1:], start=1):
+                selected = trigger_mask & (provisional == index)
+                if bool(selected.any()):
+                    outcome, segment, count = self._branch(policy, root, selected, candidate, seed)
+                    transitions += count
+                else:
+                    outcome, segment = deepcopy(baseline), []
+                    outcome['triggered'].zero_()
+                confirmation.append(outcome)
+                segments.append(segment)
+            repeated, repeated_reasons = _choose_winners(
+                confirmation, initial, minimum_gain=self.minimum_gain, approach_gain=self.approach_gain)
+            confirmed = torch.where(repeated == provisional, provisional, -1)
+            records.extend(self._records(confirmation, repeated_reasons, names, 'confirmation'))
+            for index, segment in enumerate(segments):
+                for row in segment:
+                    mask = row['mask'] & (confirmed == index)
+                    if bool(mask.any()):
+                        examples.append({**{key: value.detach().clone() for key, value in row.items()},
+                                         'mask': mask.clone(),
+                                         'success_mask': confirmation[index]['success'].clone()})
+        for row in records:
+            row['round'] = self.rounds
+            row['provisional_candidate'] = int(provisional[row['world']].item())
+            row['selected_candidate'] = int(confirmed[row['world']].item())
+        return examples, dict(transitions=transitions, candidates=len(candidates),
+                              selected_worlds=int((confirmed >= 0).sum().item()),
+                              provisional_worlds=int((provisional >= 0).sum().item()),
+                              branch_records=records)
 
     def run(self, policy):
-        """Search from a factual event root and restore the pilot endpoint exactly."""
+        """Search before a pilot event and restore its endpoint, including RNG."""
         rt = self.runtime
         started = time.perf_counter()
         self.rounds += 1
         device = rt.device_name
         devices = [torch.device(device).index or 0] if torch.device(device).type == 'cuda' else []
-        metrics = {'transitions': 0, 'candidate_branches': 0, 'selected_worlds': 0,
-                   'pilot_events': 0, 'seconds': 0.}
+        metrics = dict(version=2, transitions=0, candidate_branches=0, selected_worlds=0,
+                       pilot_events=0, seconds=0., branch_records=[])
         examples = []
         with torch.random.fork_rng(devices=devices), torch.no_grad():
             rt.reset()
             memory = torch.zeros(rt.worlds, 64, device=device)
             progress = EpisodeProgress(signals(rt),
-                stall_steps=round(self.stall_seconds / rt.control_dt),
-                max_steps=round(self.max_episode_seconds / rt.control_dt), guidance=0.)
+                stall_steps=max(1, round(self.stall_seconds / rt.control_dt)),
+                max_steps=max(1, round(self.max_episode_seconds / rt.control_dt)), guidance=0.)
             task_return = torch.zeros(rt.worlds, device=device)
-            roots = []
+            roots = deque(maxlen=6)
             previous_holding = signals(rt)['holding']
             endpoint = None
             try:
                 for tick in range(progress.max_steps):
                     if tick % self.root_spacing == 0:
-                        roots.append(self._snapshot(memory, progress, task_return))
-                        roots = roots[-2:]
+                        roots.append((tick, self._snapshot(memory, progress, task_return)))
                     _, _, _, action, memory = self._act(policy, memory, explore=True)
                     _, _, done, _ = rt.step(action)
                     rt.check()
                     now = signals(rt)
-                    _, terminated, truncated, stalled = progress.step(now, done)
-                    task_return += (HARVEST_GAMMA ** (progress.age - 1).float()) * progress.task_reward
+                    _, terminated, truncated, _ = progress.step(now, done)
+                    task_return += HARVEST_GAMMA ** (progress.age - 1).float() * progress.task_reward
                     metrics['transitions'] += rt.worlds
                     event = self._event_mask(rt, progress, now, previous_holding)
-                    exploratory = self.rounds % 4 == 0 and tick == 40
-                    if exploratory and not bool(event.any()):
-                        event = torch.zeros_like(event)
+                    exploratory = self.rounds % 4 == 0 and tick == 40 and not bool(event.any())
+                    if exploratory:
                         event[(self.rounds // 4 - 1) % rt.worlds] = True
                     if bool(event.any()) and roots:
                         endpoint = self._snapshot(memory, progress, task_return)
-                        metrics['pilot_events'] = int(event.sum().item())
-                        metrics['pilot_ticks'] = tick + 1
-                        metrics['root_count'] = len(roots)
-                        metrics['exploratory_roots'] = int(exploratory and not bool(
-                            self._event_mask(rt, progress, now, previous_holding).any()))
-                        root = roots[-2] if len(roots) >= 2 else roots[-1]
-                        trigger = event.clone()
-                        prefix = root.application_state['task_return'].to(device)
-                        # Three bounded, coherent joint perturbations; same delta
-                        # is held for the first ten control steps of each branch.
+                        root_tick, root = roots[0]
+                        metrics.update(pilot_events=int(event.sum().item()), pilot_ticks=tick + 1,
+                                       root_count=len(roots), root_lookback_ticks=tick + 1 - root_tick,
+                                       exploratory_roots=int(exploratory))
                         generator = torch.Generator(device=device).manual_seed(1307 + self.rounds)
-                        deltas = [torch.zeros((rt.worlds, 7), device=device)]
-                        deltas.extend((torch.randn((rt.worlds, 7), generator=generator,
-                                                   device=device) * .18).clamp(-.3, .3)
-                                      for _ in range(3))
-                        branch_examples, branch_metrics = self._episode(
-                            policy, root, trigger, prefix, deltas)
-                        metrics.update({f'branch_{key}': value for key, value in branch_metrics.items()})
-                        metrics['candidate_branches'] = len(deltas)
-                        metrics['selected_worlds'] = branch_metrics['selected_worlds']
-                        examples.extend(branch_examples)
+                        alternative = (torch.randn((rt.worlds, 7), generator=generator, device=device) * .5).clamp(-1., 1.)
+                        candidates = [None, ('close_jaw', None), ('hold_arm_close_jaw', None),
+                                      ('coherent_alternative', alternative)]
+                        examples, branch = self._episode(policy, root, event,
+                            root.application_state['task_return'], candidates)
+                        metrics['branch_records'] = branch.pop('branch_records')
+                        metrics.update({f'branch_{key}': value for key, value in branch.items()})
+                        metrics['candidate_branches'] = len(candidates)
+                        metrics['selected_worlds'] = branch['selected_worlds']
                         break
-                    if bool((terminated | truncated).any()):
-                        ending = terminated | truncated
+                    ending = terminated | truncated
+                    if bool(ending.any()):
                         rt.reset(ending.to(dtype=torch.uint8))
                         progress.reset(ending, signals(rt))
                         memory[ending] = 0
@@ -243,39 +323,80 @@ class SelectiveCTI:
                     self._restore_app(endpoint)
         metrics['seconds'] = time.perf_counter() - started
         metrics['transitions'] += int(metrics.get('branch_transitions', 0))
-        if examples:
-            repaired = torch.stack([row['success_mask'] & row['mask'] for row in examples]).any(dim=0)
-            metrics['successful_repairs'] = int(repaired.sum().item())
-        else:
-            metrics['successful_repairs'] = 0
-        metrics['failure_avoidance'] = metrics['selected_worlds'] - metrics['successful_repairs']
+        metrics['successful_repairs'] = (int(torch.stack([
+            row['success_mask'] & row['mask'] for row in examples]).any(dim=0).sum().item()) if examples else 0)
+        metrics['partial_repairs'] = metrics['selected_worlds'] - metrics['successful_repairs']
         return examples, metrics
 
 
-def update_cti(policy, optimizer, examples, coef=0.1):
-    """Apply masked auxiliary MSE from CTI examples, separately from PPO rows."""
+def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
+    """Apply auxiliary action regression only if factual Gaussian KL stays <= .01."""
     if not math.isfinite(coef) or coef < 0:
         raise ValueError('coef must be nonnegative')
     rows = list(examples)
-    selected_worlds = (int(torch.stack([row['mask'] for row in rows]).any(dim=0).sum().item())
-                       if rows else 0)
+    selected_worlds = (int(torch.stack([row['mask'] for row in rows]).any(dim=0).sum().item()) if rows else 0)
     target_actions = sum(int(row['mask'].sum().item()) for row in rows)
-    if not rows or target_actions == 0 or coef == 0:
-        return {'loss': 0., 'selected_worlds': selected_worlds,
-                'target_actions': target_actions, 'updated': False}
+    metrics = dict(loss=0., selected_worlds=selected_worlds, target_actions=target_actions,
+                   updated=False, kl=0., rejected_update=False, nonfinite_update=False)
+    if not rows or not target_actions or not coef:
+        return metrics
+    for row in rows:
+        selected = row['action'][row['mask']]
+        if not torch.isfinite(selected).all() or (selected.abs() > 1).any():
+            raise ValueError('selected CTI actions must be finite and bounded')
+    anchors = rows if anchor_rows is None else list(anchor_rows)
+    if not anchors:
+        raise ValueError('factual anchors must not be empty')
+    policy_before, optimizer_before = deepcopy(policy.state_dict()), deepcopy(optimizer.state_dict())
+    fixed = []
+    with torch.no_grad():
+        memory = anchors[0].get('initial_memory', anchors[0].get('memory'))
+        if memory is None:
+            raise ValueError('anchor rows need initial_memory or explicit memory')
+        for row in anchors:
+            memory = row.get('memory', memory).detach().clone()
+            if 'reset' in row:
+                memory *= (~row['reset'])[:, None]
+            priv, obs = row['privileged'].detach().clone(), row['r84'].detach().clone()
+            mean, logstd, _, next_memory = policy(priv, obs, memory)
+            fixed.append((priv, obs, memory, mean.detach().clone(), logstd.detach().clone()))
+            memory = next_memory.detach()
     optimizer.zero_grad(set_to_none=True)
     total = None
     for row in rows:
-        if (not torch.isfinite(row['action'][row['mask']]).all() or
-                (row['action'][row['mask']].abs() > 1).any()):
-            raise ValueError('selected CTI actions must be finite and bounded')
         mean, _, _, _ = policy(row['privileged'], row['r84'], row['memory'].detach())
-        per_world = (mean.tanh() - row['action']).square().mean(dim=-1)
-        loss = per_world[row['mask']].sum()
+        loss = (mean.tanh()[row['mask']] - row['action'][row['mask']]).square().mean(dim=-1).sum()
         total = loss if total is None else total + loss
     loss = total / target_actions
+    loss_value = float(loss.detach().item())
+    metrics['nonfinite_update'] = not math.isfinite(loss_value)
+    metrics['loss'] = loss_value if math.isfinite(loss_value) else 0.
     (coef * loss).backward()
-    torch.nn.utils.clip_grad_norm_(policy.parameters(), 1., error_if_nonfinite=True)
-    optimizer.step()
-    return {'loss': float(loss.detach().item()), 'selected_worlds': selected_worlds,
-            'target_actions': target_actions, 'updated': True}
+    grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.)
+    if torch.isfinite(grad):
+        optimizer.step()
+        with torch.no_grad():
+            kls = []
+            for priv, obs, memory, old_mean, old_logstd in fixed:
+                mean, logstd, _, _ = policy(priv, obs, memory)
+                kl = (logstd - old_logstd +
+                      (old_logstd.exp().square() + (old_mean - mean).square()) /
+                      (2 * logstd.exp().square()) - .5).sum(dim=-1)
+                kls.append(kl)
+            kl = torch.cat(kls).mean()
+        kl_value = float(kl.item())
+        finite_state = all(bool(torch.isfinite(value).all()) for value in policy.state_dict().values())
+        metrics['nonfinite_update'] |= not math.isfinite(kl_value) or not finite_state
+        # Zero is only a logging placeholder when nonfinite_update is true.
+        metrics['kl'] = max(0., kl_value) if math.isfinite(kl_value) else 0.
+        accepted = not metrics['nonfinite_update'] and kl_value <= .01
+    else:
+        metrics['nonfinite_update'], accepted = True, False
+    if not accepted:
+        policy.load_state_dict(policy_before)
+        optimizer.load_state_dict(optimizer_before)
+        optimizer.zero_grad(set_to_none=True)
+        metrics['rejected_update'] = True
+    else:
+        metrics['updated'] = True
+    return metrics

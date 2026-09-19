@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import copy
 import json
 import os
@@ -42,15 +43,37 @@ try:
     log_mtime=(root/'training.jsonl').stat().st_mtime
 except FileNotFoundError:
     rows=[]; log_mtime=None
-pid=1545354
+active=read('active-process.json') or {}
+active=active if isinstance(active,dict) else {}
+pid=active.get('pid',1545354)
 alive=False
 try:
-    os.kill(pid, 0)
-    cmd=pathlib.Path('/proc/%d/cmdline'%pid).read_bytes().replace(b'\0',b' ').decode(errors='replace')
-    alive='train_harvest_fast.py' in cmd and 'teacher-reward-cti-001' in cmd
+    if isinstance(pid,int) and not isinstance(pid,bool) and pid > 0:
+        os.kill(pid, 0)
+        cmd=pathlib.Path('/proc/%d/cmdline'%pid).read_bytes().replace(b'\0',b' ').decode(errors='replace')
+        alive='train_harvest_fast.py' in cmd and 'teacher-reward-cti-001' in cmd
 except (OSError, FileNotFoundError): pass
+def tail_jsonl(name, limit):
+    try:
+        with (root/name).open('rb') as f:
+            lines=deque(f,maxlen=limit)
+        records=[]
+        for index,line in enumerate(lines):
+            try: records.append(json.loads(line))
+            except json.JSONDecodeError:
+                if index == len(lines)-1 and not line.endswith((b'\n',b'\r')): continue
+                raise
+        return records
+    except FileNotFoundError: return []
+events=tail_jsonl('phase-events.jsonl',200)
+branches=tail_jsonl('cti-branches.jsonl',3)
+phase=active.get('phase')
+if not phase and events: phase=events[-1].get('phase')
+if not phase and rows: phase='cti-v2' if rows[-1].get('cti/version') == 2 else 'ppo'
+status=active.get('status') if active.get('status') in ('paused','running') else None
 print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
-                  'log_mtime':log_mtime,'process_alive':alive}))
+                  'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
+                  'active_status':status,'phase':phase,'phase_events':events,'branch_diagnostics':branches}))
 '''
 
 
@@ -102,6 +125,36 @@ def _status(snapshot):
     return 'stale'
 
 
+def _phase(snapshot):
+    """Choose the explicit phase, then event history, then CTI-v2 row marker."""
+    phase = snapshot.get('phase')
+    if isinstance(phase, str) and phase:
+        return phase
+    events = snapshot.get('phase_events')
+    if isinstance(events, list):
+        for event in reversed(events):
+            if isinstance(event, dict) and isinstance(event.get('phase'), str):
+                return event['phase']
+    rows = snapshot.get('rows')
+    if isinstance(rows, list) and rows and isinstance(rows[-1], dict):
+        if rows[-1].get('cti/version') == 2:
+            return 'cti-v2'
+    return 'ppo'
+
+
+def _decode_jsonl_tail(lines):
+    """Decode complete newline-delimited JSON records from a deque tail."""
+    records = []
+    for index, line in enumerate(lines):
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            if index == len(lines) - 1 and not line.endswith((b'\n', b'\r')):
+                continue
+            raise
+    return records
+
+
 class Dashboard:
     def __init__(self, cache: Path, no_render=False):
         self.cache = cache.expanduser().resolve()
@@ -112,7 +165,9 @@ class Dashboard:
                           status='stale', rows=[], video=None, render={'status': 'idle', 'error': None,
                           'checkpoint': None}, log_mtime=None, process_alive=False,
                           budget_seconds=3600, best_checkpoint=None, best_metrics=None,
-                          last_video_checkpoint=None, elapsed_seconds=None)
+                          last_video_checkpoint=None, elapsed_seconds=None,
+                          phase='ppo', phase_events=[], branch_diagnostics=[], active_process=None,
+                          active_status=None)
         self.last_render_checkpoint = None
         self.last_render_at = 0.0
         self.render_busy = False
@@ -137,6 +192,10 @@ class Dashboard:
             with self.lock:
                 self.state.update(rows=rows, log_mtime=remote.get('log_mtime'),
                                   process_alive=bool(remote.get('process_alive')),
+                                  active_process=remote.get('active_process'),
+                                  active_status=remote.get('active_status'),
+                                  phase=_phase(remote), phase_events=remote.get('phase_events') or [],
+                                  branch_diagnostics=remote.get('branch_diagnostics') or [],
                                   fetched_at=time.time(), error=None,
                                   status=_status(dict(report=report, failure=failure,
                                                       process_alive=remote.get('process_alive'))),
@@ -145,6 +204,8 @@ class Dashboard:
                                                    else (rows[-1].get('elapsed_seconds') if rows else None)))
                 if failure:
                     self.state['error'] = failure.get('error') if isinstance(failure, dict) else str(failure)
+                if remote.get('active_status') == 'paused' and remote.get('process_alive') and not failure:
+                    self.state['status'] = 'paused'
             if checkpoint and not self.no_render and checkpoint != self.last_render_checkpoint and \
                     time.monotonic() - self.last_render_at >= RENDER_INTERVAL:
                 with self.lock:

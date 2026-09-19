@@ -59,6 +59,14 @@ class TrainingLogTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'could not be started'):
                 TrainingLog(tmp, wandb_mode='online', wandb_module=Unavailable())
 
+    def test_resume_requires_existing_wandb_identity(self):
+        fake = FakeWandb()
+        with tempfile.TemporaryDirectory() as tmp:
+            TrainingLog(tmp, wandb_mode='online', wandb_module=fake,
+                        wandb_run_id='existing-run')
+        self.assertEqual(fake.calls[0]['id'], 'existing-run')
+        self.assertEqual(fake.calls[0]['resume'], 'must')
+
     def test_checkpoint_is_opt_in(self):
         fake = FakeWandb()
         with tempfile.TemporaryDirectory() as tmp:

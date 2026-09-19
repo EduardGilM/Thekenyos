@@ -1,4 +1,6 @@
 import json
+from collections import deque
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -8,9 +10,25 @@ from http.server import ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from training_dashboard import Dashboard, handler_for, select_checkpoint
+from training_dashboard import Dashboard, REMOTE_PROBE, _decode_jsonl_tail, _phase, handler_for, select_checkpoint
 
 class DashboardTest(unittest.TestCase):
+    def test_active_pid_and_phase_fallbacks(self):
+        self.assertIn("active=read('active-process.json')", REMOTE_PROBE)
+        self.assertIn("active.get('pid',1545354)", REMOTE_PROBE)
+        self.assertIn("'train_harvest_fast.py' in cmd", REMOTE_PROBE)
+        self.assertEqual(_phase({'phase_events': [{'phase': 'ppo'}, {'phase': 'cti-v2'}]}), 'cti-v2')
+        self.assertEqual(_phase({'rows': [{'cti/version': 2}]}), 'cti-v2')
+        self.assertEqual(_phase({'rows': [{}]}), 'ppo')
+
+    def test_jsonl_tail_keeps_large_records_and_latest_complete_rows(self):
+        stream = io.BytesIO((json.dumps({'payload': 'x' * 70000}) + '\n'
+                             + '{"round":1}\n{"round":').encode())
+        records = _decode_jsonl_tail(deque(stream, maxlen=3))
+        self.assertEqual([record.get('round') for record in records], [None, 1])
+        self.assertEqual(len(records[0]['payload']), 70000)
+        self.assertIn('deque(f,maxlen=limit)', REMOTE_PROBE)
+
     def test_best_uses_physical_outcomes_and_retains_earliest_tie(self):
         def row(step,success=0,failure=0,grasp=0,distance=.1):
             return {'step':step,'evaluation/success':success,'evaluation/physical_failure':failure,

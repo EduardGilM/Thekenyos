@@ -214,6 +214,12 @@ CTI requires replay acceptance and meaningful physical outcome comparisons, not
 a successful full harvest first. Early action-branch experiments may develop
 executor competence; keep their data separate from factual PPO. Process-local
 snapshots alone are not evidence of CTI policy training or benefit.
+CTI v2 uses retained short-horizon progress as an explicit curriculum heuristic.
+Keep matched-noise confirmation, real physical rejection, factual PPO separation,
+and policy plus optimizer rollback on auxiliary KL violations. Run
+`tests.test_selective_cti` with `CTI_GPU_TEST=1` and the scene/gait variables for
+CTI changes. Resume only at the latest logged checkpoint, preserve Adam and run
+identity, reset physical episodes explicitly, and keep the original time budget.
 
 ## Continuous visual leaf roof
 
