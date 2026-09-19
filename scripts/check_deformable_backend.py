@@ -81,6 +81,45 @@ def sample(model, data, rest_volumes, metrics):
         metrics['peak_contact_force_N'] = max(metrics['peak_contact_force_N'], float(np.linalg.norm(force[:3])))
 
 
+def update_post_ground_contact(contact_report, time_s, loads, peak_load, first_contact_s):
+    """Latch jaw contact observed after each world's first ground impact."""
+    ground_step = np.asarray(contact_report['first_ground_step'])[:, 0]
+    steps_seen = np.asarray(contact_report['steps'])
+    current_load = np.max(np.asarray(loads), axis=1)
+    after_ground = (ground_step >= 0) & (steps_seen > ground_step)
+    np.maximum(peak_load, np.where(after_ground, current_load, 0.), out=peak_load)
+    newly_contacted = after_ground & (current_load > .01) & np.isnan(first_contact_s)
+    first_contact_s[newly_contacted] = time_s
+    return peak_load, first_contact_s
+
+
+def contact_snapshot(model, data, *, world_id, time_s, jaw_target, ground_step, load_n, phase):
+    import mujoco
+    from treesim.kiwi_rl.physics import contact_flex_ids
+    force = np.zeros(6)
+    contacts = []
+    for index, contact in enumerate(data.contact):
+        flex_ids = contact_flex_ids(contact.geom, contact.flex)
+        if not np.any(flex_ids >= 0) or not np.any(contact.geom >= 0):
+            continue
+        mujoco.mj_contactForce(model, data, index, force)
+        contacts.append(dict(geom=[int(g) for g in contact.geom],
+                             flex=[int(f) for f in contact.flex],
+                             names=[model.geom(int(g)).name if g >= 0 else None for g in contact.geom],
+                             distance_m=float(contact.dist),
+                             force_N=float(np.linalg.norm(force[:3]))))
+    vertices = np.asarray(data.flexvert_xpos)
+    return dict(world=int(world_id), phase=phase, sample_time_s=float(time_s),
+                ground_time_s=float(ground_step * model.opt.timestep) if ground_step >= 0 else None,
+                jaw_angle_rad=float(data.qpos[0]), jaw_target=float(jaw_target),
+                jaw_load_N=float(load_n), fruit_bbox_m=[vertices.min(axis=0).tolist(), vertices.max(axis=0).tolist()],
+                fruit_center_m=vertices.mean(axis=0).tolist(), contacts=contacts)
+
+
+def maybe_replace_snapshot(snapshot, load_n, value):
+    return value if load_n > .01 and (snapshot is None or load_n > snapshot['jaw_load_N']) else snapshot
+
+
 def run_case(args, case, dt, backend):
     import mujoco
     from treesim.kiwi_rl.physics import DeformableMonitor, FlexContactObserver, NativeFlexContactObserver
@@ -108,6 +147,7 @@ def run_case(args, case, dt, backend):
         mesh_count=args.count, vertices=model.nflexvert, dofs=model.nv, worlds=worlds,
         minimum_volume_ratio=1., max_penetration_m=0., max_hand_penetration_m=0., peak_contact_force_N=0.,
         flex_contacts=0, flex_flex_contacts=0, mesh_flex_contacts=0,
+        penetration_worlds_sampled=worlds,
         scene_sha256=hashlib.sha256(xml.encode()).hexdigest(),
         source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         scope='Backend contact screen; not full-robot, calibrated tissue, or training-readiness validation',
@@ -127,6 +167,10 @@ def run_case(args, case, dt, backend):
     bilateral_samples = np.zeros(worlds)
     hold_samples = 0
     post_release_load = np.zeros(worlds)
+    post_ground_load = np.zeros(worlds)
+    first_post_ground_contact_s = np.full(worlds, np.nan)
+    post_ground_snapshots = [None] * worlds
+    post_release_snapshots = [None] * worlds
 
     def jaw_target(t):
         if case == 'grip' and t >= 2.8:
@@ -135,9 +179,10 @@ def run_case(args, case, dt, backend):
         u = float(np.clip(t - .2, 0., 1.))
         return -1. + u * u * (3. - 2. * u)
 
-    def observe(t, contact_report, positions):
+    def observe(t, contact_report, positions, check_state=True):
         nonlocal hold_origin, hold_samples
-        sample(model, data, rest, metrics)
+        if check_state:
+            sample(model, data, rest, metrics)
         if case != 'grip':
             return
         loads = np.asarray(contact_report['jaw_palm_load_N'])[:, 0, :2]
@@ -150,6 +195,7 @@ def run_case(args, case, dt, backend):
             hold_samples += 1
         if t >= 3.6:
             np.maximum(post_release_load, np.max(loads, axis=1), out=post_release_load)
+        update_post_ground_contact(contact_report, t, loads, post_ground_load, first_post_ground_contact_s)
 
     started = time.monotonic()
     if backend == 'gpu':
@@ -194,8 +240,24 @@ def run_case(args, case, dt, backend):
                 metrics['gpu_numerical'] = monitor.check()
                 contact_report = observer.check()
                 if k % sample_blocks == 0 or k == steps // block - 1:
-                    mjw.get_data_into(data, model, gpu_data, world_id=0)
-                    observe((k + 1) * block * dt, contact_report, gpu_data.flexvert_xpos.numpy())
+                    for world_id in range(worlds):
+                        mjw.get_data_into(data, model, gpu_data, world_id=world_id)
+                        sample(model, data, rest, metrics)
+                        report_ground = int(contact_report['first_ground_step'][world_id][0])
+                        current_load = float(np.max(np.asarray(contact_report['jaw_palm_load_N'])[world_id, 0, :2]))
+                        if report_ground >= 0 and int(contact_report['steps'][world_id]) > report_ground:
+                            post_ground_snapshots[world_id] = maybe_replace_snapshot(
+                                post_ground_snapshots[world_id], current_load,
+                                contact_snapshot(model, data, world_id=world_id, time_s=(k + 1) * block * dt,
+                                                 jaw_target=jaw_target(t), ground_step=report_ground,
+                                                 load_n=current_load, phase='post_ground'))
+                        if (k + 1) * block * dt >= 3.6:
+                            post_release_snapshots[world_id] = maybe_replace_snapshot(
+                                post_release_snapshots[world_id], current_load,
+                                contact_snapshot(model, data, world_id=world_id, time_s=(k + 1) * block * dt,
+                                                 jaw_target=jaw_target(t), ground_step=report_ground,
+                                                 load_n=current_load, phase='post_release'))
+                    observe((k + 1) * block * dt, contact_report, gpu_data.flexvert_xpos.numpy(), check_state=False)
             wp.synchronize()
             metrics['integration_seconds'] = time.monotonic() - run_start
             metrics['finite_all_worlds'] = bool(np.isfinite(gpu_data.qpos.numpy()).all() and np.isfinite(gpu_data.qvel.numpy()).all())
@@ -218,8 +280,25 @@ def run_case(args, case, dt, backend):
                 if any(w.number for w in data.warning):
                     raise RuntimeError('MuJoCo warning during a CPU substep')
             if k % sample_blocks == 0 or k == steps // block - 1:
+                current_report = observer.check()
+                current_load = float(np.max(np.asarray(current_report['jaw_palm_load_N'])[0, 0, :2]))
+                ground_step = int(current_report['first_ground_step'][0][0])
+                if ground_step >= 0 and current_report['steps'][0] > ground_step:
+                    post_ground_snapshots[0] = maybe_replace_snapshot(
+                        post_ground_snapshots[0], current_load,
+                        contact_snapshot(model, data, world_id=0, time_s=(k + 1) * block * dt,
+                                         jaw_target=jaw_target(t), ground_step=ground_step,
+                                         load_n=current_load, phase='post_ground'))
+                if (k + 1) * block * dt >= 3.6:
+                    post_release_snapshots[0] = maybe_replace_snapshot(
+                        post_release_snapshots[0], current_load,
+                        contact_snapshot(model, data, world_id=0, time_s=(k + 1) * block * dt,
+                                         jaw_target=jaw_target(t), ground_step=ground_step,
+                                         load_n=current_load, phase='post_release'))
                 observe((k + 1) * block * dt, observer.check(), data.flexvert_xpos[None])
         metrics['integration_seconds'] = time.monotonic() - run_start
+    if backend == 'gpu':
+        mjw.get_data_into(data, model, gpu_data, world_id=0)
     contacts = observer.check()
     metrics['contacts'] = contacts
     metrics['simulated_seconds'] = float(data.time)
@@ -237,9 +316,14 @@ def run_case(args, case, dt, backend):
         ground = np.asarray(contacts['first_ground_step'])[:, 0]
         fraction = bilateral_samples / max(hold_samples, 1)
         metrics.update(hold_samples=hold_samples, sampled_bilateral_fraction=fraction.tolist(),
-                       max_hold_motion_m=max_hold_motion.tolist(), post_release_jaw_load_N=post_release_load.tolist())
+                       max_hold_motion_m=max_hold_motion.tolist(), post_release_jaw_load_N=post_release_load.tolist(),
+                       post_ground_jaw_load_N=post_ground_load.tolist(),
+                       first_post_ground_contact_s=first_post_ground_contact_s.tolist(),
+                       worst_post_ground_contacts=post_ground_snapshots,
+                       worst_post_release_contacts=post_release_snapshots)
         metrics['passed'] &= bool(hold_samples and np.all(fraction >= .95) and np.all(max_hold_motion < .02)
                                  and np.all(ground * dt >= 2.8) and np.all(post_release_load < .01)
+                                 and np.all(post_ground_load < .01)
                                  and metrics['max_hand_penetration_m'] < .001)
     return metrics
 

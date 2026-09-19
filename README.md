@@ -708,6 +708,104 @@ balance, safe fruit handling, backend equivalence, or an overnight-ready trainer
 The current numerical profiles still need complete validation, including force
 spikes, release behavior and timestep sensitivity. Failed reports are retained.
 
+Full-scene bring-up is separate from those hand fixtures. The legacy exporter
+can now retain a floating base and compliant canopy, restore visual foliage,
+and record attachment markers plus the imported joint/effort contract. The
+isolated assembler replaces the rigid fruit with independent full-DOF flex
+meshes and collidable segmented stalks. Stem point connections attach to the
+canopy and fruit material nodes, never to the hand. Asset hashes and initial
+body-frame comparisons guard scene transfer.
+
+Export with the unchanged legacy simulation environment:
+
+```bash
+python scripts/export_training_scene.py --relic /path/to/relic \
+  --output /path/to/new-base-scene --fruit-count 1
+```
+
+Assemble and check with the isolated deformable environment:
+
+```bash
+python scripts/export_training_scene.py --base-scene /path/to/new-base-scene \
+  --output /path/to/new-flex-scene
+python scripts/check_training_scene.py --scene /path/to/new-flex-scene \
+  --output /path/to/new-diagnostic --backend gpu --worlds 2 --seconds .1 --render
+```
+
+These are bring-up commands, not the overnight launcher. `--gait-checkpoint`
+accepts a checksum-verified CPU RELIC import for pretrained inference. Both
+native and device torque controllers preserve the original raw R84 units,
+absolute arm targets, and knee effort/speed limits. The initial gait precision
+profile uses CPU FP32 inference; GPU physics and sensing remain batched.
+
+### Compact physical reaching experiment
+
+`scripts/train_physical_smoke.py` connects the GPU deformable scene to a compact
+RGB-D/R84 recurrent actor and critic. It applies seven bounded arm/jaw target
+increments, learns from measured TCP-to-fruit progress, and saves both policy
+and optimizer state. Fruit geometry supplies training rewards and optional teacher labels; the actor
+receives camera pixels and robot measurements. This is a reaching experiment,
+not a completed grasp, detachment, basket-deposit or multi-fruit policy.
+
+```bash
+python scripts/train_physical_smoke.py --scene /path/to/flex-scene \
+  --contact-gate /path/to/gpu-grip-report.json \
+  --gait-checkpoint /path/to/verified-g1-cpu.pt \
+  --output /path/to/new-reach-run --worlds 1 --steps 8 --updates 2
+```
+
+For a short imitation warm start, add `--algorithm imitation
+--imitation-epochs 100 --steps 32`. A scripted Jacobian teacher generates motor
+targets through the same controller and physical scene. Its simulator state is
+used for training labels only. The student still receives RGB-D and R84, and
+the before/after evaluations run without the teacher. `teacher_improved` checks
+measured progress and absence of a fall; a lower imitation loss alone does not
+prove a useful reach. One seed and one fruit do not establish generalization.
+Changing algorithms on resume requires `--allow-algorithm-change`.
+For a new scene, `--initialize-from /path/to/checkpoint.pt` transfers only student
+weights and starts a fresh optimizer. It records the source model hash; it is
+not a resume of the old scene.
+
+Use the isolated GPU environment. Start with one GPU world. Repeated episodes
+have produced nonfinite states after cached resets, including single-world runs;
+the trainer therefore creates a fresh simulation for each episode. The tested
+hackathon profile also uses `--static-canopy`, a count-5 fruit mesh, the Newton
+solver, 20 microsecond physics steps and 2 ms contact response. Use
+`--stem-segments 1` when assembling the hackathon scene. The four-segment stem
+failed near-fruit motion even after increasing collision buffers; the one-segment
+replay completed 32 control steps with no numerical failure or fall. It preserves
+stalk length and total mass. The robot, fruit and stalk remain dynamic. The contact report must match the scene's
+solver, timestep, contact settings and fruit mesh count. The explicit hackathon
+screen permits up to 2 mm sampled hand/fruit overlap, retaining the original
+strict result and any sampling limits. It still rejects numerical failures,
+failed retention and failed release. This is an engineering approximation,
+not fruit-material calibration.
+
+Each update checks changed vision and action weights without an entropy bonus,
+then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
+restores optimizer and RNG state and starts a fresh episode in a new output
+directory. Mid-contact replay is not implemented. The final `report.json`
+contains deterministic sensor-only evaluation and `policy-camera.png` shows
+the actual policy input. Updated virtual camera mounts include a body-mounted
+0.55 m camera mast to keep the basket out of view; no hardware calibration is
+implied. The legacy `train_kiwi.py` remains a separate scaffold.
+
+Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
+one physical teacher rollout with 100 supervised passes. On the one-segment
+stem scene, `physical-imitation-eval-stem1-001` replayed that student without a
+teacher: mean TCP-to-fruit-vertex distance fell from about 0.82 m to 0.061 m,
+then rose to 0.507 m. This is an approach with overshoot, not a grasp or a held
+reach. Minimum element-volume ratio was 0.922 and the robot did not fall.
+The old four-segment evaluations remain archived as numerical failures.
+`scripts/diagnose_physical_reach.py` saves actual GPU states for rendering and
+records both checkpoint and evaluated scene hashes when transferring weights.
+
+The GPU RGB-D rig reads metric planar depth directly. The renderer's public
+`get_depth` utility is display-normalized and clipped, so it must not be used as
+metric sensor depth. Tests cover a plane beyond one metre, inactive camera-ID
+mapping, range masks, and frame-buffer ownership. Camera mounts and range
+parameters remain virtual engineering assumptions, not hardware calibration.
+
 MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
 miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by
 normalizing mesh coordinates while verifying unchanged world-space surfaces,
