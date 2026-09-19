@@ -1,7 +1,7 @@
 """Seeded kiwi pergola geometry, independent of the physics runtime.
 
-Order 0 is posts/beams, order 1 is support wires, and order 2 is fruiting
-canes. Tied cane sections are fixed; free tips use the existing compliant
+Order 0 is posts/beams, order 1 is support wires, order 2 is trained
+canes, and order 3 is lateral fruiting shoots. Tied cane sections are fixed; free tips use the existing compliant
 joints. All connections use parent endpoints, matching TreeSkeleton's contract.
 """
 from dataclasses import dataclass
@@ -140,8 +140,19 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
                         # Only the final 0.35 m horizontal span is compliant.
                         # Tie/wire compliance is an engineering simplification.
                         tx = ex - side * .35
-                        tied = add(wire, [tx, wire_y, canopy(tx, wire_y)],
-                                   radius, 2, supported=True)
+                        tied = wire
+                        # Lateral shoots bridge the 1.25 m space between canes.
+                        # Fixed lateral joints approximate a mature trellis-supported
+                        # canopy; their flexibility is not calibrated.
+                        for fraction_x in np.linspace(.2, 1., 5):
+                            sx = xs[xi] + (tx-xs[xi]) * fraction_x
+                            tied = add(tied, [sx, wire_y, canopy(sx, wire_y)],
+                                       radius, 2, supported=True)
+                            for lateral_side in (-1, 1):
+                                sy = wire_y + lateral_side * rng.uniform(.72, .88)
+                                lx = sx + rng.uniform(-.10, .10)
+                                add(tied, [lx, sy, canopy(lx, sy)], radius*.45,
+                                    3, supported=True)
                         add(tied, [ex, wire_y, canopy(ex, wire_y)], radius, 2)
         previous_end = beam
         direction *= -1
@@ -157,7 +168,7 @@ def place_fruit(skeleton: TreeSkeleton, params: FruitParams,
     if params.max_count < 0:
         raise ValueError("fruit count must be nonnegative")
     rng = np.random.default_rng(seed + 4242)
-    candidates = [(s, t) for s in skeleton if s.order == 2 for t in (0.35, 0.80)]
+    candidates = [(s, t) for s in skeleton if s.order == 3 for t in (0.25, 0.55)]
     rng.shuffle(candidates)
     out = []
     for seg, t in candidates[:params.max_count]:

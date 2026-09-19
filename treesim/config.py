@@ -357,6 +357,7 @@ class RenderParams:
 @dataclass
 class FoliageParams:
     enabled: bool = False
+    pergola: bool = False             # upward-facing blades on a trained canopy
     leaves_per_terminal: int = 3
     min_order_for_leaves: int = 3      # only twigs at/after this branch order
     # Apple leaf blade ~4-13 cm long x 3-7 cm wide, elliptic-ovate, L:W ~1.7:1

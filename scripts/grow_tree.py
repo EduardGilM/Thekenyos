@@ -130,6 +130,7 @@ def make_config(args) -> TreeConfig:
         # Kiwi geometry/mass/stem length are selected by the material sampler.
         cfg.fruit.joint = "free"
         cfg.fruit.colors = ((0.39, 0.27, 0.12), (0.48, 0.34, 0.17))
+        cfg.foliage.pergola = True
         cfg.foliage.min_order_for_leaves = 2
         cfg.foliage.leaf_length = 0.22
         cfg.foliage.leaf_width = 0.17
@@ -226,7 +227,7 @@ def parse_args():
     fo.add_argument("--foliage-physics", action="store_true",
                    help="leaves flutter on their own bodies (EXPENSIVE: +1 body/leaf, ~5x slower)")
     fo.add_argument("--leaves", type=int, default=None,
-                   help="explicit leaves-per-twig (overrides --foliage-density's leaf count)")
+                   help="leaf count override (pergola: per 2.2 m of shoot; apple: per twig)")
 
     ap = p.add_argument_group("fruit")
     ap.add_argument("--apples", action="store_true",

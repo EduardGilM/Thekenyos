@@ -88,7 +88,8 @@ LEAF_SIZE_CLASSES = (0.72, 1.0, 1.35)
 
 def leaf_meshes(fp: FoliageParams):
     """One shared blade mesh per size class for this config's leaf size."""
-    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s)
+    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s,
+                      **(dict(fold=0.10, curl=0.08, droop=0.16, nseg=10) if fp.pergola else {}))
             for s in LEAF_SIZE_CLASSES]
 
 
@@ -119,6 +120,9 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
         nleaf = (fp.leaves_per_terminal
                  if seg.is_terminal or seg.supported
                  else max(1, fp.leaves_per_terminal // 2))
+        if fp.pergola:
+            # Density scales with shoot length, not the number of support ties.
+            nleaf = max(1, round(fp.leaves_per_terminal * seg.length / 2.2))
         for k in range(nleaf):
             # distribute along the twig and around it (phyllotaxis ~137.5 deg)
             t = (k + 1) / (nleaf + 1)
@@ -129,6 +133,16 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
             Ur = _rodrigues(U, H, roll)
             outdir = _rodrigues(H, Lr, pitch)          # leaf points away from twig
             Uo = _rodrigues(Ur, Lr, pitch)
+            if fp.pergola:
+                # Local blade is XZ; its +Y normal faces the sky. The measured
+                # pergola mean inclination is ~33 degrees (canopy study, 1991).
+                azimuth = np.arctan2(H[1], H[0]) + (-1 if k % 2 else 1) * rng.uniform(0.7, 1.6)
+                tilt = np.deg2rad(np.clip(rng.normal(33, 12), 5, 60))
+                outdir = np.array([np.cos(azimuth)*np.cos(tilt),
+                                   np.sin(azimuth)*np.cos(tilt), np.sin(tilt)])
+                Lr = np.cross(np.array([0., 0., 1.]), outdir)
+                Lr /= np.linalg.norm(Lr)
+                Uo = np.cross(outdir, Lr)
             jitter = 1.0 + rng.normal(0, 0.15)
             out.append(LeafPlacement(
                 parent_seg=seg.index,

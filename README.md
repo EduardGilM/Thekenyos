@@ -707,3 +707,16 @@ available; see the [upstream documentation](docs/orchardbench-upstream.md) and
 [Apache-2.0 license](LICENSE). RELIC assets have separate terms. Do not copy
 external model weights, robot meshes or research PDFs into this repository
 without checking their licenses.
+
+### Dense overhead canopy preview
+
+Pergola blades face upward with varied inclination, shallow folds, and alternating
+azimuth. Lateral shoots fill the spaces between trained canes; fruit hangs from
+these shoots. The 1991 study [Architecture of a kiwifruit canopy](https://doi.org/10.1080/01140671.1991.10421807)
+reports a mean leaf inclination of 33 degrees. Shoot spacing, inclination spread,
+and fixed lateral support remain scene assumptions, not calibrated plant mechanics.
+Unlike the old 3 x 4 m bay at commit 49fa795, the plantation retains its 5 m post grid.
+Leaf count now scales with shoot length, so adding support ties cannot inflate density.
+
+Use --preset pergola --pergola-rows 5 --pergola-columns 4 --seed 42
+--foliage-density 2 --leaves 40 --fruit-count 192 --terrain --terrain-seed 42.

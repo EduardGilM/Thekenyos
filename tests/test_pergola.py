@@ -58,7 +58,7 @@ class PergolaTest(unittest.TestCase):
                                       [f.attach for f in place_fruit(a, fp, seed=42)])
         centers = []
         for f in fruit:
-            self.assertEqual(a[f.parent_seg].order, 2)
+            self.assertEqual(a[f.parent_seg].order, 3)
             extent = f.radius + f.half_height
             center = f.attach - [0, 0, fp.stem_length + extent]
             self.assertLess(center[2] + extent, 1.6)
@@ -68,12 +68,10 @@ class PergolaTest(unittest.TestCase):
             self.assertGreater(center[1], a.bounds()[0][1])
             self.assertLessEqual(center[1], a.bounds()[1][1])
             centers.append(center)
-        # Conservative bounding-sphere separation also proves capsule pairs
-        # do not intersect in their initial pose.
         self.assertTrue(np.isfinite(centers).all())
         fp.max_count = 10_000
         fruit = place_fruit(a, fp, seed=42)
-        self.assertEqual({a[f.parent_seg].supported for f in fruit}, {False, True})
+        self.assertTrue(all(a[f.parent_seg].order == 3 for f in fruit))
         fp.max_count = 3
         self.assertEqual(len(place_fruit(a, fp)), 3)
         fp.max_count = 0
@@ -81,6 +79,23 @@ class PergolaTest(unittest.TestCase):
         fp.max_count = -1
         with self.assertRaises(ValueError):
             place_fruit(a, fp)
+
+    def test_pergola_leaf_normals_and_lateral_coverage(self):
+        params = preset('pergola')
+        params.pergola_rows, params.pergola_columns = 5, 4
+        skel = generate(params, seed=42)
+        leaves = place_leaves(skel, FoliageParams(
+            pergola=True, leaves_per_terminal=40, min_order_for_leaves=2), seed=42)
+        for leaf in leaves:
+            q, w = leaf.frame[:3], leaf.frame[3]
+            y = np.array([0., 1., 0.])
+            normal = y + 2*np.cross(q, np.cross(q, y) + w*y)
+            self.assertGreaterEqual(normal[2], .49)
+        laterals = [s for s in skel if s.order == 3]
+        self.assertTrue(laterals)
+        self.assertGreater(min(s.length for s in laterals), .7)
+        # Shoots cross the open stripes between the old three cane lines.
+        self.assertGreater(max(abs(s.axis[1]) for s in laterals), .8)
 
     def test_rigid_pergola_still_has_free_fruit(self):
         try:
