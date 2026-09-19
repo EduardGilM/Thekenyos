@@ -92,6 +92,11 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 0.9, 'slip_m': 0.15, 'max_load_N': 12.0, 'retained': False},
         ], slip_ok_m=0.04, load_limit_n=15.0)
         self.assertAlmostEqual(tied['close_frac'], 0.9)
+        dumped = select_hold_close([
+            {'close_frac': 0.4, 'slip_m': 0.10, 'max_load_N': 2.0, 'retained': False},
+            {'close_frac': 0.8, 'slip_m': 0.14, 'max_load_N': 10.0, 'retained': False},
+        ], slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(dumped['close_frac'], 0.8)
         with self.assertRaises(ValueError):
             select_hold_close([])
 

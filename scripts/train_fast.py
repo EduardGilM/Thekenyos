@@ -126,6 +126,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
         carry['memory'] = torch.zeros(runtime.worlds, 64, device='cuda:0')
         carry['reset'] = torch.ones(runtime.worlds, device='cuda:0', dtype=torch.bool)
         carry['rgbd'] = runtime.pixels().clone()
+        carry.pop('teacher_mask', None)
     memory, reset, rgbd = carry['memory'], carry['reset'], carry['rgbd']
     memory0 = memory.clone()
     recovered_total = 0
@@ -142,9 +143,20 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             mean, logstd, value, memory = policy(rgbd, r84, memory)
             raw = mean if deterministic else mean + logstd.exp() * torch.randn_like(mean)
             if mix_prob > 0.0:
-                mix_mask = torch.rand(runtime.worlds, device=raw.device) < mix_prob
-                raw = mix_privileged_actions(raw, runtime.privileged_deposit_action(), mix_mask)
-                teacher_used += int(mix_mask.sum().item())
+                # Persist the teacher per world across the chunk so a deposit
+                # is not interrupted by per-step Bernoulli flicker. Resample
+                # only on reset. mix=1.0 keeps every world on the teacher.
+                mask = carry.get('teacher_mask')
+                if mask is None:
+                    mask = torch.ones(runtime.worlds, dtype=torch.bool, device=raw.device)
+                if mix_prob >= 1.0:
+                    mask = torch.ones(runtime.worlds, dtype=torch.bool, device=raw.device)
+                else:
+                    mask = torch.where(
+                        reset, torch.rand(runtime.worlds, device=raw.device) < mix_prob, mask)
+                carry['teacher_mask'] = mask
+                raw = mix_privileged_actions(raw, runtime.privileged_deposit_action(), mask)
+                teacher_used += int(mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
             base, arm = _split_action(raw)
             runtime.set_base_commands(base.contiguous())
@@ -448,6 +460,7 @@ def run(args):
                   easy=easy,
                   teacher_mix=teacher_mix,
                   teacher_horizon_updates=int(EASY_PRESET['teacher_horizon_updates']) if easy else 0,
+                  teacher_anneal_after=-1,
                   shaping_coef=shaping_coef,
                   weld=False,
                   eval_profile=eval_profile,
@@ -516,6 +529,7 @@ def run(args):
         best_distance = baseline['evaluation/mean_closest_distance_m']
         best_checkpoint = str(last_checkpoint)
         carry = {}
+        teacher_anneal_after = None
         apply_stage(runtime, stage, numpy_rng)
         for iteration in range(args.updates):
             began = time.monotonic()
@@ -523,7 +537,11 @@ def run(args):
                 far_frac = easy_start_far_frac(iteration)
                 start_info = runtime.set_easy_progress(far_frac, numpy_rng)
                 config['easy_far_frac'] = start_info['easy_far_frac']
-                mix = easy_teacher_mix(iteration, start_mix=teacher_mix)
+                if teacher_anneal_after is None:
+                    mix = float(teacher_mix)
+                else:
+                    mix = easy_teacher_mix(
+                        iteration, start_mix=teacher_mix, anneal_after=teacher_anneal_after)
             else:
                 start_info = {}
                 mix = teacher_mix
@@ -586,6 +604,11 @@ def run(args):
                 load = torch.stack([r['hand_load_N'] for r in rows])
                 metrics['hand_load_mean_N'] = float(load.mean())
                 metrics['hand_load_max_N'] = float(load.max())
+            if easy and teacher_anneal_after is None and int(metrics['harvest_successes']) >= 8:
+                teacher_anneal_after = iteration + 1
+                config['teacher_anneal_after'] = teacher_anneal_after
+            metrics['teacher_anneal_after'] = (
+                -1 if teacher_anneal_after is None else int(teacher_anneal_after))
             del rows, bootstrap
             promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:

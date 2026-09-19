@@ -747,14 +747,10 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         if easy:
             pocket = grasp_pocket_world_m(model, data, tcp_site)
             data.qpos[qposadr:qposadr + 3] = pocket
-            data.qpos[int(controller.qids[18])] = opened
-            controller.targets[18] = opened
-            # Teacher (GPU) slews to hold_close_frac; CPU student clips start open.
-            if hold_close_frac is not None:
-                frac = float(hold_close_frac)
-                if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
-                    raise ValueError('hold_close_frac must be finite in [0, 1]')
-            hold = None
+            frac = 0.75 if hold_close_frac is None else float(hold_close_frac)
+            if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+                raise ValueError('hold_close_frac must be finite in [0, 1]')
+            hold = jaw_hold_q(frac, opened, closed)
         else:
             tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
             data.qpos[qposadr:qposadr + 3] = tcp

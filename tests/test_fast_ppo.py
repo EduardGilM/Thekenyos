@@ -128,6 +128,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('basket_distance_mean_m', run_src)
         self.assertIn('easy_far_frac', run_src)
         self.assertIn('easy_teacher_mix', run_src)
+        self.assertIn('teacher_anneal_after', run_src)
+        self.assertIn('teacher_mask', collect_src)
         self.assertIn('easy_hold_close_mean', run_src)
         self.assertIn('hold_close_frac', run_src)
         self.assertIn('grasp_local_m', run_src)

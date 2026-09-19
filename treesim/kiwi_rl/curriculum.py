@@ -340,11 +340,12 @@ def easy_start_far_frac(update_index, horizon=None):
     return float(min(1.0, update_index / float(horizon)))
 
 
-def easy_teacher_mix(update_index, start_mix=None, horizon=None):
-    """Linearly drop privileged mix so the student must deposit before eval.
+def easy_teacher_mix(update_index, start_mix=None, horizon=None, anneal_after=0):
+    """Hold privileged mix, then drop it linearly so eval is unassisted.
 
-    Eval still forces teacher_mix=0. A constant 0.4 mix through update 100
-    left A eval harvest at 0 with fruit already over the opening.
+    Eval still forces teacher_mix=0. Easy10 annealed from update 0 while
+    harvest stayed 0 and ground contact rose as mix fell; keep start_mix
+    until ``anneal_after`` (the first update after deposits are seen).
     """
     if start_mix is None:
         start_mix = EASY_PRESET['teacher_mix']
@@ -352,12 +353,16 @@ def easy_teacher_mix(update_index, start_mix=None, horizon=None):
         horizon = EASY_PRESET['teacher_horizon_updates']
     if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 0:
         raise ValueError('update_index must be a non-negative integer')
+    if not isinstance(anneal_after, int) or isinstance(anneal_after, bool) or anneal_after < 0:
+        raise ValueError('anneal_after must be a non-negative integer')
     start_mix = float(start_mix)
     if not np.isfinite(start_mix) or not 0.0 <= start_mix <= 1.0:
         raise ValueError('start_mix must be finite in [0, 1]')
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
         raise ValueError('horizon must be a positive integer')
-    return float(start_mix * max(0.0, 1.0 - update_index / float(horizon)))
+    if update_index < anneal_after:
+        return float(start_mix)
+    return float(start_mix * max(0.0, 1.0 - (update_index - anneal_after) / float(horizon)))
 
 
 def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: int | None = None) -> bool:
