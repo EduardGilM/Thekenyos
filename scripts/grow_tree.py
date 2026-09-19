@@ -109,15 +109,22 @@ def make_config(args) -> TreeConfig:
         cfg.foliage.set_density(args.foliage_density)
     elif args.foliage:
         cfg.foliage.set_density(0.6)
+    elif args.preset == "pergola":
+        cfg.foliage.set_density(1.0)
     if args.leaves is not None:                 # explicit per-twig count overrides the dial
         cfg.foliage.leaves_per_terminal = args.leaves
     cfg.foliage.physics = args.foliage_physics
 
     cfg.fruit.enabled = args.apples
-    cfg.fruit.max_count = args.apple_count
+    cfg.fruit.max_count = args.apple_count if args.apple_count is not None else 40
     if args.preset == "pergola":
         cfg.lsystem.target_height = args.canopy_height
+        cfg.lsystem.pergola_rows = args.pergola_rows
+        cfg.lsystem.pergola_columns = args.pergola_columns
+        cfg.lsystem.pergola_spacing = args.pergola_spacing
         cfg.fruit.enabled = True
+        if args.apple_count is None:
+            cfg.fruit.max_count = 600
         # Initial geometry/material assumptions; stem mechanics remain the
         # upstream proxy until measured kiwi data is fitted.
         # Kiwi geometry/mass/stem length are selected by the material sampler.
@@ -129,6 +136,13 @@ def make_config(args) -> TreeConfig:
 
     cfg.physics.terrain = args.terrain
     cfg.physics.terrain_amplitude = args.terrain_amplitude
+    cfg.physics.terrain_wavelength = args.terrain_wavelength
+    cfg.physics.terrain_extent = args.terrain_extent
+    cfg.physics.terrain_seed = args.terrain_seed
+    cfg.physics.terrain_kind = args.terrain_kind
+    if args.terrain and args.preset == "pergola" and args.terrain_kind == "noise" and args.terrain_seed is None:
+        import random
+        cfg.physics.terrain_seed = random.SystemRandom().randrange(2**31)
     cfg.physics.mj_solver = args.mj_solver
 
     cfg.robot.enabled = args.robot
@@ -137,9 +151,33 @@ def make_config(args) -> TreeConfig:
     return cfg
 
 
+def _unpin_host_allocs_for_cpu() -> None:
+    """On CPU-only machines there is no CUDA driver, so the GL viewer's
+    pinned host allocations (wp.empty/wp.array(..., pinned=True)) fail.
+    Pinning is a DMA optimisation only, so make Warp's pinned CPU allocator
+    fall back to regular host memory there."""
+    if wp.get_device().is_cuda:
+        return
+    from warp._src.context import CpuPinnedAllocator, runtime
+
+    def allocate(self, size_in_bytes):
+        ptr = runtime.core.wp_alloc_host(size_in_bytes, None)
+        if not ptr:
+            raise RuntimeError(
+                f"Failed to allocate {size_in_bytes} bytes on device '{self.device}'")
+        return ptr
+
+    def deallocate(self, ptr, size_in_bytes):
+        runtime.core.wp_free_host(ptr)
+
+    CpuPinnedAllocator.allocate = allocate
+    CpuPinnedAllocator.deallocate = deallocate
+
+
 def make_viewer(args):
     import newton.viewer as V
     if args.viewer == "gl":
+        _unpin_host_allocs_for_cpu()
         return V.ViewerGL(headless=args.headless, paused=args.paused)
     if args.viewer == "rtx":
         return V.ViewerRTX(headless=args.headless, paused=args.paused, num_frames=args.frames)
@@ -158,6 +196,12 @@ def parse_args():
                    help="apple = default; pergola = hanging kiwis; ta-td = ABoP ternary classes")
     g.add_argument("--canopy-height", type=float, default=1.6,
                    help="pergola support/cane centreline height above level ground [m]")
+    g.add_argument("--pergola-rows", type=int, default=45,
+                   help="number of structural post rows (default 45, ~220 m field length)")
+    g.add_argument("--pergola-columns", type=int, default=40,
+                   help="posts along each row (default 40, ~195 m field width)")
+    g.add_argument("--pergola-spacing", type=float, default=5.0,
+                   help="structural row/post spacing [m], constrained to 4.5-5.0")
     g.add_argument("--depth", "-n", type=int, default=-1,
                    help="recursion depth (-1 = preset default; apple~4, ternary~5)")
     g.add_argument("--mode", default="deformable", choices=["rigid", "deformable"])
@@ -187,9 +231,10 @@ def parse_args():
     ap = p.add_argument_group("fruit")
     ap.add_argument("--apples", action="store_true",
                     help="spawn apples on spurs; they detach when pulled hard enough")
-    ap.add_argument("--apple-count", "--fruit-count", type=int, default=40,
+    ap.add_argument("--apple-count", "--fruit-count", type=int, default=None,
                     help="how many apples (each is a free body and is the MAIN sim cost; "
-                         "foliage and --break are nearly free). ~60 = lush/slow, ~20 = fast")
+                        "foliage and --break are nearly free). Defaults to 40 for apple "
+                        "and 600 for pergola")
 
     ro = p.add_argument_group("robot")
     ro.add_argument("--robot", action="store_true",
@@ -213,12 +258,20 @@ def parse_args():
 
     t = p.add_argument_group("terrain")
     t.add_argument("--terrain", action="store_true",
-                   help="bumpy outdoor ground (value-noise heightfield): gentle, "
-                        "driveable, randomized per seed, flattened under the tree. "
-                        "One global static shape, so multi-env batching is unaffected.")
+                   help="procedural noise collision heightfield; kiwi ground has no "
+                        "post pads or artificial mounds; apple keeps its flat trunk area")
+    t.add_argument("--terrain-kind", choices=["noise", "orchard"], default="noise",
+                   help="noise = smooth procedural terrain (default); orchard = legacy "
+                        "grassed aisles, furrows and slope (pergola only)")
     t.add_argument("--terrain-amplitude", type=float, default=0.05,
-                   help="max bump height [m] (default 0.05; keep < ~0.08 or the "
-                        "robot chassis visibly clips through crests)")
+                   help="noise terrain height range [m] above a 4 mm offset (default 0.05)")
+    t.add_argument("--terrain-wavelength", type=float, default=1.8,
+                   help="noise terrain dominant bump spacing [m] (default 1.8)")
+    t.add_argument("--terrain-extent", type=float, default=None,
+                   help="noise ground half-extent [m]; default fits the plantation, minimum 14")
+    t.add_argument("--terrain-seed", type=int, default=None,
+                   help="fixed terrain seed for replay; omitted picks fresh random kiwi "
+                        "noise each launch (orchard/apple use the scene --seed)")
 
     r = p.add_argument_group("render/sim")
     r.add_argument("--viewer", default="gl", choices=["gl", "rtx", "usd", "null"],
@@ -273,12 +326,29 @@ def parse_args():
                         "ground already lands falling debris, so usually leave this OFF)")
     r.add_argument("--device", default=None)
     r.add_argument("--max-bodies", type=int, default=60000)
+    r.add_argument("--snapshot", help="save the final GL frame as a PNG")
+    r.add_argument("--video", help="record GL frames as a 30 fps MP4 (requires ffmpeg)")
+    r.add_argument("--camera-orbit", type=float, default=0.,
+                   help="scripted camera orbit in degrees per simulated second")
     args = p.parse_args()
+    import math
+    if args.frames <= 0 or args.substeps <= 0:
+        p.error("--frames and --substeps must be positive")
+    if (args.video or args.snapshot) and (args.viewer != "gl" or args.no_render):
+        p.error("--video and --snapshot require --viewer gl and rendering enabled")
+    if not math.isfinite(args.camera_orbit):
+        p.error("--camera-orbit must be finite")
+    if args.camera_orbit and args.num_envs != 1:
+        p.error("--camera-orbit currently supports a single environment")
     if args.preset == "pergola":
         if args.auto:
             p.error("--auto uses the apple sphere detector; pergola autonomy is not implemented")
         if args.randomize_envs or args.distinct_geometry:
             p.error("pergola uses --seed; apple-specific batched geometry randomization is unsupported")
+        if not 4.5 <= args.pergola_spacing <= 5.0:
+            p.error("--pergola-spacing must be between 4.5 and 5.0 m")
+        if args.pergola_rows < 2 or args.pergola_columns < 2:
+            p.error("--pergola-rows and --pergola-columns must be at least 2")
     return args
 
 
@@ -294,6 +364,9 @@ def main():
         wp.set_device(args.device)
 
     cfg = make_config(args)
+    if cfg.physics.terrain:
+        terrain_seed = cfg.physics.terrain_seed if cfg.physics.terrain_seed is not None else cfg.seed
+        print(f"[terrain] seed={terrain_seed} (replay with --terrain-seed {terrain_seed})", flush=True)
 
     print(f"[grow_tree] building {args.mode} {args.preset} tree (seed={args.seed}, "
           f"n={cfg.lsystem.n}, num_envs={args.num_envs}"
@@ -355,6 +428,8 @@ def main():
             viewer.set_camera(pos=wp.vec3(*map(float, pos)),
                               pitch=float(math.degrees(math.asin(d[2]))),
                               yaw=float(math.degrees(math.atan2(d[1], d[0]))))
+        elif args.preset == "pergola":
+            viewer.set_camera(pos=wp.vec3(5.8, -7.2, 3.6), pitch=-19., yaw=129.)
         else:
             viewer.set_camera(pos=wp.vec3(2.2 * h, 2.2 * h, 1.1 * h),
                               pitch=-15.0, yaw=-135.0)
@@ -438,6 +513,8 @@ def main():
     for _ in range(max(int(args.warmup), 0)):
         sim.step()
 
+    encoder = None
+    recorded_frame = -1
     try:
         while viewer.is_running() and not (total_frames and frame >= total_frames):
             if viewer.should_step():
@@ -461,12 +538,47 @@ def main():
                         robot_driver.update(viewer)
             if not pickers and wrist_cam is not None:
                 wrist_cam.update(sim.state_0)
+            if args.camera_orbit:
+                import math
+                angle = math.radians(-51. + args.camera_orbit * sim.sim_time)
+                viewer.set_camera(pos=wp.vec3(9.25*math.cos(angle), 9.25*math.sin(angle), 3.6),
+                                  pitch=-19., yaw=math.degrees(angle)+180.)
             sim.render()
+            if args.video and frame % 2 == 0 and frame != recorded_frame:
+                import subprocess
+                pixels = viewer.get_frame().numpy()
+                if encoder is None:
+                    os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
+                    vh, vw = pixels.shape[:2]
+                    encoder = subprocess.Popen([
+                        "ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+                        "-pixel_format", "rgb24", "-video_size", f"{vw}x{vh}",
+                        "-framerate", "30", "-i", "pipe:0", "-an", "-vf", "scale=1280:-2",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                        "-pix_fmt", "yuv420p", "-movflags", "+faststart", args.video,
+                    ], stdin=subprocess.PIPE)
+                encoder.stdin.write(pixels.tobytes())
+                recorded_frame = frame
     except KeyboardInterrupt:
         pass
-    viewer.close()
+    finally:
+        try:
+            if encoder is not None:
+                encoder.stdin.close()
+                if encoder.wait() != 0:
+                    raise RuntimeError("ffmpeg failed")
+            if args.snapshot and frame:
+                from PIL import Image
+                os.makedirs(os.path.dirname(os.path.abspath(args.snapshot)), exist_ok=True)
+                Image.fromarray(viewer.get_frame().numpy()).save(args.snapshot)
+        finally:
+            viewer.close()
 
     import json as _json
+    import numpy as np
+    if not all(np.isfinite(a.numpy()).all() for a in
+               (sim.state_0.body_q, sim.state_0.body_qd, sim.state_0.joint_q, sim.state_0.joint_qd)):
+        raise RuntimeError("Non-finite simulation state")
     if pickers and len(metrics_envs) > 1:
         from treesim.metrics import save_combined
         combined = save_combined(metrics_path, metrics_envs, sim)

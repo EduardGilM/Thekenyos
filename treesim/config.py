@@ -77,6 +77,12 @@ class LSystemParams:
     # [M.9 rootstock caliper / trunk cross-sectional-area data].
     base_radius: float = 0.035    # trunk radius [m] after rescaling
 
+    # Commercial kiwi pergola layout.  Forty columns by forty-five rows at
+    # 5 m centres covers about 4.3 ha before the perimeter allowance.
+    pergola_rows: int = 45
+    pergola_columns: int = 40
+    pergola_spacing: float = 5.0  # structural post/row spacing [m]
+
     # Gaussian domain-randomisation sigma on shape params (paper: sigma=0.1).
     shape_jitter: float = 0.0     # 0 -> deterministic; 0.1 -> paper default
 
@@ -124,7 +130,9 @@ def preset(name: str) -> LSystemParams:
         "td": (36.0, 180.0, 252.0, 1.070, 1.732, 6),
     }
     if name == "pergola":
-        return LSystemParams(kind="pergola", target_height=1.6)
+        return LSystemParams(kind="pergola", target_height=1.6,
+                             pergola_rows=45, pergola_columns=40,
+                             pergola_spacing=5.0)
     if name == "apple":
         # central-leader apple tree; ``n`` is the max branch order (recursion depth)
         return LSystemParams(kind="apple", n=4, target_height=2.6, base_radius=0.055,
@@ -217,7 +225,21 @@ class PhysicsParams:
     # so ~3 cm is a defensible mid proxy for a driveable grassed alley.
     terrain_amplitude: float = 0.03    # max bump height [m] (orchard alley ~1-3 cm)
     terrain_wavelength: float = 1.8    # dominant bump size [m]
-    terrain_extent: float = 14.0       # half-extent of the field [m]
+    terrain_extent: float | None = None       # half-extent of the field [m]
+    terrain_seed: int | None = None
+    terrain_kind: str = "noise"
+    # Kiwi orchard floor (pergola + terrain=True). Apple --terrain keeps the
+    # value-noise field above. Ranges are assumed domain-randomization bounds,
+    # not a measured orchard-floor survey. Wet soil and liner friction remain
+    # explicit calibration gaps.
+    orchard_half_extent_m: float = 15.0
+    orchard_row_pitch_m: float = 2.0   # vine-row / surco spacing; aisle stays on bay centre
+    orchard_cell_m: float = 0.05
+    orchard_slope_deg: tuple = (-4.0, 4.0)
+    orchard_noise_m: tuple = (0.0, 0.04)
+    orchard_rut_depth_m: tuple = (0.0, 0.08)
+    orchard_rut_width_m: tuple = (0.20, 0.60)
+    orchard_friction: tuple = (0.6, 1.3)
     # Soft velocity limiter (anti-blowup): bodies faster than this get a strong
     # braking force (inactive below the caps, so normal physics is untouched).
     # This is what stops a pick-clamp-scale yank on a 5 g twig (the viewer
@@ -372,6 +394,7 @@ class FoliageParams:
 # --------------------------------------------------------------------------- #
 @dataclass
 class FruitParams:
+    kiwi_strength_scale: float = 1.0   # Hayward curve multiplier; 1 = paper mean proxy.
     enabled: bool = False
     min_order: int = 2                  # apples grow on >=2-year-old wood (spurs), outer canopy
     prob_per_spur: float = 0.35         # chance an eligible spur bears fruit
@@ -465,7 +488,9 @@ class RobotParams:
     """
     enabled: bool = False
     position: tuple = (2.4, 0.0)       # base spawn in the env's local frame [m]
+    base_z: float = 0.65               # chassis world z at spawn [m]
     kind: str = "ridgeback"
+    fixed_base: bool = False          # Spot manipulation fixture; walking remains free.
     relic_path: str = ""              # External RELIC checkout (research license).
     basket: bool = False
     basket_mass: float = 1.2           # Prototype assumption, excluding fruit [kg].

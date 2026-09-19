@@ -31,6 +31,8 @@ class Segment:
     # heading, +X = turtle left, +Y = turtle up).  Filled in by the turtle.
     frame: "np.ndarray | None" = None
 
+    supported: bool = False     # secured to a fixed trellis (pergola only)
+
     @property
     def axis(self) -> np.ndarray:
         return self.end - self.start

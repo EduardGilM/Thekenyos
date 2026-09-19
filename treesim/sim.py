@@ -51,11 +51,34 @@ def _make_solver(name, model, *, collisions, iterations, ls_iterations,
         # Kiwi uses native contacts: external Newton ellipsoid contacts failed
         # the stationary-basket retention regression.
         algo_i = {"cg": 1, "newton": 2}.get(str(algo).lower(), 1)
-        return newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
+        solver = newton.solvers.SolverMuJoCo(model, disable_contacts=not collisions,
+                                           use_mujoco_cpu=model.device.is_cpu,
                                            use_mujoco_contacts=native_contacts if collisions else True,
                                            solver=algo_i,
                                            nconmax=nconmax if collisions else None,
                                            njmax=max(8192, nconmax*4) if collisions else 1024)
+        if model.device.is_cpu and native_contacts and collisions:
+            import mujoco
+            # The pinned Newton conversion leaves CPU midphase bounds that
+            # miss Spot jaw meshes: direct geom distance found 28 mm overlap
+            # while mj_collision omitted the pair. Bypass that optimization;
+            # retain native narrowphase and the original collision masks.
+            # See check_hand_contacts.py. Do not use missed contacts as training
+            # data or substitute contact softness for tissue deformation.
+            solver.mj_model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_MIDPHASE)
+            # Legacy rigid-pilot numerical response. The refined native flex
+            # bench uses a shorter contact time; equivalence is NOT established.
+            # These are solver settings, NOT kiwi tissue material parameters.
+            mapping = solver.mjc_geom_to_newton_shape.numpy()[0]
+            bodies = model.shape_body.numpy()
+            for geom, shape in enumerate(mapping):
+                if shape < 0 or bodies[shape] < 0:
+                    continue
+                label = model.body_label[bodies[shape]].rsplit('/', 1)[-1]
+                if label.startswith('apple') or label in ('arm_link_wr1', 'arm_link_jaw', 'arm_link_fngr'):
+                    solver.mj_model.geom_solref[geom] = [.004, 1.]
+                    solver.mj_model.geom_solimp[geom] = [.95, .99, .001, .5, 2.]
+        return solver
     if name == "featherstone":
         return newton.solvers.SolverFeatherstone(model)
     if name == "semiimplicit":
@@ -315,8 +338,47 @@ class Sim:
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
             if self.kiwi_damage is not None:
-                self.solver.update_contacts(self.contacts, self.state_0)
+                if self.model.device.is_cpu:
+                    self._cpu_contacts()
+                else:
+                    self.solver.update_contacts(self.contacts, self.state_0)
                 self.kiwi_damage.apply(self.contacts, self.sim_dt)
+
+    def _cpu_contacts(self):
+        """Newton 1.3 does not expose CPU contacts; copy MuJoCo's solved loads.
+
+        Single-world adapter, with body-local contact points for the viewer.
+        It shares the same damage/oracle kernels as the GPU path.
+        """
+        import mujoco
+        from .builder import _qrot, _qconj
+        m, d, c = self.solver.mj_model, self.solver.mj_data, self.contacts
+        if self.model.world_count != 1 or d.ncon > c.rigid_contact_max:
+            raise RuntimeError('CPU contact adapter requires one world within contact capacity')
+        mapping = self.solver.mjc_geom_to_newton_shape.numpy()[0]
+        if any(w.number for w in d.warning):
+            raise RuntimeError('MuJoCo CPU numerical warning')
+        count = d.ncon
+        c.rigid_contact_count.assign(np.array([count], np.int32))
+        arrays = [c.rigid_contact_shape0, c.rigid_contact_shape1, c.rigid_contact_normal,
+                  c.force, c.rigid_contact_point0, c.rigid_contact_point1]
+        values = [a.numpy() for a in arrays]
+        poses, bodies = self.state_0.body_q.numpy(), self.model.shape_body.numpy()
+        force = np.zeros(6)
+        for i in range(count):
+            contact = d.contact[i]
+            shapes = mapping[contact.geom]
+            if np.any(shapes < 0): raise RuntimeError('Unmapped native contact shape')
+            values[0][i], values[1][i] = shapes
+            frame = contact.frame.reshape(3,3)
+            values[2][i] = frame[0]
+            mujoco.mj_contactForce(m, d, i, force)
+            values[3][i,:3], values[3][i,3:] = frame.T@force[:3], frame.T@force[3:]
+            for side, shape in enumerate(shapes):
+                point = contact.pos + (side-.5)*contact.dist*frame[0]
+                body = bodies[shape]
+                values[4+side][i] = point if body < 0 else _qrot(_qconj(poses[body,3:]), point-poses[body,:3])
+        for array, value in zip(arrays, values): array.assign(value)
 
     def step(self):
         if self._graph is not None:
@@ -356,6 +418,8 @@ class Sim:
             self.breaker.render(self.viewer)   # recolour newly-snapped branches
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        if self.apples is not None and hasattr(self.apples, "render"):
+            self.apples.render(self.viewer, self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
