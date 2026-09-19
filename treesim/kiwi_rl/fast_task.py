@@ -13,6 +13,10 @@ DETACH_FORCE_N = 8.0  # Engineering approximation; not a calibrated stem thresho
 SETTLE_SPEED_M_S = .05
 SETTLE_TIME_S = .5
 JAW_FORCE_LIMIT_N = 15.0
+# The coarse 5 ms rigid solver settles the 36 mm-radius fruit 7–10 mm into
+# the simplified liner. Basket contact is still mandatory; this tolerance
+# only prevents that numerical penetration from resetting the dwell forever.
+FLOOR_CONTAINMENT_TOL_M = .012
 MAX_FRUITS = 5
 FORCE_CHECKS = {
     'source': 'MJWarp efc.force normal constraint rows',
@@ -153,7 +157,7 @@ def _record(
     )
     inside = (wp.abs(local[0] - basket_center[0]) + extent[0] < basket_size[0] / 2. - wall and
               wp.abs(local[1] - basket_center[1]) + extent[1] < basket_size[1] / 2. - wall and
-              local[2] - extent[2] >= basket_center[2] + wall / 2. - .002 and
+              local[2] - extent[2] >= basket_center[2] + wall / 2. - FLOOR_CONTAINMENT_TOL_M and
               local[2] + extent[2] < basket_center[2] + basket_size[2])
     fruit_angular = wp.vec3(cvel[world, fruit_body_id][0], cvel[world, fruit_body_id][1], cvel[world, fruit_body_id][2])
     fruit_velocity = wp.vec3(cvel[world, fruit_body_id][3], cvel[world, fruit_body_id][4], cvel[world, fruit_body_id][5])
