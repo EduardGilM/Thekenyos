@@ -17,7 +17,7 @@ import warp as wp
 from .control_warp import WarpSpotControl, _set_gait_targets
 from .curriculum import (
     EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M,
-    apply_easy_hover_cohort,
+    sample_easy_start_indices,
 )
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
@@ -77,7 +77,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
                      w_grasp: float, w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float,
-                     shape_hand_fruit: wp.array(dtype=int)):
+                     shape_hand_fruit: wp.array(dtype=int),
+                     easy_released: wp.array(dtype=int)):
     world = wp.tid()
     if mask[world] == 0:
         return
@@ -110,7 +111,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     else:
         phi = wp.exp(-d_shape / length)
     shaped = float(0.)
-    if shaping_ref[world] == use_basket:
+    if shaping_ref[world] == use_basket and easy_released[world] == 0:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
     previous_potential[world] = phi
     shaping_ref[world] = use_basket
@@ -253,7 +254,8 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
         tcp = site_xpos[world, tcp_site]
         d_hand_xy = wp.sqrt((tcp[0] - basket_world[0]) * (tcp[0] - basket_world[0])
                             + (tcp[1] - basket_world[1]) * (tcp[1] - basket_world[1]))
-        previous_potential[world] = 0.5 * (wp.exp(-d_hover / length) + wp.exp(-d_hand_xy / length))
+        previous_potential[world] = (
+            0.25 * wp.exp(-d_hover / length) + 0.75 * wp.exp(-d_hand_xy / length))
     else:
         previous_potential[world] = wp.exp(-d_shape / length)
     shaping_ref[world] = use_basket
@@ -418,6 +420,7 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
                        release_at_center: wp.array(dtype=int),
                        release_over_opening: wp.array(dtype=int),
                        open_half_xy: wp.vec2, open_max_above_rim_m: float,
+                       released: wp.array(dtype=int),
                        actions: wp.array2d(dtype=float)):
     """Overwrite only the jaw increment. The student still moves the arm."""
     world = wp.tid()
@@ -431,7 +434,7 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
                             xmat[world, chassis], open_half_xy,
                             open_xy_m, rim_z_m, release_at_center[0],
                             release_over_opening[0], open_max_above_rim_m)
-    desired = jaw_open if over == 1 else jaw_hold[world]
+    desired = jaw_open if (over == 1 or released[world] != 0) else jaw_hold[world]
     current = targets[world, 18]
     delta = wp.clamp(desired - current, -max_delta, max_delta)
     actions[world, 6] = delta / max_delta
@@ -481,7 +484,8 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
                       rim_z_m: float, site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                       release_at_center: wp.array(dtype=int),
                       release_over_opening: wp.array(dtype=int),
-                      open_half_xy: wp.vec2, open_max_above_rim_m: float):
+                      open_half_xy: wp.vec2, open_max_above_rim_m: float,
+                      released: wp.array(dtype=int)):
     """Kinematic jaw hold/open. The 0.3 N·m PD alone lets the kiwi slip out."""
     if enabled[0] == 0:
         return
@@ -496,7 +500,9 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
                             xmat[world, chassis], open_half_xy,
                             open_xy_m, rim_z_m, release_at_center[0],
                             release_over_opening[0], open_max_above_rim_m)
-    desired = jaw_open if over == 1 else jaw_hold[world]
+    if over == 1:
+        released[world] = 1
+    desired = jaw_open if released[world] != 0 else jaw_hold[world]
     qpos[world, jaw_qposadr] = desired
     qvel[world, jaw_dofadr] = 0.0
     targets[world, 18] = desired
@@ -671,10 +677,14 @@ class FastRuntime:
             if (not np.isfinite(self._open_max_above_rim_m)
                     or not 0.0 <= self._open_max_above_rim_m <= 0.4):
                 raise ValueError('release_max_above_rim_m must be finite in [0, 0.4] m')
-            # Floor-to-hover: SIZE.z + 28 cm. A 10 cm-over-hole TCP puts the
-            # ~0.20 m wrist through the liner; this is the known-safe IK height.
-            self._hover_offset = wp.vec3(
-                0.0, 0.0, float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
+            # Reset IK stays at the collision-safe 28 cm hover. Shaping targets
+            # 14 cm, inside the <=16 cm scripted release band, so its optimum
+            # no longer asks the student to keep holding above the open gate.
+            release_target = float(EASY_PRESET['release_target_clearance_m'])
+            if (not np.isfinite(release_target) or release_target < 0.05
+                    or release_target > self._open_max_above_rim_m):
+                raise ValueError('release_target_clearance_m must be finite in [0.05, release cap]')
+            self._hover_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + release_target))
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -710,6 +720,7 @@ class FastRuntime:
             self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
             self._easy_start_index = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_hover_cohort = wp.zeros(worlds, dtype=int, device=self.device)
+            self._easy_released = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
             self._easy_jaw_hold_next = wp.zeros(worlds, dtype=float, device=self.device)
             closed_holds = np.full(worlds, self._jaw_closed, dtype=np.float32)
@@ -739,7 +750,8 @@ class FastRuntime:
                         float(self._jaw_open), float(self._open_xy_m),
                         float(self._open_rim_z_m), self.data.site_xpos, int(self.tcp_site),
                         self._release_at_center, self._release_over_opening,
-                        self._open_half_xy, float(self._open_max_above_rim_m)],
+                        self._open_half_xy, float(self._open_max_above_rim_m),
+                        self._easy_released],
                         device=self.device)
                     self.control.apply()
                     mw.step(self.gpu_model, self.data)
@@ -781,7 +793,7 @@ class FastRuntime:
                           self._gamma_step, self._deposit_w, self._fail_w, self.task.fail_paid,
                           W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
-                          self._shape_hand_fruit], device=self.device)
+                          self._shape_hand_fruit, self._easy_released], device=self.device)
 
     def _latch(self):
         wp.launch(_latch_state, dim=(self.worlds, max(self.data.qpos.shape[1], self.data.qvel.shape[1])),
@@ -817,6 +829,7 @@ class FastRuntime:
                     float(self._open_rim_z_m), float(2.5 * self.control_dt),
                     self._release_at_center, self._release_over_opening,
                     self._open_half_xy, float(self._open_max_above_rim_m),
+                    self._easy_released,
                     self._actions], device=self.device)
             wp.capture_launch(self.graph)
         return self.observe(), wp.to_torch(self._reward), wp.to_torch(self._terminated).bool(), {
@@ -828,6 +841,7 @@ class FastRuntime:
             'reached': wp.to_torch(self._distance) < 0.08,
             'timed_out': wp.to_torch(self._timed_out).bool(),
             'release_supported': True,
+            'release_fired': wp.to_torch(self._easy_released).bool(),
             **{key: wp.to_torch(value) for key,value in self.task.outputs().items()},
         }
 
@@ -980,11 +994,11 @@ class FastRuntime:
         return drop_q.astype(np.float32), float(drop_err), np.stack(start_qs), np.asarray(start_errs)
 
     def set_easy_progress(self, far_frac, rng):
-        """Sample a catalog start pose and a jaw hold close-fraction.
+        """Sample a hover-first curriculum and a jaw hold close-fraction.
 
-        ``far_frac`` is kept for logs/clips; starts are drawn from the whole
-        IK catalog. Over-opening starts only vary the lower/release, not a
-        full carry. Fruit stays free.
+        ``far_frac`` is the exact fraction restored at an outside-crate catalog
+        pose. The remainder starts at the high hover; successful cohort worlds
+        stay there. Fruit remains free.
         """
         frac = float(far_frac)
         if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
@@ -992,9 +1006,9 @@ class FastRuntime:
         n = int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0]))
         if n < 1:
             raise ValueError('easy start catalog is empty')
-        idx = np.asarray(rng.integers(0, n, size=self.worlds), dtype=np.int32)
         cohort = np.asarray(self._easy_hover_cohort.numpy(), dtype=np.int32).reshape(-1)
-        idx = apply_easy_hover_cohort(idx, cohort, self._hover_start_index)
+        idx = sample_easy_start_indices(
+            self.worlds, n, self._hover_start_index, frac, rng, cohort=cohort)
         close = float(self._chosen_close_frac)
         jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
         self._easy_start_index.assign(idx)
@@ -1004,6 +1018,8 @@ class FastRuntime:
             'easy_far_frac': frac,
             'easy_start_index_max': int(idx.max()) if idx.size else int(n - 1),
             'easy_start_index_mean': float(idx.mean()) if idx.size else 0.0,
+            'easy_outside_start_worlds': int(np.count_nonzero(idx != self._hover_start_index)),
+            'easy_hover_start_worlds': int(np.count_nonzero(idx == self._hover_start_index)),
             'easy_hold_close_mean': close,
             'easy_hold_index_mean': close,
             'easy_hover_cohort_worlds': int(np.count_nonzero(cohort)),
@@ -1057,11 +1073,11 @@ class FastRuntime:
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
         Does not weld fruit, spawn the arm inside the liner, or write fruit
-        into the liner. Starts stay outside the crate. Shaping pulls fruit 3D
-        and hand XY toward the open hover (rim + 28 cm), not the liner floor,
-        so the wrist is not paid to ram the crate. The script opens when both
+        into the liner. Starts begin at the high hover and introduce a bounded
+        outside-crate fraction. Shaping pulls fruit 3D toward the 14 cm release
+        target and hand XY over the hole. The script opens when both
         XY sit over the opening AABB and the fruit is at most 16 cm above the
-        rim. Far starts stay capped so nearby deposits are not erased. Eval
+        rim, stays open, and disables shaping for the free fall. Eval
         still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
         fractions are a rigid contact sweep, not a calibrated tissue-safe force.
         """
@@ -1168,6 +1184,7 @@ class FastRuntime:
             'far_horizon_updates': int(EASY_PRESET['far_horizon_updates']),
             'far_frac_cap': float(EASY_PRESET['far_frac_cap']),
             'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
+            'release_target_clearance_m': float(EASY_PRESET['release_target_clearance_m']),
             'shape_to_hover': shape_both,
             'weld': False,
             'scope': ('kiwi starts in the jaws; scripted hold/open under 15 N; '
@@ -1268,6 +1285,8 @@ class FastRuntime:
                               self._reward, self._terminated, self._previous_potential,
                               self._previous_damage, self._previous_action, self._episode_time,
                               self._timed_out, self._shaping_ref], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._easy_released], device=self.device)
             if self._easy:
                 self._prefer_hover_after_success(mask)
             self.task.reset(mask_wp)

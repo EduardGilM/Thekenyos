@@ -70,14 +70,15 @@ EASY_PRESET = {
     'shaping_coef': 25.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    # Carry from the original outside-crate start. Reward fruit 3D and hand
-    # XY toward the *open hover* (rim + 28 cm), not the liner floor: a
-    # low swing over the hole puts the wrist through the crate. Force the
-    # jaw open once both XY sit over the opening AABB (wall inset) *and*
-    # the fruit is at most 16 cm above the rim. A hover-high dump bounces
-    # out (easy27 u150). Far starts stay capped: annealing to 1.0 by
-    # update 200 erased the eval@100 deposits (4 → 0). Over-opening
-    # starts stay available behind this flag.
+    # Keep the reset pose at the collision-safe high hover, but shape the
+    # free fruit into the scripted release band. This is a numerical
+    # curriculum target, not a measured grasp pose.
+    'release_target_clearance_m': 0.14,
+    # Reset at the safe high hover, then shape fruit 3D to the release target
+    # and hand XY to the opening. Introduce at most 25% outside-crate starts;
+    # the prior all-far catalog prevented the release skill from bootstrapping.
+    # Force the jaw open once both XY sit inside the opening AABB and the fruit
+    # is at most 16 cm above the rim. Over-opening starts stay behind this flag.
     # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
     # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
@@ -106,24 +107,21 @@ EASY_PRESET = {
     # Ground dumps keep W_LOSS only.
     'deposit_reward': 30.0,
     'fail_reward': -30.0,
-    # Clip 0.5, low entropy, high LR and more epochs: push π toward
-    # the ±30 terminals. Value coef stays small so residual critic MSE
-    # does not steal the actor step. Extra PPO epochs may continue up
-    # to KL 1.0 so a 3e-3 learning rate is not stopped after the first pass.
-    'ppo_clip': 0.5,
-    'ppo_lr': 3e-3,
-    'ppo_epochs': 20,
-    'ppo_grad_clip': 5.0,
-    'ppo_adv_std_cap': 1.0,
-    'ppo_value_coef': 0.05,
-    'ppo_target_kl': 1.0,
-    # Rare deposits still vanish in a 3072-world mean. Clone those worlds,
-    # leave A>0 unclipped, and add a self-imitation term on harvest
-    # trajectories. Not a privileged arm teacher.
-    'ppo_unclip_positive': True,
-    'ppo_success_repeat': 24,
-    'ppo_imitation_coef': 2.0,
-    'ppo_success_epochs': 20,
+    # easy35 reached the release region, then one-success updates ran at
+    # KL 0.25–0.94 and destroyed the deterministic carry. Use ordinary
+    # whitening and conservative PPO; causal success replay supplies the
+    # rare-event emphasis without an unclipped actor step.
+    'ppo_clip': 0.2,
+    'ppo_lr': 5e-4,
+    'ppo_epochs': 4,
+    'ppo_grad_clip': 0.5,
+    'ppo_adv_std_cap': None,
+    'ppo_value_coef': 0.5,
+    'ppo_target_kl': 0.05,
+    'ppo_unclip_positive': False,
+    'ppo_success_repeat': 8,
+    'ppo_imitation_coef': 0.5,
+    'ppo_success_epochs': 4,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,
@@ -401,8 +399,35 @@ def apply_easy_hover_cohort(indices, cohort, hover_index):
     return idx
 
 
+def sample_easy_start_indices(worlds, catalog_n, hover_index, outside_frac, rng, cohort=None):
+    """Curriculum starts: high hover first, then a bounded outside-crate mix.
+
+    ``outside_frac`` is an exact world fraction. Successful cohort worlds stay
+    at hover. This host-side sampling changes only arm reset rows; fruit remains
+    a free body in the jaws.
+    """
+    if not isinstance(worlds, int) or isinstance(worlds, bool) or worlds < 1:
+        raise ValueError('worlds must be a positive integer')
+    if not isinstance(catalog_n, int) or isinstance(catalog_n, bool) or catalog_n < 1:
+        raise ValueError('catalog_n must be a positive integer')
+    hover = int(hover_index)
+    frac = float(outside_frac)
+    if hover < catalog_n or not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+        raise ValueError('hover_index/outside_frac are invalid')
+    if not hasattr(rng, 'choice') or not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    idx = np.full(worlds, hover, dtype=np.int32)
+    count = int(round(frac * worlds))
+    if count:
+        selected = np.asarray(rng.choice(worlds, size=count, replace=False), dtype=np.int64)
+        idx[selected] = np.asarray(rng.integers(0, catalog_n, size=count), dtype=np.int32)
+    if cohort is not None:
+        idx = apply_easy_hover_cohort(idx, cohort, hover)
+    return idx
+
+
 def easy_start_far_frac(update_index, horizon=None, cap=None):
-    """How far from the crate the easy start may sample. 0=nearest outside."""
+    """Fraction of worlds restored outside the crate; the rest start at hover."""
     if horizon is None:
         horizon = EASY_PRESET['far_horizon_updates']
     if cap is None:

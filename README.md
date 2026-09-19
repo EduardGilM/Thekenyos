@@ -741,7 +741,22 @@ FAST_SCENE=/path/to/fast-scene python -B -m unittest \
 
 `--speedrun` is the wall-clock preset for that same 1→6 chain: eval every 100 updates, checkpoints every 50, entropy 0.01, and eval horizons 8/15/20/20/45/45 s. Training episode timeouts stay 30–900 s. Stages 01–03 still hold the chassis; PPO then drops the three N3 dimensions from log-prob and entropy (the env already zeros those commands). Promotion gates stay two consecutive evals at the blueprint rates after 200 evaluated worlds. Pass `--video-every 0` with `--speedrun` when a CPU sidecar records clips. This is not a teacher, a weld, or field harvest; `training_ready` stays false.
 
-`--easy` starts a **free** kiwi between the pads at a random IK-safe pose **32 cm outside the crate**, 10 cm above the rim and 10–14 cm off the opening centerline (8 cm X span, 8 cm Z span). Nearby starts stay the default; far-start annealing is capped at 0.25 over 2000 updates so a nearby deposit is not erased by all-far starts. Shaping pays for bringing the fruit to the **open hover** (rim + 28 cm) and the hand XY over the hole — not the liner floor, because a 10 cm-over-hole TCP puts the ~20 cm wrist through the crate. The **jaw-only script** holds the tightest contacting close-fraction still under the 15 N fruit-contact gate, tightens if TCP-fruit slip exceeds 4 cm, and **opens once fruit and hand XY are over the opening** (chassis-frame AABB inset 4 cm from the inner walls) **and the fruit is at most 16 cm above the rim**. A hover-high dump over the hole bounces out; the 15 cm centre disk is only the fallback. The close-fraction sweep stays at 40 cm XY / 28 cm above the rim, centered, so a closer student pose cannot poison it. Easy basket shaping uses a 0.60 m length, a **25×** hand-heavy approach potential (75% hand XY / 25% fruit hover), a **+30 deposit** and a **−30 timeout miss** (advantage whitening already makes the actor scale-invariant; a 300–10000 jackpot only inflates critic MSE). A world that deposits **joins a hover cohort**: later fails still respawn at the open hover, not a random far start, so a success streak is not emptied by the reset. Eval clears that cohort and starts from the catalog (`guidance_weight=0`). `reward_mean` is the **harvest-world window return** when any world deposited (~30), otherwise the old per-step mean so a 64-step time-cost sum does not look like a crash. `reward_window_mean` keeps the all-world 64-step sum. `success_window_return_mean` / `deposit_return_sum` / `fail_return_sum` / `harvest_jackpot_sum` are the raw jackpot mass. Easy PPO uses entropy 0.001, clip 0.5 on downhill advantages only (A>0 is unclipped), learning rate 3e-3, 20 epochs (extra passes may continue up to KL 1.0), grad clip 5, advantage-std cap 1, value coef 0.05, 24× oversample of harvest worlds and a self-imitation term on those trajectories. Flip `start_over_opening` for the later hover-start restore. A light static keeper (close 0.25–0.30) dumps as soon as the arm moves. Open/closed come from pad-gap (Spot `arm_f1x` is closed near 0, open at −π/2), not from `jnt_range` order. The student arm is ordinary PPO. This is not a weld, not an arm teacher, and not a tissue-safe force. Eval still has `guidance_weight=0` and `teacher_mix=0`; the jaw script stays on because `--easy` is still enabled. Promotion gates do not change. `training_ready` stays false.
+`--easy` starts a **free** kiwi between the pads. The jaw-only script holds it
+with a rigid-contact engineering sweep and opens over the basket; it is not a
+weld, an arm teacher or a calibrated tissue-safe controller. The student arm
+is ordinary PPO. Evaluation keeps `guidance_weight=0` and `teacher_mix=0`;
+promotion gates do not change and `training_ready` stays false.
+
+The current easy release curriculum starts at the collision-safe high hover and
+introduces the outside-crate catalog as `easy_far_frac` grows to 0.25; it is no
+longer a logging-only anneal. Reward shaping targets 14 cm above the rim, inside
+the scripted ≤16 cm release band, while the reset IK remains at 28 cm. Once the
+jaw script opens it stays open and dense hover shaping stops. PPO excludes that
+scripted jaw dimension, whitens advantages normally, and self-imitates only the
+causal episode prefix ending in success. The easy optimizer uses clip 0.2,
+learning rate 5e-4, four epochs and target KL 0.05. These are student-side
+release-training aids; outside-crate generalisation still requires a later
+matched evaluation.
 
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \

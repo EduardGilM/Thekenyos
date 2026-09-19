@@ -123,6 +123,7 @@ class CurriculumTest(unittest.TestCase):
             random_easy_start_local_m, select_hold_close, tcp_outside_basket,
             tcp_over_opening_above_rim,
         )
+        from treesim.kiwi_rl.curriculum import sample_easy_start_indices
         from treesim.basket import CENTER, SIZE
         deposit = stage_named('deposit_pixels')
         preset = apply_easy_preset({'gate_success_rate': deposit.gate_success_rate,
@@ -132,6 +133,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['shaping_coef'], 25.0)
         self.assertEqual(preset['entropy_coef'], 0.001)
         self.assertEqual(preset['hover_clearance_m'], 0.28)
+        self.assertEqual(preset['release_target_clearance_m'], 0.14)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertFalse(preset['start_over_opening'])
         self.assertTrue(preset['shape_hand_and_fruit'])
@@ -150,17 +152,17 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['start_z_span_m'], 0.08)
         self.assertEqual(preset['deposit_reward'], 30.0)
         self.assertEqual(preset['fail_reward'], -30.0)
-        self.assertEqual(preset['ppo_clip'], 0.5)
-        self.assertEqual(preset['ppo_lr'], 3e-3)
-        self.assertEqual(preset['ppo_epochs'], 20)
-        self.assertEqual(preset['ppo_grad_clip'], 5.0)
-        self.assertEqual(preset['ppo_adv_std_cap'], 1.0)
-        self.assertEqual(preset['ppo_value_coef'], 0.05)
-        self.assertEqual(preset['ppo_target_kl'], 1.0)
-        self.assertTrue(preset['ppo_unclip_positive'])
-        self.assertEqual(preset['ppo_success_repeat'], 24)
-        self.assertEqual(preset['ppo_imitation_coef'], 2.0)
-        self.assertEqual(preset['ppo_success_epochs'], 20)
+        self.assertEqual(preset['ppo_clip'], 0.2)
+        self.assertEqual(preset['ppo_lr'], 5e-4)
+        self.assertEqual(preset['ppo_epochs'], 4)
+        self.assertEqual(preset['ppo_grad_clip'], 0.5)
+        self.assertIsNone(preset['ppo_adv_std_cap'])
+        self.assertEqual(preset['ppo_value_coef'], 0.5)
+        self.assertEqual(preset['ppo_target_kl'], 0.05)
+        self.assertFalse(preset['ppo_unclip_positive'])
+        self.assertEqual(preset['ppo_success_repeat'], 8)
+        self.assertEqual(preset['ppo_imitation_coef'], 0.5)
+        self.assertEqual(preset['ppo_success_epochs'], 4)
         self.assertEqual(HOLD_SWEEP_MARGIN_M, 0.40)
         self.assertEqual(HOLD_SWEEP_CLEARANCE_M, 0.28)
         self.assertEqual(preset['n_start_poses'], 24)
@@ -211,6 +213,14 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(easy_start_far_frac(800), 0.25)
         self.assertEqual(easy_start_far_frac(2000), 0.25)
         self.assertEqual(easy_start_far_frac(100, horizon=200, cap=1.0), 0.5)
+        starts = sample_easy_start_indices(20, 4, 4, 0.25, np.random.default_rng(4))
+        self.assertEqual(int(np.count_nonzero(starts == 4)), 15)
+        self.assertEqual(int(np.count_nonzero(starts != 4)), 5)
+        cohort = np.zeros(20, dtype=np.int32)
+        cohort[:3] = 1
+        starts = sample_easy_start_indices(
+            20, 4, 4, 1.0, np.random.default_rng(4), cohort=cohort)
+        np.testing.assert_array_equal(starts[:3], np.full(3, 4, dtype=np.int32))
         with self.assertRaises(ValueError):
             easy_start_far_frac(0, cap=1.5)
         self.assertAlmostEqual(easy_teacher_mix(0), 1.0)
@@ -279,7 +289,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('self._hover_start_index', src)
         self.assertIn('self._easy_catalog_n', src)
         self.assertIn('self._easy_hover_cohort', src)
-        self.assertIn('apply_easy_hover_cohort', src)
+        self.assertIn('sample_easy_start_indices', src)
+        self.assertIn('self._easy_released', src)
+        self.assertIn("'release_fired'", src)
         self.assertIn('def clear_easy_hover_starts', src)
         self.assertLess(
             src.index('self._prefer_hover_after_success(mask)'),

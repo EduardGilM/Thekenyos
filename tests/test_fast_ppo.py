@@ -109,7 +109,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(filled.teacher_mix, 0.0)
         self.assertEqual(filled.shaping_coef, 25.0)
         self.assertEqual(filled.entropy_coef, 0.001)
-        self.assertEqual(filled.ppo_epochs, 20)
+        self.assertEqual(filled.ppo_epochs, 4)
         kept = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=0.0, shaping_coef=2.0))
         self.assertEqual(kept.teacher_mix, 0.0)
@@ -197,7 +197,11 @@ class FastTrainerCLITest(unittest.TestCase):
     def test_advantage_std_cap_keeps_jackpot_large(self):
         import torch
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-        from train_fast import normalize_advantages, ppo_actor_surrogate, success_world_order
+        from train_fast import (
+            causal_success_mask, normalize_advantages, policy_dim_mask,
+            ppo_actor_surrogate, success_world_order,
+        )
+        from treesim.kiwi_rl.curriculum import stage_named
         adv = torch.zeros(1000)
         adv[0] = 10000.0
         full = normalize_advantages(adv)
@@ -225,6 +229,18 @@ class FastTrainerCLITest(unittest.TestCase):
             float(ppo_actor_surrogate(ratio, neg, clip=0.2, unclip_positive=False)))
         with self.assertRaises(ValueError):
             success_world_order(flag, repeat=0)
+        mask = policy_dim_mask(
+            stage_named('deposit_pixels'), 'cpu', enabled=True, scripted_jaw=True)
+        self.assertEqual(list(mask.tolist()), [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+        rows = []
+        for step in range(6):
+            rows.append({
+                'success': torch.tensor([step == 3, False]),
+                'reset': torch.tensor([step in (0, 4), step == 0]),
+            })
+        causal = causal_success_mask(rows)
+        self.assertEqual(causal[:, 0].tolist(), [True, True, True, True, False, False])
+        self.assertFalse(bool(causal[:, 1].any()))
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_reward_mean_shows_harvest_jackpot(self):

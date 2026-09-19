@@ -28,14 +28,16 @@ def _split_action(raw):
     return applied[:, :3], applied[:, 3:10]
 
 
-def policy_dim_mask(stage, device, enabled=True):
-    """Zero N3 log-prob/entropy while the stage holds the chassis."""
+def policy_dim_mask(stage, device, enabled=True, scripted_jaw=False):
+    """Mask idle base dimensions and a jaw action overwritten by the runtime."""
     import torch
-    if not enabled:
+    if not enabled and not scripted_jaw:
         return None
-    mask = idle_locomotion_mask(10, stage.allow_locomotion)
+    mask = idle_locomotion_mask(10, stage.allow_locomotion) if enabled else None
     if mask is None:
-        return None
+        mask = np.ones(10, dtype=np.float32)
+    if scripted_jaw:
+        mask[-1] = 0.0
     return torch.as_tensor(mask, device=device)
 
 
@@ -194,6 +196,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['ground_contact'] = info['ground_contact'].clone()
             if 'hand_load_N' in info:
                 row['hand_load_N'] = info['hand_load_N'].clone()
+            if 'release_fired' in info:
+                row['release_fired'] = info['release_fired'].clone()
             rows.append(row)
             if index == 0:
                 rows[0]['memory0'] = memory0
@@ -239,6 +243,27 @@ def success_world_order(success_any, repeat=1):
         return order
     extra = flag.nonzero(as_tuple=False).reshape(-1)
     return torch.cat([order, extra.repeat(repeat - 1)])
+
+
+def causal_success_mask(rows):
+    """Select only the episode prefix ending in each observed success.
+
+    A success world can contain failed episodes and a post-success hover reset
+    in the same 64-step chunk. Self-imitation must not clone those unrelated
+    actions.
+    """
+    import torch
+    if not rows or 'success' not in rows[0]:
+        raise ValueError('causal_success_mask requires nonempty success rows')
+    success = torch.stack([row['success'] for row in rows]).bool()
+    resets = torch.stack([row['reset'] for row in rows]).bool()
+    mask = torch.zeros_like(success)
+    active = torch.zeros_like(success[0])
+    for step in range(len(rows) - 1, -1, -1):
+        active = active | success[step]
+        mask[step] = active
+        active = active & (~resets[step])
+    return mask
 
 
 def ppo_actor_surrogate(ratio, advantages, clip, unclip_positive=False):
@@ -290,8 +315,10 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     returns = (advantages + values).detach()
     advantages = normalize_advantages(advantages, std_cap=adv_std_cap)
     if 'success' in rows[0]:
-        success_any = torch.stack([r['success'] for r in rows]).any(dim=0)
+        success_causal = causal_success_mask(rows)
+        success_any = success_causal.any(dim=0)
     else:
+        success_causal = torch.zeros_like(rewards, dtype=torch.bool)
         success_any = torch.zeros(rewards.shape[1], dtype=torch.bool, device=rewards.device)
     order = success_world_order(success_any, success_repeat)
     n_order = int(order.numel())
@@ -340,8 +367,9 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             entropy = torch.stack(entropies).mean()
             entropy_g = torch.stack(gaussians).mean()
             sil = rewards.new_zeros(())
-            if imitation_coef > 0.0 and bool(success_any[idx].any()):
-                sil = -torch.stack(logps)[:, success_any[idx]].mean()
+            causal = success_causal[:, idx]
+            if imitation_coef > 0.0 and bool(causal.any()):
+                sil = -torch.stack(logps)[causal].mean()
             loss = actor + value_coef * critic - entropy_coef * entropy + imitation_coef * sil
             (loss * (idx.numel() / float(n_order))).backward()
             if dim_mask is None:
@@ -349,7 +377,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             else:
                 action_dim = int(dim_mask.to(dtype=logstd.dtype).sum().clamp(min=1).item())
             metrics.append((float(loss.detach()), float(kl.detach()), float(entropy.detach()),
-                            float(entropy_g.detach()), action_dim))
+                            float(entropy_g.detach()), action_dim, float(actor.detach()),
+                            float(critic.detach()), float(sil.detach())))
         if stop_extra:
             break
         grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip, error_if_nonfinite=True)
@@ -360,6 +389,9 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     entropy = sum(m[2] for m in metrics) / len(metrics)
     entropy_g = sum(m[3] for m in metrics) / len(metrics)
     action_dim = max(m[4] for m in metrics)
+    actor_loss = sum(m[5] for m in metrics) / len(metrics)
+    value_loss = sum(m[6] for m in metrics) / len(metrics)
+    sil_loss = sum(m[7] for m in metrics) / len(metrics)
     window = rewards.sum(dim=0)
     n_success = int(success_any.sum().item())
     transition_mean = float(rewards.mean())
@@ -378,6 +410,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     # return when a world deposited; otherwise keep the per-step scale.
     reward_mean = success_window if n_success else transition_mean
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
+                actor_loss=actor_loss, value_loss=value_loss, sil_loss=sil_loss,
                 entropy=entropy, entropy_gaussian=entropy_g,
                 entropy_per_dim=entropy / action_dim,
                 entropy_kind='tanh_gaussian_differential_nats',
@@ -392,6 +425,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 ppo_success_repeat=int(success_repeat),
                 ppo_imitation_coef=float(imitation_coef),
                 ppo_success_worlds=n_success,
+                ppo_causal_success_transitions=int(success_causal.sum().item()),
                 reward_mean=reward_mean,
                 reward_window_mean=window_mean,
                 reward_transition_mean=transition_mean,
@@ -603,7 +637,7 @@ def run(args):
             config['ppo_epochs'] = int(EASY_PRESET['ppo_epochs'])
             config['ppo_clip'] = float(EASY_PRESET['ppo_clip'])
             config['ppo_grad_clip'] = float(EASY_PRESET['ppo_grad_clip'])
-            config['ppo_adv_std_cap'] = float(EASY_PRESET['ppo_adv_std_cap'])
+            config['ppo_adv_std_cap'] = EASY_PRESET['ppo_adv_std_cap']
             config['ppo_value_coef'] = float(EASY_PRESET['ppo_value_coef'])
             config['ppo_target_kl'] = float(EASY_PRESET['ppo_target_kl'])
             config['ppo_unclip_positive'] = bool(EASY_PRESET['ppo_unclip_positive'])
@@ -620,6 +654,7 @@ def run(args):
             config['release_over_opening'] = easy_info.get('release_over_opening')
             config['release_opening_inset_m'] = easy_info.get('release_opening_inset_m')
             config['release_max_above_rim_m'] = easy_info.get('release_max_above_rim_m')
+            config['release_target_clearance_m'] = EASY_PRESET['release_target_clearance_m']
             config['far_horizon_updates'] = easy_info.get('far_horizon_updates')
             config['far_frac_cap'] = easy_info.get('far_frac_cap')
             config['hover_clearance_m'] = easy_info.get('hover_clearance_m')
@@ -643,7 +678,7 @@ def run(args):
         if not np_finite(ppo_lr) or not 1e-5 <= ppo_lr <= 1e-2:
             raise ValueError('ppo_lr must be finite in [1e-5, 1e-2]')
         optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
-        dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
+        dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle, scripted_jaw=easy)
         apply_stage(runtime, stage, numpy_rng)
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
@@ -696,7 +731,8 @@ def run(args):
             if easy:
                 ppo_clip = float(EASY_PRESET['ppo_clip'])
                 ppo_grad = float(EASY_PRESET['ppo_grad_clip'])
-                ppo_std_cap = float(EASY_PRESET['ppo_adv_std_cap'])
+                raw_std_cap = EASY_PRESET['ppo_adv_std_cap']
+                ppo_std_cap = None if raw_std_cap is None else float(raw_std_cap)
                 ppo_value = float(EASY_PRESET['ppo_value_coef'])
                 ppo_kl = float(EASY_PRESET['ppo_target_kl'])
                 ppo_unclip = bool(EASY_PRESET['ppo_unclip_positive'])
@@ -746,6 +782,8 @@ def run(args):
                 easy_start_index_mean=float(start_info.get('easy_start_index_mean', 0.0)),
                 easy_start_index_max=int(start_info.get('easy_start_index_max', 0)),
                 easy_hover_cohort_worlds=int(start_info.get('easy_hover_cohort_worlds', 0)),
+                easy_hover_start_worlds=int(start_info.get('easy_hover_start_worlds', 0)),
+                easy_outside_start_worlds=int(start_info.get('easy_outside_start_worlds', 0)),
                 easy_hold_close_mean=float(start_info.get('easy_hold_close_mean', 0.0)),
                 easy_hold_index_mean=float(start_info.get('easy_hold_index_mean', 0.0)),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
@@ -768,6 +806,9 @@ def run(args):
                 load = torch.stack([r['hand_load_N'] for r in rows])
                 metrics['hand_load_mean_N'] = float(load.mean())
                 metrics['hand_load_max_N'] = float(load.max())
+            if 'release_fired' in rows[0]:
+                metrics['release_fired_worlds'] = int(
+                    torch.stack([r['release_fired'] for r in rows]).any(dim=0).sum())
             if easy and teacher_anneal_after is None and int(metrics['harvest_successes']) >= 8:
                 teacher_anneal_after = iteration + 1
                 config['teacher_anneal_after'] = teacher_anneal_after
@@ -798,7 +839,8 @@ def run(args):
                         promoted = nxt is not None
                         if nxt is not None:
                             stage = nxt
-                            dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
+                            dim_mask = policy_dim_mask(
+                                stage, 'cuda:0', mask_idle, scripted_jaw=easy)
                             config['curriculum'] = summarise_stage(stage, profile=eval_profile)
                             config['stage'] = stage.name
                             config['curriculum_blocked_reason'] = fruit_block_reason(stage, n_fruits)
