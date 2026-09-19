@@ -152,6 +152,90 @@ class ProgressTest(unittest.TestCase):
         self.assertGreater(evaluation_score(intact),evaluation_score(destructive))
 
 
+class CurriculumProgressTest(unittest.TestCase):
+    @staticmethod
+    def progress(initial=None, **kwargs):
+        from treesim.kiwi_rl.harvest_training import CURRICULUM_PROFILE
+        return EpisodeProgress(state() if initial is None else initial,
+                               reward_profile=CURRICULUM_PROFILE, **kwargs)
+
+    def test_milestone_survives_stall_and_does_not_repeat_after_regrasp(self):
+        p = self.progress(stall_steps=3)
+        no = torch.tensor([False])
+        p.step(state(grasp=True), no)
+        self.assertAlmostEqual(p.shaping_reward.item(), 1.5)
+        for now in (state(), state(grasp=True), state(grasp=True)):
+            _, _, _, stalled = p.step(now, no)
+            self.assertEqual(p.shaping_reward.item(), 0.)
+        self.assertTrue(stalled.item())
+        self.assertEqual(p.curriculum_credit.item(), 1.5)
+        self.assertFalse(p.previous['success'].item())
+
+    def test_best_reach_progress_cannot_be_farmed_by_oscillation(self):
+        p = self.progress()
+        bonuses = []
+        for distance in (.15, .2, .15, .1):
+            p.step(state(distance=distance), torch.tensor([False]))
+            bonuses.append(p.shaping_reward.item())
+        self.assertAlmostEqual(sum(bonuses), .2, places=6)
+        self.assertEqual(bonuses[1:3], [0., 0.])
+
+    def test_failures_and_unheld_falls_never_earn_guidance(self):
+        for failed in (False, True):
+            p = self.progress()
+            now = state(distance=.01, basket=.01, detached=True, grasp=failed)
+            now['failed'][:] = failed
+            p.step(now, torch.tensor([failed]))
+            self.assertEqual(p.shaping_reward.item(), 0.)
+            self.assertFalse(p.curriculum_detach_paid.item())
+            self.assertFalse(p.ever_held_detach.item())
+
+    def test_full_cycle_available_in_every_stage_and_total_credit_bounded(self):
+        for stage in (0, 1, 2):
+            p = self.progress(state(distance=.25, basket=1.), curriculum_stage=stage)
+            p.step(state(distance=0., basket=1., grasp=True), torch.tensor([False]))
+            self.assertTrue(p.curriculum_grasp_paid.item())
+            p.step(state(distance=0., basket=0., grasp=True, detached=True), torch.tensor([False]))
+            self.assertTrue(p.curriculum_detach_paid.item())
+            now = state(distance=0., basket=0., detached=True)
+            now['settle_time'] = torch.tensor([.5])
+            p.step(now, torch.tensor([False]))
+            self.assertAlmostEqual(p.curriculum_credit.item(), 4.)
+            self.assertGreater(p.shaping_reward.item(), 0.)
+            self.assertFalse(now['success'].item())
+            # Only the task oracle can set success and receive its task reward.
+            now['success'][:] = True
+            p.step(now, torch.tensor([True]))
+            self.assertAlmostEqual(p.task_reward.item(), 19.999, places=4)
+            self.assertLessEqual(p.curriculum_credit.item(), 4.)
+
+    def test_stage_change_only_applies_at_reset_and_clears_bonus_history(self):
+        p = self.progress()
+        p.step(state(grasp=True, detached=True), torch.tensor([False]))
+        p.curriculum_stage = 2
+        self.assertEqual(p.curriculum_stage_ids.item(), 0)
+        p.reset(torch.tensor([True]), state())
+        self.assertEqual(p.curriculum_stage_ids.item(), 2)
+        self.assertFalse(p.curriculum_grasp_paid.item())
+        self.assertFalse(p.curriculum_detach_paid.item())
+        self.assertFalse(p.ever_held_detach.item())
+        self.assertEqual(p.curriculum_credit.item(), 0.)
+
+    def test_guidance_off_preserves_task_only_reward(self):
+        p = self.progress(guidance=0.)
+        p.step(state(grasp=True, detached=True), torch.tensor([False]))
+        self.assertEqual(p.shaping_reward.item(), 0.)
+        self.assertAlmostEqual(p.task_reward.item(), -.001, places=6)
+
+    def test_safe_held_detach_metric_is_available_in_legacy_evaluation(self):
+        for held, failed, expected in ((True, False, True), (False, False, False), (True, True, False)):
+            p = EpisodeProgress(state(), guidance=0.)
+            now = state(detached=True, grasp=held)
+            now['failed'][:] = failed
+            p.step(now, torch.tensor([failed]))
+            self.assertEqual(p.ever_held_detach.item(), expected)
+
+
 class _CameraRuntime:
     """Small CPU fake for collector camera delivery and reset semantics."""
     def __init__(self, *, end_first_world=False):

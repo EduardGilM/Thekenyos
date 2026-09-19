@@ -16,7 +16,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
-RUN = 'teacher-reward-cti-001'
+DEFAULT_RUN = 'teacher-reward-cti-001'
+RUN = DEFAULT_RUN
 REMOTE_ROOT = '/mnt/ssd/experiments/kiwi-pergola'
 REMOTE_RUN = f'{REMOTE_ROOT}/training/runs/{RUN}'
 WANDB_URL = 'https://wandb.ai/juampab/Thekenyos/runs/jh72ewg6'
@@ -26,9 +27,10 @@ REMOTE_TIMEOUT = 45
 RENDER_TIMEOUT = 1800
 CHECKPOINT_RE = re.compile(r'checkpoint-(\d{6})\.pt\Z')
 
-REMOTE_PROBE = r'''import json, os, pathlib, time
+_REMOTE_PROBE_TEMPLATE = r'''import json, os, pathlib, time
 from collections import deque
-root = pathlib.Path('/mnt/ssd/experiments/kiwi-pergola/training/runs/teacher-reward-cti-001')
+root = pathlib.Path(__REMOTE_RUN__)
+run = __RUN__
 def read(name):
     try: return json.loads((root/name).read_text())
     except FileNotFoundError: return None
@@ -52,7 +54,7 @@ try:
     if isinstance(pid,int) and not isinstance(pid,bool) and pid > 0:
         os.kill(pid, 0)
         cmd=pathlib.Path('/proc/%d/cmdline'%pid).read_bytes().replace(b'\0',b' ').decode(errors='replace')
-        alive='train_harvest_fast.py' in cmd and 'teacher-reward-cti-001' in cmd
+        alive='train_harvest_fast.py' in cmd and run in cmd
 except (OSError, FileNotFoundError): pass
 def tail_jsonl(name, limit):
     try:
@@ -76,6 +78,24 @@ print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failu
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
                   'active_status':status,'phase':phase,'phase_events':events,'branch_diagnostics':branches}))
 '''
+
+
+def _remote_probe(run):
+    remote_run = f'{REMOTE_ROOT}/training/runs/{run}'
+    return (_REMOTE_PROBE_TEMPLATE.replace('__REMOTE_RUN__', repr(remote_run))
+            .replace('__RUN__', repr(run)))
+
+
+REMOTE_PROBE = _remote_probe(RUN)
+
+
+def _configure_run(run, wandb_url=None):
+    global RUN, REMOTE_RUN, WANDB_URL, REMOTE_PROBE
+    RUN = run
+    REMOTE_RUN = f'{REMOTE_ROOT}/training/runs/{RUN}'
+    WANDB_URL = wandb_url if wandb_url is not None else (
+        'https://wandb.ai/juampab/Thekenyos/runs/jh72ewg6' if RUN == DEFAULT_RUN else None)
+    REMOTE_PROBE = _remote_probe(RUN)
 
 
 def _number(value):
@@ -157,12 +177,15 @@ def _decode_jsonl_tail(lines):
 
 
 class Dashboard:
-    def __init__(self, cache: Path, no_render=False):
+    def __init__(self, cache: Path, no_render=False, run=RUN, wandb_url=None):
         self.cache = cache.expanduser().resolve()
         self.cache.mkdir(parents=True, exist_ok=True)
         self.no_render = no_render
+        self.run = run
+        self.remote_run = f'{REMOTE_ROOT}/training/runs/{run}'
+        self.wandb_url = wandb_url if wandb_url is not None else (WANDB_URL if run == DEFAULT_RUN else None)
         self.lock = threading.Lock()
-        self.state = dict(run=RUN, wandb_url=WANDB_URL, fetched_at=None, error=None,
+        self.state = dict(run=self.run, wandb_url=self.wandb_url, fetched_at=None, error=None,
                           status='stale', rows=[], video=None, render={'status': 'idle', 'error': None,
                           'checkpoint': None}, log_mtime=None, process_alive=False,
                           budget_seconds=3600, best_checkpoint=None, best_metrics=None,
@@ -179,7 +202,7 @@ class Dashboard:
 
     def _remote_snapshot(self):
         result = subprocess.run(['ssh', '-o', 'BatchMode=yes', 'jp', 'python3', '-'],
-                                input=REMOTE_PROBE, text=True, capture_output=True,
+                                input=_remote_probe(self.run), text=True, capture_output=True,
                                 timeout=REMOTE_TIMEOUT, check=True)
         return json.loads(result.stdout)
 
@@ -190,8 +213,10 @@ class Dashboard:
             report = remote.get('report')
             failure = remote.get('failure')
             checkpoint, best_row = select_checkpoint(rows, report)
+            report_wandb_url = report.get('wandb_url') if isinstance(report, dict) else None
+            wandb_url = self.wandb_url or (report_wandb_url if isinstance(report_wandb_url, str) else None)
             with self.lock:
-                self.state.update(rows=rows, log_mtime=remote.get('log_mtime'),
+                self.state.update(rows=rows, wandb_url=wandb_url, log_mtime=remote.get('log_mtime'),
                                   process_alive=bool(remote.get('process_alive')),
                                   active_process=remote.get('active_process'),
                                   active_status=remote.get('active_status'),
@@ -223,7 +248,7 @@ class Dashboard:
         if not match:
             return
         number = match.group(1)
-        remote_base = f'{REMOTE_RUN}/dashboard-videos/{Path(checkpoint).stem}'
+        remote_base = f'{self.remote_run}/dashboard-videos/{Path(checkpoint).stem}'
         try:
             with self.lock:
                 self.state['render'] = {'status': 'rendering', 'error': None, 'checkpoint': checkpoint}
@@ -244,7 +269,7 @@ class Dashboard:
                 argv = [f'{REMOTE_ROOT}/training/envs/flex-gpu/bin/python',
                         f'{REMOTE_ROOT}/training/releases/reward-cti-001/scripts/render_fast_rollout.py',
                         '--role', 'teacher', '--scene', f'{REMOTE_ROOT}/training/scenes/harvest-near-001',
-                        '--checkpoint', f'{REMOTE_RUN}/{checkpoint}', '--gait-checkpoint',
+                        '--checkpoint', f'{self.remote_run}/{checkpoint}', '--gait-checkpoint',
                         f'{REMOTE_ROOT}/training/runs/relic-parity-002/g1-cpu.pt',
                         '--steps', '300', '--output', output]
                 script = ('import os,subprocess\n'
@@ -366,10 +391,13 @@ def main():
     parser.add_argument('--cache', type=Path,
                         default=Path(tempfile.gettempdir()) / 'thekenyos-live-dashboard')
     parser.add_argument('--no-render', action='store_true')
+    parser.add_argument('--run', default=RUN, help='remote training run directory')
+    parser.add_argument('--wandb-url', help='W&B run URL shown in dashboard metadata')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error('--port must be between 0 and 65535')
-    dashboard = Dashboard(args.cache, args.no_render)
+    _configure_run(args.run, args.wandb_url)
+    dashboard = Dashboard(args.cache, args.no_render, RUN, WANDB_URL)
     threading.Thread(target=dashboard.worker, name='dashboard-poller', daemon=True).start()
     server = ThreadingHTTPServer(('127.0.0.1', args.port),
                                  handler_for(dashboard, Path(__file__).with_name('training_dashboard.html')))

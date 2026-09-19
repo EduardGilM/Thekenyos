@@ -45,6 +45,9 @@ def resume_history(output, checkpoint, config):
                 'reward_gamma','solver_iterations','jaw_cap_Nm','seed'):
         if saved.get(key)!=config.get(key):
             raise ValueError(f'Resume configuration mismatch: {key}')
+    for key in ('gae_lambda','entropy_coef','cti_optimizer','curriculum'):
+        if saved.get(key)!=config.get(key):
+            raise ValueError(f'Resume learning configuration mismatch: {key}')
     history=[json.loads(line) for line in (output/'training.jsonl').read_text().splitlines()]
     latest=next(row for row in reversed(history) if 'update' in row and 'elapsed_seconds' in row)
     if manifest['update']!=latest['update']:
@@ -95,14 +98,15 @@ def run(args):
     args.output.mkdir(parents=True,exist_ok=bool(args.resume_from))
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
     config.update(role=role,scope='full physical episodes; bounded potential guidance',
-        reward_profile=REWARD_PROFILE,reward_gamma=HARVEST_GAMMA,
+        reward_profile=('milestone-harvest/v1' if args.curriculum else REWARD_PROFILE),reward_gamma=HARVEST_GAMMA,
         actor_inputs=('privileged simulator state and R84' if role=='teacher' else 'gripper RGB-D and R84'),
         checkpoint_roles={'student':'sensor-only PPO actor','teacher':'privileged PPO actor'},
         solver_iterations=100,
         jaw_cap_Nm=1.0,
         force_limit_scope='per_jaw_and_nonpad_group',
         optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
-        cti_version=4 if args.cti else 0,
+        cti_version=5 if args.cti else 0,
+        cti_optimizer='independent_adam',
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     resumed=resume_history(args.output,args.resume_from,config) if args.resume_from else None
     if resumed and resumed['latest']['elapsed_seconds']>=args.train_seconds:
@@ -133,10 +137,17 @@ def run(args):
                 'role':'teacher','schema':TEACHER_SCHEMA,
                 'model_sha256':runtime.manifest['model_sha256']})
         if args.initialize_from:
-            if role != 'student': raise ValueError('--initialize-from is supported only for a student')
-            load_checkpoint(args.initialize_from,{'student':policy},expected_meta={
-                'camera':'hand_camera','camera_profile':runtime.manifest['cameras']})
+            expected = ({'role':'teacher','schema':TEACHER_SCHEMA,
+                         'model_sha256':runtime.manifest['model_sha256']} if role=='teacher' else
+                        {'camera':'hand_camera','camera_profile':runtime.manifest['cameras']})
+            load_checkpoint(args.initialize_from,{role:policy},expected_meta=expected)
+            if args.curriculum:
+                # Keep the grasping actor, relearn values for the changed rewards.
+                policy.value.reset_parameters()
         optimizer=torch.optim.Adam(policy.parameters(),lr=1e-4)
+        cti_optimizer=torch.optim.Adam(policy.parameters(),lr=1e-4) if args.cti else None
+        optimizer_states={role:optimizer}
+        if cti_optimizer is not None: optimizer_states['cti']=cti_optimizer
         schema=TEACHER_SCHEMA if role=='teacher' else 'fast-harvest-rgbd-r84/v2'
         meta=dict(schema=schema,role=role,model_sha256=runtime.manifest['model_sha256'],config=config)
         if role=='student':
@@ -144,14 +155,14 @@ def run(args):
         role_state={role:policy}
         restored=None
         if args.resume_from:
-            restored=load_checkpoint(args.resume_from,role_state,{role:optimizer},expected_meta={
+            restored=load_checkpoint(args.resume_from,role_state,optimizer_states,expected_meta={
                 'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
 
         def checkpoint(index):
             path=args.output/f'checkpoint-{index:06d}.pt'
             if path.exists():
                 return str(path)
-            save_checkpoint(path,role_state,{role:optimizer},
+            save_checkpoint(path,role_state,optimizer_states,
                 {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()},dict(meta,update=index))
             return str(path)
         if resumed:
@@ -163,11 +174,13 @@ def run(args):
             print(json.dumps(dict(update=0,evaluation=baseline)),flush=True)
             log.log({f'evaluation/{k}':v for k,v in baseline.items()},step=0)
         collector=HarvestCollector(runtime,stall_seconds=args.stall_seconds,
-            max_episode_seconds=args.max_episode_seconds,guidance=1.,role=role,teacher_policy=teacher)
+            max_episode_seconds=args.max_episode_seconds,guidance=1.,role=role,teacher_policy=teacher,
+            reward_profile=config['reward_profile'],curriculum_stage=(1 if args.curriculum and
+                baseline['grasp']>=.75 and baseline['physical_failure']<=.1 else 0))
         cti_queue=None
         if cti is not None:
             from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
-            cti_queue=PPODecisionQueue(worlds=args.cti_worlds)
+            cti_queue=PPODecisionQueue(worlds=args.cti_worlds,segment_steps=args.steps)
         if role=='student':
             from PIL import Image
             rgb=runtime.pixels()[0,:3].permute(1,2,0).cpu().numpy()
@@ -176,6 +189,8 @@ def run(args):
         started=time.monotonic()-offset; last_eval=time.monotonic()
         last_cti=time.monotonic()-args.cti_every_seconds
         previous=resumed['latest'] if resumed else {}
+        if args.curriculum:
+            collector.progress.curriculum_stage=previous.get('curriculum/stage',collector.progress.curriculum_stage)
         if cti_queue is not None and previous.get('cti/version',0)>=3:
             for key in ('total_collected_roots','total_dropped_roots','total_expired_roots','total_popped_roots'):
                 setattr(cti_queue,key,previous.get('cti/'+key,0))
@@ -193,11 +208,11 @@ def run(args):
         best=evaluation_score(best_eval)
         best_checkpoint=str(args.output/f"checkpoint-{best_eval['update']:06d}.pt")
         best_result={k:v for k,v in best_eval.items() if k!='update'}
-        phase='cti-v4' if args.cti else role
+        phase='cti-v5' if args.cti else role
         if restored:
             torch.set_rng_state(restored['rng']['torch'])
             torch.cuda.set_rng_state_all(restored['rng']['cuda'])
-            event=dict(event='resume',phase=phase,version=4 if args.cti else 0,at=time.time(),
+            event=dict(event='resume',phase=phase,version=5 if args.cti else 0,at=time.time(),
                 elapsed_seconds=offset,update=index,source_checkpoint=str(args.resume_from),
                 episodes_reset=True,remaining_seconds=args.train_seconds-offset)
             with (args.output/'phase-events.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')
@@ -210,32 +225,32 @@ def run(args):
                 cti_queue=cti_queue,policy_version=index)
             teacher_coef=args.teacher_distill_weight if teacher is not None else 0.
             metrics=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=collector.progress.gamma,
-                           teacher_coef=teacher_coef)
+                           teacher_coef=teacher_coef,gae_lambda=args.gae_lambda,entropy_coef=args.entropy_coef)
             epochs=1
             for _ in range(2):
                 replay=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=collector.progress.gamma,
-                              check_replay=False,teacher_coef=teacher_coef)
+                              check_replay=False,teacher_coef=teacher_coef,gae_lambda=args.gae_lambda,entropy_coef=args.entropy_coef)
                 if replay.get('early_stop'):
                     break
                 metrics.update(replay); epochs+=1
             # Counterfactual targets use a separate loss after factual PPO.
-            # Target 10% amortized wall time; one in-progress round may overshoot.
+            # Target the configured amortized wall-time share; a round may overshoot.
             elapsed=time.monotonic()-started
             if (cti is not None and len(cti_queue) and time.monotonic()-last_cti>=args.cti_every_seconds
-                    and cti_seconds <= .10*max(elapsed,1.)
+                    and cti_seconds <= args.cti_time_fraction*max(elapsed,1.)
                     and (cti_rounds==0 or args.train_seconds-elapsed>60)):
                 cti_started=time.monotonic()
                 with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                     batch=cti_queue.pop(index)
                     examples,cti_metrics=(cti.run(policy,batch) if batch is not None else
-                        ([],dict(version=4,source='ppo',queue_empty=True)))
+                        ([],dict(version=5,source='ppo',queue_empty=True)))
                     records=cti_metrics.pop('branch_records',[])
                     if records:
                         with (args.output/'cti-branches.jsonl').open('a') as f:
                             f.write(json.dumps(dict(update=index+1,elapsed_seconds=time.monotonic()-started,
-                                                   version=4,records=records))+'\n')
+                                                   version=5,records=records))+'\n')
                     # A short factual sequence checks drift outside the selected branches.
-                    cti_metrics.update(update_cti(policy,optimizer,examples,coef=args.cti_coef,
+                    cti_metrics.update(update_cti(policy,cti_optimizer,examples,coef=args.cti_coef,
                                                   anchor_rows=rows[:4]))
                 cti_seconds+=time.monotonic()-cti_started
                 cti_transitions+=cti_metrics.get('transitions',0)
@@ -245,7 +260,7 @@ def run(args):
                 del examples
             if cti is not None:
                 metrics.update({f'cti/{k}':v for k,v in cti_queue.metrics().items()})
-                metrics.update({'cti/version':4,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
+                metrics.update({'cti/version':5,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
                                 'cti/total_selected_worlds':cti_selected,'cti/rounds':cti_rounds})
             metrics['optimizer_epochs']=epochs
             metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
@@ -263,10 +278,18 @@ def run(args):
                 path=checkpoint(index)
                 result=evaluate(evaluation_runtime,policy,gait,args,role=role)
                 evaluations.append(dict(update=index,**result))
+                if args.curriculum and result['physical_failure']<=.1:
+                    stage=collector.progress.curriculum_stage
+                    if result['grasp']>=.75: stage=max(stage,1)
+                    if result['grasp']>=.5 and result.get('held_detach',0)>=.5: stage=2
+                    collector.progress.curriculum_stage=stage
                 metrics.update({f'evaluation/{k}':v for k,v in result.items()})
                 score=evaluation_score(result)
                 if score>best:best,best_checkpoint,best_result=score,path,result
                 last_eval=time.monotonic()
+            if args.curriculum:
+                metrics['curriculum/stage']=collector.progress.curriculum_stage
+                metrics['curriculum/live_credit_mean']=float(collector.progress.curriculum_credit.mean())
             metrics['elapsed_seconds']=time.monotonic()-started
             log.log(metrics,step=index)
             print(json.dumps(metrics),flush=True)
@@ -338,6 +361,10 @@ def main():
     p.add_argument('--eval-worlds',type=int,default=32)
     p.add_argument('--steps',type=int,default=64)
     p.add_argument('--minibatch-worlds',type=int,default=512)
+    p.add_argument('--curriculum',action='store_true')
+    p.add_argument('--gae-lambda',type=float,default=.95)
+    p.add_argument('--entropy-coef',type=float,default=0.)
+    p.add_argument('--cti-time-fraction',type=float,default=.1)
     p.add_argument('--train-seconds',type=float,default=3600)
     p.add_argument('--eval-every-seconds',type=float,default=120)
     p.add_argument('--stall-seconds',type=float,default=4.)
@@ -363,6 +390,10 @@ def main():
             0<=a.teacher_distill_weight<=10 and 1<=a.cti_worlds<=64 and
             a.cti_every_seconds>=0 and 0<a.cti_coef<=1 and (not a.cti or (a.role=='teacher' and a.cti_worlds<=a.worlds))):
         p.error('Invalid training size or duration')
+    if not (0<=a.gae_lambda<=1 and 0<=a.entropy_coef<=.1 and 0<a.cti_time_fraction<=.5):
+        p.error('Invalid learning settings')
+    if a.curriculum and a.role!='teacher':
+        p.error('Curriculum currently requires privileged teacher training')
     if a.resume_from and (a.initialize_from or (a.wandb_mode=='online' and not a.wandb_run_id)):
         p.error('Resume requires an explicit W&B run ID online and cannot initialize fresh weights')
     if a.wandb_run_id and not a.resume_from:

@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from training_dashboard import Dashboard, REMOTE_PROBE, _decode_jsonl_tail, _phase, handler_for, select_checkpoint
+import training_dashboard as dashboard_module
 
 class DashboardTest(unittest.TestCase):
     def test_active_pid_and_phase_fallbacks(self):
@@ -40,6 +41,37 @@ class DashboardTest(unittest.TestCase):
             state=json.loads(result.stdout)
             self.assertEqual(state['phase'],'cti-v2')
             self.assertEqual(len(state['branch_diagnostics'][0]['records'][0]),70000)
+
+    def test_run_configuration_drives_paths_probe_and_wandb_metadata(self):
+        run = 'teacher-curriculum-cti-001'
+        url = 'https://wandb.ai/example/project/runs/newrun'
+        try:
+            dashboard_module._configure_run(run, url)
+            self.assertEqual(dashboard_module.RUN, run)
+            self.assertEqual(dashboard_module.REMOTE_RUN,
+                             f'{dashboard_module.REMOTE_ROOT}/training/runs/{run}')
+            self.assertEqual(dashboard_module.WANDB_URL, url)
+            self.assertIn(f"root = pathlib.Path('{dashboard_module.REMOTE_RUN}')",
+                          dashboard_module.REMOTE_PROBE)
+            self.assertIn(f"run = '{run}'", dashboard_module.REMOTE_PROBE)
+            self.assertIn("and run in cmd", dashboard_module.REMOTE_PROBE)
+            with tempfile.TemporaryDirectory() as tmp:
+                instance = Dashboard(Path(tmp), no_render=True, run=run, wandb_url=url)
+                self.assertEqual(instance.snapshot()['run'], run)
+                self.assertEqual(instance.snapshot()['wandb_url'], url)
+                self.assertEqual(instance.remote_run, dashboard_module.REMOTE_RUN)
+        finally:
+            dashboard_module._configure_run(dashboard_module.DEFAULT_RUN)
+
+    def test_remote_report_can_supply_missing_wandb_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Dashboard(Path(tmp), no_render=True, run='teacher-curriculum-cti-001')
+            instance._remote_snapshot = lambda: {
+                'rows': [], 'report': {'wandb_url': 'https://wandb.ai/project/run'},
+                'failure': None, 'process_alive': False,
+            }
+            instance.poll()
+            self.assertEqual(instance.snapshot()['wandb_url'], 'https://wandb.ai/project/run')
 
     def test_best_uses_physical_outcomes_and_retains_earliest_tie(self):
         def row(step,success=0,failure=0,grasp=0,distance=.1):

@@ -5,6 +5,7 @@ from treesim.basket import CENTER
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
+CURRICULUM_PROFILE = 'milestone-harvest/v1'
 
 
 def signals(runtime):
@@ -21,12 +22,20 @@ def signals(runtime):
                 touching=wp.to_torch(task.hand_contact).bool().clone(),
                 stem_force=wp.to_torch(task.stem_force).clone(),
                 success=wp.to_torch(task.success).bool().clone(),
-                failed=wp.to_torch(task.failed).bool().clone())
+                failed=wp.to_torch(task.failed).bool().clone(),
+                settle_time=(wp.to_torch(task.settle_time).clone() if hasattr(task, 'settle_time')
+                             else torch.zeros_like(wp.to_torch(runtime._distance))))
 
 
 class EpisodeProgress:
     """Track meaningful best-so-far progress, never motion or repeat events."""
-    def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1., gamma=HARVEST_GAMMA):
+    def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1., gamma=HARVEST_GAMMA,
+                 reward_profile=REWARD_PROFILE, curriculum_stage=0):
+        if reward_profile not in (REWARD_PROFILE, CURRICULUM_PROFILE):
+            raise ValueError('Unknown harvesting reward profile')
+        if curriculum_stage not in (0, 1, 2):
+            raise ValueError('Curriculum stage must be 0, 1, or 2')
+        self.reward_profile, self.curriculum_stage = reward_profile, curriculum_stage
         self.stall_steps, self.max_steps, self.guidance = stall_steps, max_steps, guidance
         self.gamma = gamma
         self.age = torch.zeros_like(initial['distance'], dtype=torch.long)
@@ -36,7 +45,15 @@ class EpisodeProgress:
         self.best_force = torch.zeros_like(self.closest)
         self.ever_grasp = torch.zeros_like(self.closest, dtype=torch.bool)
         self.ever_detached = self.ever_grasp.clone()
+        self.ever_held_detach = self.ever_grasp.clone()
         self.previous = {k:v.clone() for k,v in initial.items()}
+        self.curriculum_best_reach = (1 - initial['distance'] / .25).clamp(0, 1)
+        self.curriculum_best_carry = (1 - initial['basket_distance']).clamp(0, 1)
+        self.curriculum_best_settle = torch.zeros_like(self.closest)
+        self.curriculum_grasp_paid = torch.zeros_like(self.ever_grasp)
+        self.curriculum_detach_paid = torch.zeros_like(self.ever_grasp)
+        self.curriculum_stage_ids = torch.full_like(self.age, curriculum_stage)
+        self.curriculum_credit = torch.zeros_like(self.closest)
 
     @staticmethod
     def potential(state):
@@ -54,8 +71,49 @@ class EpisodeProgress:
         self.best_basket[mask] = initial['basket_distance'][mask]
         self.best_force[mask] = 0
         self.ever_grasp[mask] = False; self.ever_detached[mask] = False
+        self.ever_held_detach[mask] = False
+        if self.curriculum_stage not in (0, 1, 2):
+            raise ValueError('Curriculum stage must be 0, 1, or 2')
+        self.curriculum_best_reach[mask] = (1 - initial['distance'][mask] / .25).clamp(0, 1)
+        self.curriculum_best_carry[mask] = (1 - initial['basket_distance'][mask]).clamp(0, 1)
+        self.curriculum_best_settle[mask] = 0
+        self.curriculum_grasp_paid[mask] = False
+        self.curriculum_detach_paid[mask] = False
+        self.curriculum_stage_ids[mask] = self.curriculum_stage
+        self.curriculum_credit[mask] = 0
         for key,value in initial.items():
             self.previous[key][mask] = value[mask]
+
+    def _milestone_bonus(self, now, physical_done):
+        # This curriculum is deliberately non-potential guidance. Bounded,
+        # irreversible credit survives stalls; it never declares task success.
+        safe = ~now['failed'] & ~(physical_done & ~now['success'])
+        held = now['holding'] & safe
+        new_grasp = held & ~self.curriculum_grasp_paid
+        new_detach = held & now['detached'] & ~self.curriculum_detach_paid
+        reach = (1 - now['distance'] / .25).clamp(0, 1)
+        carry = (1 - now['basket_distance']).clamp(0, 1)
+        # The task timer advances only when released, contained, contacting the
+        # basket, detached and below its physical settling-speed threshold.
+        settle = (now.get('settle_time', torch.zeros_like(reach)) / .5).clamp(0, 1)
+        dr = torch.where(safe & ~now['detached'], (reach - self.curriculum_best_reach).clamp_min(0), 0.)
+        dc = torch.where(held & now['detached'], (carry - self.curriculum_best_carry).clamp_min(0), 0.)
+        ds = torch.where(safe & now['detached'], (settle - self.curriculum_best_settle).clamp_min(0), 0.)
+        # All stages retain every skill. Stage changes take effect at world reset
+        # so switching weights cannot repay an earlier milestone.
+        weights = reach.new_tensor(((.5, 1.5, .75, .5, .75),
+                                    (.25, .75, 1.5, .75, .75),
+                                    (.25, .5, .75, 1.25, 1.25)))[self.curriculum_stage_ids]
+        earned = torch.stack((dr, new_grasp.float(), new_detach.float(), dc, ds), dim=-1)
+        bonus = (earned * weights).sum(dim=-1).clamp_min(0)
+        bonus = torch.minimum(bonus, (4. - self.curriculum_credit).clamp_min(0))
+        self.curriculum_best_reach += dr
+        self.curriculum_best_carry += dc
+        self.curriculum_best_settle += ds
+        self.curriculum_grasp_paid |= new_grasp
+        self.curriculum_detach_paid |= new_detach
+        self.curriculum_credit += bonus
+        return self.guidance * bonus
 
     def step(self, now, physical_done):
         self.age += 1; self.stale += 1
@@ -71,13 +129,18 @@ class EpisodeProgress:
         self.best_basket[new_detach | carry_progress] = now['basket_distance'][new_detach | carry_progress]
         self.best_force[pull_progress] = now['stem_force'][pull_progress]
         self.ever_grasp |= now['grasp']; self.ever_detached |= now['detached']
+        self.ever_held_detach |= (now['detached'] & now['holding'] & ~now['failed'] &
+                                 ~(physical_done & ~now['success']))
         stalled = (self.stale >= self.stall_steps) & ~physical_done
         terminated = physical_done | stalled
         truncated = (self.age >= self.max_steps) & ~terminated
         # Discount-consistent shaping telescopes over an episode. True terminals
         # clear all credit; hard timeouts retain it for the critic bootstrap.
         next_potential = torch.where(terminated, 0., self.potential(now))
-        self.shaping_reward = self.guidance * (self.gamma * next_potential - self.potential(self.previous))
+        if self.reward_profile == CURRICULUM_PROFILE:
+            self.shaping_reward = self._milestone_bonus(now, physical_done)
+        else:
+            self.shaping_reward = self.guidance * (self.gamma * next_potential - self.potential(self.previous))
         failure = physical_done & ~now['success']
         self.task_reward = -.001 + 20 * now['success'] - 5 * failure - .5 * stalled
         reward = self.task_reward + self.shaping_reward
@@ -88,7 +151,7 @@ class EpisodeProgress:
 class HarvestCollector:
     """Keep simulation state and GRU memory across optimizer batch boundaries."""
     def __init__(self, runtime, *, stall_seconds=4., max_episode_seconds=30., guidance=1.,
-                 role='student', teacher_policy=None):
+                 role='student', teacher_policy=None, reward_profile=REWARD_PROFILE, curriculum_stage=0):
         if role not in ('teacher', 'student'):
             raise ValueError("role must be 'teacher' or 'student'")
         if role == 'teacher' and teacher_policy is not None:
@@ -102,7 +165,8 @@ class HarvestCollector:
         self.episode_ids = torch.zeros(runtime.worlds,dtype=torch.long,device=runtime.device_name)
         self.progress = EpisodeProgress(signals(runtime),
             stall_steps=round(stall_seconds/runtime.control_dt),
-            max_steps=round(max_episode_seconds/runtime.control_dt), guidance=guidance)
+            max_steps=round(max_episode_seconds/runtime.control_dt), guidance=guidance,
+            reward_profile=reward_profile, curriculum_stage=curriculum_stage)
         self.tick = 0
         self.rgbd = None
 
@@ -179,12 +243,12 @@ class HarvestCollector:
                     # Summaries are episode outcomes; each world contributes once.
                     ids = ending.nonzero(as_tuple=False).flatten()
                     packed = torch.stack((ids, now['success'][ids],
-                        self.progress.ever_grasp[ids],self.progress.ever_detached[ids],
+                        self.progress.ever_grasp[ids],self.progress.ever_detached[ids],self.progress.ever_held_detach[ids],
                         (done & ~now['success'])[ids],stalled[ids],truncated[ids],
                         self.progress.age[ids]*rt.control_dt,self.progress.closest[ids]),dim=1).cpu().tolist()
-                    for world,success,grasp,detached,failure,stall,timeout,duration,closest in packed:
+                    for world,success,grasp,detached,held_detach,failure,stall,timeout,duration,closest in packed:
                         episodes.append(dict(world=int(world),success=bool(success),grasp=bool(grasp),
-                            detached=bool(detached),physical_failure=bool(failure),stalled=bool(stall),
+                            detached=bool(detached),held_detach=bool(held_detach),physical_failure=bool(failure),stalled=bool(stall),
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
                     rt.reset(ending)
                     self.episode_ids[ending] += 1
@@ -215,4 +279,6 @@ def episode_metrics(episodes):
     if not episodes:
         return {'episodes':0}
     keys = ('success','grasp','detached','physical_failure','stalled','timeout','duration_s','closest_distance_m')
-    return {'episodes':len(episodes),**{k:sum(r[k] for r in episodes)/len(episodes) for k in keys}}
+    return {'episodes':len(episodes),
+            'held_detach':sum(r.get('held_detach',False) for r in episodes)/len(episodes),
+            **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys}}

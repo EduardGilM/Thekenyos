@@ -46,13 +46,17 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False):
 
 
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.99, check_replay=True,
-           teacher_coef=0.):
+           teacher_coef=0., gae_lambda=.95, entropy_coef=0.):
     import torch
     from treesim.kiwi_rl.ppo import compute_gae_torch, tanh_logprob
     if any(row.get('kind', 'factual_on_policy') != 'factual_on_policy' for row in rows):
         raise ValueError('PPO update accepts factual on-policy rows only')
     if teacher_coef and any('teacher_action' not in row for row in rows):
         raise ValueError('teacher_coef requires teacher actions on every rollout row')
+    if not math.isfinite(gae_lambda) or not 0 <= gae_lambda <= 1:
+        raise ValueError('gae_lambda must be finite and in [0, 1]')
+    if not math.isfinite(entropy_coef) or entropy_coef < 0:
+        raise ValueError('entropy_coef must be finite and nonnegative')
     rewards = torch.stack([r['reward'] for r in rows])
     if not math.isfinite(teacher_coef) or teacher_coef < 0:
         raise ValueError('teacher_coef must be finite and nonnegative')
@@ -63,7 +67,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
     for t, row in enumerate(rows):
         if 'timeout_value' in row:
             next_values[t] = torch.where(truncated[t], row['timeout_value'], next_values[t])
-    advantages = compute_gae_torch(rewards, values, next_values, ended, truncated, gamma, .95)
+    advantages = compute_gae_torch(rewards, values, next_values, ended, truncated, gamma, gae_lambda)
     returns = (advantages + values).detach()
     advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
     # Sequence minibatches bound camera activation memory as worlds scale.
@@ -74,18 +78,27 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
     observation_key = 'privileged' if role == 'teacher' else 'rgbd'
     if any(observation_key not in row for row in rows):
         raise ValueError(f'{role} PPO rows are missing {observation_key} observations')
+    return_variance = returns.var(unbiased=False)
+    explained_variance = (1 - (returns - values).var(unbiased=False) / return_variance
+                          if float(return_variance) > 1e-12 else returns.new_zeros(()))
     metrics = []
     optimizer.zero_grad(set_to_none=True)
     for start in range(0, rewards.shape[1], batch_size):
         sl = slice(start, start + batch_size)
         memory = rows[0].get('initial_memory', torch.zeros_like(rows[0]['r84'][:, :64]))[sl].detach()
-        logps, predictions, bounded_actions = [], [], []
+        logps, predictions, bounded_actions, entropies, action_stds = [], [], [], [], []
         for row in rows:
             memory = memory * (~row['reset'][sl])[:, None]
             mean, logstd, value, memory = policy(row[observation_key][sl], row['r84'][sl], memory)
             logps.append(tanh_logprob(row['raw'][sl], mean, logstd))
             predictions.append(value)
             bounded_actions.append(mean.tanh())
+            action_stds.append(logstd.exp().detach().expand_as(mean).mean(dim=0))
+            if entropy_coef:
+                # Reparameterized entropy includes tanh's Jacobian. Unsquashed
+                # Gaussian entropy alone can drive the controls into saturation.
+                draw = mean + logstd.exp() * torch.randn_like(mean)
+                entropies.append(-tanh_logprob(draw, mean, logstd))
         logratio = torch.stack(logps) - torch.stack([r['logp'][sl] for r in rows])
         ratio = logratio.exp()
         kl = ((ratio - 1.) - logratio).mean()
@@ -98,7 +111,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
             return dict(kl=float(kl.detach()), early_stop=1)
         actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
         critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
-        loss = actor + .5 * critic
+        entropy = torch.stack(entropies).mean() if entropies else rewards.new_zeros(())
+        loss = actor + .5 * critic - entropy_coef * entropy
         teacher_loss = rewards.new_zeros(())
         if teacher_coef and 'teacher_action' in rows[0]:
             teacher = torch.stack([r['teacher_action'][sl] for r in rows])
@@ -110,13 +124,22 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
         # Accumulate across every world before stepping: a KL stop after the
         # first tiny minibatch would waste nearly all collected experience.
         (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
-        metrics.append((float(loss.detach()), float(kl.detach()), float(teacher_loss.detach())))
+        metrics.append((float(loss.detach()), float(kl.detach()), float(teacher_loss.detach()),
+                        float(actor.detach()), float(critic.detach()), float(entropy.detach()),
+                        torch.stack(action_stds).mean(dim=0), rewards[:, sl].numel()))
     grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
     optimizer.step()
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
                 teacher_mse=sum(m[2] for m in metrics)/len(metrics),
                 grad_norm=float(grad), minibatches=len(metrics), optimized_transitions=int(rewards.numel()),
-                reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)))
+                reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)),
+                actor_loss=sum(m[3]*m[7] for m in metrics)/rewards.numel(),
+                critic_loss=sum(m[4]*m[7] for m in metrics)/rewards.numel(),
+                entropy=sum(m[5]*m[7] for m in metrics)/rewards.numel(),
+                explained_variance=float(explained_variance), return_variance=float(return_variance),
+                gae_lambda=gae_lambda, entropy_coef=entropy_coef,
+                **{f'action_std/{i}': float(sum(m[6][i]*m[7] for m in metrics)/rewards.numel())
+                   for i in range(metrics[0][6].numel())})
 
 
 def evaluate(runtime, policy, gait, steps, camera_every):

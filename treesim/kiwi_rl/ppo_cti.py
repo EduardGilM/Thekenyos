@@ -95,12 +95,15 @@ class PPODecisionQueue:
         progress = collector.progress
         progress_state = {name: _clone(_slice(getattr(progress, name), worlds)) for name in
                           ('age', 'stale', 'closest', 'best_basket', 'best_force',
-                           'ever_grasp', 'ever_detached', 'previous')}
+                           'ever_grasp', 'ever_detached', 'ever_held_detach', 'previous',
+                           'curriculum_best_reach','curriculum_best_carry','curriculum_best_settle',
+                           'curriculum_grasp_paid','curriculum_detach_paid','curriculum_stage_ids','curriculum_credit')}
         from .harvest_training import EpisodeProgress
         selected_initial = {key: value.index_select(0, worlds).clone()
                             for key, value in progress.previous.items()}
         sliced_progress = EpisodeProgress(selected_initial, stall_steps=progress.stall_steps,
-            max_steps=progress.max_steps, guidance=progress.guidance, gamma=progress.gamma)
+            max_steps=progress.max_steps, guidance=progress.guidance, gamma=progress.gamma,
+            reward_profile=progress.reward_profile,curriculum_stage=progress.curriculum_stage)
         for name, value in progress_state.items():
             setattr(sliced_progress, name, value)
         rng_state = dict(torch_cpu=torch.random.get_rng_state().clone())

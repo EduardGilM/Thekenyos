@@ -842,7 +842,24 @@ Student distillation uses a frozen learned teacher on states visited by the
 sensor-only student. It requires successful evaluation evidence for the exact
 teacher checkpoint; an unverified scripted controller is not a substitute.
 
-Selective counterfactual training v4 uses actual PPO rollout decision points.
+The `--curriculum` teacher profile uses bounded, non-potential milestone credit
+for best-so-far reaching, sustained grasp, held detachment, carrying and physical
+basket settling. Credit is paid once per episode/progress increment and capped
+at four; it is not erased by a later stall. These are learning rewards, not full
+harvest success. All skills remain rewarded in every stage. Stage weights advance
+only after unguided evaluation demonstrates grasping and safe held detachment.
+The task still requires physically settled fruit in the basket for success.
+
+The production curriculum run initializes the actor from checkpoint 205, resets
+the critic head and uses fresh independent PPO/CTI Adam optimizers. It uses
+`--steps 128 --minibatch-worlds 256 --gae-lambda .99 --entropy-coef .001`
+with 4096 worlds. PPO remains on-policy with independent action samples; coherent
+multi-step action exploration occurs in CTI. CTI has `--cti-time-fraction .2`.
+Both optimizers are saved for exact resume. CTI updates must reduce target error
+as well as meet the factual KL limit, otherwise model and auxiliary Adam roll back.
+This is not proof of convergence; unguided physical evaluations determine progress.
+
+Selective counterfactual training v5 uses actual PPO rollout decision points.
 `--cti --cti-worlds 16 --cti-every-seconds 0` continuously collects one selected
 16-world root batch per PPO buffer, mixing nearest-fruit and rotating worlds.
 The bounded queue retains up to eight batches and expires old policy versions.

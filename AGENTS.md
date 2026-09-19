@@ -214,7 +214,7 @@ CTI requires replay acceptance and meaningful physical outcome comparisons, not
 a successful full harvest first. Early action-branch experiments may develop
 executor competence; keep their data separate from factual PPO. Process-local
 snapshots alone are not evidence of CTI policy training or benefit.
-CTI v4 roots must come from the actual PPO collector, with factual action replay
+CTI v5 roots must come from the actual PPO collector, with factual action replay
 and source episode/timestep/policy identifiers. Never substitute independently
 generated pilot trajectories. Reject targets when cross-runtime factual replay
 fails; preserve bounded queueing and frozen collection-policy continuations.
@@ -239,3 +239,14 @@ preserves the original foliage, and apple placement must remain unaffected.
 The layer is capped at 100,000 leaves; use cropped plots rather than enabling it
 blindly over the commercial field. Run `python -B -m unittest tests.test_pergola -v`
 after changing it, and inspect a newly generated image as well.
+
+## Full-cycle teacher curriculum
+
+`--curriculum` explicitly selects bounded non-potential milestone guidance. Keep
+full harvest success tied to physical basket settling. Pay progress only once per
+episode and reject failed/unheld-detachment credit. Stage promotion uses unguided
+grasp and safe `held_detach`, never raw detachment alone. Snapshot all curriculum
+and held-detachment state for PPO-rooted CTI replay. PPO and CTI have separate Adam
+states; checkpoint both. CTI must decrease selected-target error as well as pass
+its KL guard. Preserve the prior completed run when warm-starting a new reward
+profile. Longer GAE and entropy settings must be explicit in run configuration.

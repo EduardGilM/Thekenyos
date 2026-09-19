@@ -158,6 +158,20 @@ class CTIUpdateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'nonnegative'):
             update_cti(policy, optimizer, [], coef=float('nan'))
 
+    def test_rejects_update_without_nontrivial_target_error_reduction(self):
+        policy = _TinyTeacher()
+        optimizer = torch.optim.Adam(policy.parameters(), lr=0.)
+        row = training_row()
+        before = deepcopy(policy.state_dict())
+        metrics = update_cti(policy, optimizer, [row])
+        self.assertTrue(metrics['rejected_update'])
+        self.assertFalse(metrics['updated'])
+        self.assertTrue(metrics['no_target_improvement'])
+        self.assertAlmostEqual(metrics['target_error_after'], metrics['target_error_before'], places=7)
+        self.assertEqual(optimizer.state_dict()['state'], {})
+        for key, value in policy.state_dict().items():
+            torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+
     def test_factual_kl_rejection_restores_policy_and_adam_state(self):
         policy = _TinyTeacher()
         optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
@@ -380,9 +394,9 @@ class CTIGpuIntegrationTest(unittest.TestCase):
             policy = build_privileged_policy().cuda().eval()
             from treesim.kiwi_rl.harvest_training import HarvestCollector
             from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
-            collector=HarvestCollector(source,role='teacher')
-            queue=PPODecisionQueue(worlds=2)
-            collector.collect(policy,gait,64,cti_queue=queue,policy_version=7)
+            collector=HarvestCollector(source,role='teacher',reward_profile='milestone-harvest/v1')
+            queue=PPODecisionQueue(worlds=2,segment_steps=128)
+            collector.collect(policy,gait,128,cti_queue=queue,policy_version=7)
             batch=queue.pop(7)
             cti=SelectiveCTI(runtime,gait)
             examples,metrics=cti.run(policy,batch)

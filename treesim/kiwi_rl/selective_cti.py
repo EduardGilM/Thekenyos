@@ -358,7 +358,7 @@ class SelectiveCTI:
                               **batch.sources[record['world']])
         selected=branch['selected_worlds']
         successful=(int(torch.stack([r['success_mask'] & r['mask'] for r in examples]).any(dim=0).sum()) if examples else 0)
-        metrics=dict(version=4,source='ppo',seconds=time.perf_counter()-started,
+        metrics=dict(version=5,source='ppo',seconds=time.perf_counter()-started,
                      transitions=branch['transitions'],candidate_branches=len(candidates),
                      pilot_events=rt.worlds,roots_searched=rt.worlds,
                      alternatives_compared=rt.worlds*(len(candidates)-1),
@@ -378,7 +378,8 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
     target_actions = sum(int(row['mask'].sum().item()) for row in rows)
     metrics = dict(loss=0., selected_worlds=selected_worlds, target_actions=target_actions,
                    updated=False, kl=0., target_error_before=None, target_error_after=None,
-                   rejected_update=False, nonfinite_update=False)
+                   rejected_update=False, nonfinite_update=False,
+                   no_target_improvement=False)
     if not rows or not target_actions or not coef:
         return metrics
     for row in rows:
@@ -444,7 +445,12 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
                                         not math.isfinite(attempted_error))
         # Zero is only a logging placeholder when nonfinite_update is true.
         metrics['kl'] = max(0., kl_value) if math.isfinite(kl_value) else 0.
-        accepted = not metrics['nonfinite_update'] and kl_value <= .01
+        required_improvement = max(abs(before_error) * 1e-4, 1e-8)
+        improved_target = (math.isfinite(before_error) and math.isfinite(attempted_error) and
+                           before_error - attempted_error > required_improvement)
+        metrics['no_target_improvement'] = not improved_target
+        accepted = (not metrics['nonfinite_update'] and kl_value <= .01 and
+                    improved_target)
     else:
         metrics['nonfinite_update'], accepted = True, False
     if not accepted:
