@@ -290,13 +290,14 @@ def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.0):
     return offset_grasp_local(tcp_local, tcp_local, prefer_m=inset, min_m=0.0, max_m=max(inset, 0.05))
 
 
-def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.02):
+def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.0):
     """Grasp pocket in the TCP site's body frame, from pad collision geoms.
 
     Body origins of the jaw/finger links sit at the knuckle, ~12 cm behind the
     pads. Using those midpoints pulled fruit out of the grasp. Pad geom centres
     can sit a few centimetres past ``hand_tcp``; those are clamped back to the
-    opening and given a 2 cm mouth inset so the COM is not on the teeth.
+    opening. A 2 cm inset overlapped the palm (easy11 423 N / 0.75 m slip);
+    default spawn is the TCP, already between the pads.
     """
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
@@ -315,7 +316,7 @@ def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.02):
     return axial_mouth_local(tcp_local, pocket_local, inset_m=float(inset_m))
 
 
-def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.02):
+def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.0):
     """World COM for a free fruit sitting between the pads. Not a weld."""
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
@@ -468,15 +469,17 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
             mujoco.mj_forward(model, data)
             max_load = 0.0
-            for _ in range(steps):
+            warmup = max(1, min(8, steps // 5))
+            for step in range(steps):
                 data.qpos[arm_qids] = start
                 _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold,
                                       cap_nm=cap, kp=kp, kd=kd)
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)
-                max_load = max(max_load, _hand_fruit_contact_load_n(
-                    model, data, hand_geoms, fruit_geoms))
+                if step + 1 >= warmup:
+                    max_load = max(max_load, _hand_fruit_contact_load_n(
+                        model, data, hand_geoms, fruit_geoms))
             mujoco.mj_forward(model, data)
             fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
             slip = float(np.linalg.norm(fruit - pocket0))
