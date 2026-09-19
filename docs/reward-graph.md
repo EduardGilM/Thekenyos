@@ -1,4 +1,84 @@
-# Continuous harvesting graph v2
+# Prerequisite harvesting graph v3
+
+The current profile is `graph-harvest/v3`. This contract supersedes the v1/v2
+partial-drop rewards below; archived checkpoints retain their original profile.
+It is an engineering training objective, not a physical calibration claim.
+
+Position, grip, extraction, carry, deposit and completion have physical
+prerequisites. Position uses continuous collision-region distance and completes after 0.1 s
+of safe enclosure. Grip requires
+safe bilateral contact, enclosure, low slip and 0.1 s dwell. Extraction qualifies
+only when secure grip holds on both observed sides of the detachment interval.
+An unheld detachment terminates as a task failure; it does not count as extraction.
+Loss of grip removes dependent carry credit. Recovery of a valid extraction is
+possible, but recovering a prerequisite pays no repeatable event bonus.
+
+A release is valid only following controlled extraction, from a secure grip at
+most 4 cm from the computed release region above the basket. It retains transit
+credit while falling into the basket. Physical basket containment/contact and two
+continuous settling seconds are still required. Release in transit, a ground
+drop, and physical success reached without the prerequisite chain earn no success.
+
+Valid state grades are: continuous position 0–2; enclosure/jaw fit 2–3;
+secure attached grip/extraction load 4–5; held extraction/carry 6–8;
+qualified release 8; basket settling 10–11; completion 12. The gaps reserve credit
+for completed prerequisites. A backward stage transition additionally costs
+0.5 per lost stage. This is bounded and does not prescribe motor actions.
+Shaping remains `gamma*next_grade-previous_grade`, gamma .999, but every true
+terminal has zero next potential. Truncations retain final-value bootstrap.
+Thus a failed or deliberately shortened episode cannot retain partial shaping
+credit. Time costs .001/step, task failure costs 5, stall costs .5, and valid
+completion pays 20. Numeric corruption remains fail-fast, not training data.
+
+## Practice and acceptance
+
+At most one quarter of reset slots use an in-memory bank of up to eight
+physically reached states per boundary: near enclosure, enclosed, secure grip,
+held extraction, and release-ready. Physics/controller buffers and prerequisite
+history use the existing world snapshot contract. New practice episodes reset
+policy memory and episode timers; they do not splice stale hidden states into
+current policies. No assisted motion or invented grasp pose is used. The bank is
+rebuilt after process restart. Full-start episode metrics exclude practice starts.
+
+Every candidate evaluation covers the training scene and distinct held-out
+scene, each with one deterministic trial and two seeded stochastic trials.
+These are robustness checks over two scenes, not broad orchard generalization.
+The accepted policy may not lose more than 5 percentage points in any established
+stage completion rate, increase physical failure or combined task-failure rates by more
+than 5 points, or worsen closest approach by more than 2 cm, in either scene.
+The combined failure gate permits replacing an invalid extraction with a valid
+extraction followed by a drop while learning retention; it does not promote the
+drop itself. These are explicit engineering tolerances, not statistical confidence bounds.
+Protected rates use the best accepted historical values, preventing a sequence
+of individually small regressions from erasing a skill. Among candidates that pass, rank physical completion, deposition, carry,
+controlled extraction, grip and positioning before failure rates and distance.
+Promotion additionally requires at least a 5-point outcome-rate gain or a 1 cm
+approach improvement; insignificant score changes do not promote candidates.
+A candidate with a material regression restores the accepted actor, critic and
+both optimizers, resets live episodes, and clears stale CTI roots. A candidate
+without improvement continues training but is not promoted. `accepted.json`
+records the selected checkpoint; rejected candidate files remain inspectable.
+
+New reward profiles warm-start actor weights but reset the critic and optimizer
+states. Checkpoint metadata names the source checkpoint. A process resume under
+the same reward profile restores both optimizers and the accepted checkpoint.
+
+## Diagnostics and checks
+
+W&B and the local dashboard report full-episode stage entries, completion rates,
+completion conditional on entry, time per stage, and regressions by prerequisite.
+Practice outcomes have a separate namespace. Candidate evaluation, accepted
+skills, promotions and rollbacks are separate; the latest video may be a rejected
+candidate. Additive stage shaping includes terminal debits; completion reward is
+reported separately. PPO and CTI share graph state, rewards and termination.
+
+Run `tests.test_prerequisite_graph`, the archived reward tests, and the GPU
+practice/replay test with `GRAPH_GPU_TEST=1`, `GRAPH_CHECKPOINT`, `FAST_SCENE`
+and `GAIT_CHECKPOINT`. Also run the existing CTI learning/replay checks,
+`scripts/check_graph_training.py`, and a full-size launch smoke check.
+
+## Archived continuous harvesting graph v2
+
 
 The current profile is `graph-harvest/v2` with CTI v8. It supersedes the v1
 approach radius and stall rules below; v1 checkpoints retain their old scoring.

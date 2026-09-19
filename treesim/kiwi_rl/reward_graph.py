@@ -3,8 +3,10 @@ import numpy as np
 import torch
 
 LEGACY_GRAPH_PROFILE = 'graph-harvest/v1'
-GRAPH_PROFILE = 'graph-harvest/v2'
-GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, GRAPH_PROFILE)
+CONTINUOUS_GRAPH_PROFILE = 'graph-harvest/v2'
+GRAPH_PROFILE = 'graph-harvest/v3'
+CONTINUOUS_GRAPH_PROFILES = (CONTINUOUS_GRAPH_PROFILE, GRAPH_PROFILE)
+GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, *CONTINUOUS_GRAPH_PROFILES)
 STAGE_NAMES = ('position', 'grip', 'extract', 'carry', 'deposit', 'complete')
 GRAPH_CONSTANTS = dict(approach_radius_m=.5, approach_outer_m=1.5,
     enclosure_tolerance_m=.008, enclosure_core_radius_fraction=.25, insertion_range_m=.15, slip_enter_m_s=.05,
@@ -106,7 +108,7 @@ class CollisionGeometry:
             points += (inv @ (p[:, body] - p[:, self.hand])[..., None])
             bounds.append(torch.stack((points.amin(-1), points.amax(-1)), dim=1))
         enclosed, insertion, closure = enclosure_features(local, extent, *bounds,
-            continuous=runtime.task_profile == GRAPH_PROFILE)
+            continuous=runtime.task_profile in CONTINUOUS_GRAPH_PROFILES)
         cvel = wp.to_torch(runtime.data.cvel)
         com = wp.to_torch(runtime.data.subtree_com)
         point = wp.to_torch(runtime.data.xipos)[:, fruit]
@@ -125,6 +127,8 @@ class CollisionGeometry:
 def graph_step(progress, now):
     """Update explicit dwell/hysteresis and current-state grade, including regressions."""
     c = GRAPH_CONSTANTS
+    if progress.reward_profile == GRAPH_PROFILE:
+        return prerequisite_graph_step(progress, now)
     safe = ~now['failed'] & (now['max_load'] <= c['jaw_load_limit_N']) & (now['damage'] <= c['damage_limit'])
     threshold = torch.where(progress.graph_grip, c['slip_exit_m_s'], c['slip_enter_m_s'])
     loaded = now['enclosed'] & now['bilateral'] & safe & (now['slip'] < threshold)
@@ -137,17 +141,17 @@ def graph_step(progress, now):
     approach = approach_score(now['distance'])
     insertion = torch.where(approach >= 1., now['insertion'], 0.)
     score = approach + insertion
-    if progress.reward_profile == GRAPH_PROFILE:
+    if progress.reward_profile in CONTINUOUS_GRAPH_PROFILES:
         score = 2 * now['insertion']
     grip_quality = torch.minimum((progress.graph_dwell / c['grip_dwell_s']).clamp(0, 1), now['closure'])
-    if progress.reward_profile == GRAPH_PROFILE:
+    if progress.reward_profile in CONTINUOUS_GRAPH_PROFILES:
         # Jaw positioning can improve before loaded contact; sustained safe
         # contact earns the remainder. Empty closure earns nothing.
         grip_quality = .25 * now['closure'] + .75 * grip_quality
     score = torch.where(now['enclosed'], 2. + grip_quality, score)
     score = torch.where(progress.graph_grip, 3. + .5*(now['stem_force']/c['stem_detach_force_N']).clamp(0, 1), score)
     carry = (1-now['release_distance']/c['carry_range_m']).clamp(0, 1)
-    if progress.reward_profile == GRAPH_PROFILE:
+    if progress.reward_profile in CONTINUOUS_GRAPH_PROFILES:
         carry = 1 / (1 + now['release_distance']/c['carry_range_m'])
     score = torch.where(detached, torch.where(progress.graph_grip, 4.+carry, 3.6), score)
     settling = detached & ~now['touching'] & (now['settle_time'] > 0)
@@ -163,4 +167,63 @@ def graph_step(progress, now):
     progress.graph_components = {
         name: (score - edges[i]).clamp(0., edges[i+1]-edges[i])
         for i, name in enumerate(STAGE_NAMES)}
+    return score
+
+
+def prerequisite_graph_step(p, now):
+    """Physical prerequisite graph. Events never substitute for maintained control."""
+    c = GRAPH_CONSTANTS
+    safe = ~now['failed'] & (now['max_load'] <= c['jaw_load_limit_N']) & (now['damage'] <= c['damage_limit'])
+    was_gripped = p.graph_grip.clone()
+    was_detached = p.graph_detached.clone()
+    threshold = torch.where(was_gripped, c['slip_exit_m_s'], c['slip_enter_m_s'])
+    loaded = now['enclosed'] & now['bilateral'] & safe & (now['slip'] < threshold)
+    p.graph_dwell = torch.where(loaded, p.graph_dwell + p.control_dt, 0.)
+    p.graph_grip = loaded & now['holding'] & (p.graph_dwell >= c['grip_dwell_s'])
+    p.graph_detached |= now['detached']
+    detached = p.graph_detached
+    new_detach = detached & ~was_detached
+    # Both sides of the observed detachment interval must have secure control.
+    p.graph_valid_extract |= new_detach & was_gripped & p.graph_grip
+    p.graph_invalid_extract |= new_detach & ~p.graph_valid_extract
+    releasing = (detached & p.graph_valid_extract & was_gripped & ~p.graph_grip & safe
+                 & (p.previous['release_distance'] <= c['release_clearance_m']))
+    p.graph_valid_release |= releasing
+    p.graph_valid_release &= safe & ~now['ground_contact'] & ~p.graph_grip
+    held = detached & p.graph_valid_extract & p.graph_grip
+    settling = p.graph_valid_release & ~now['touching'] & (now['settle_time'] > 0)
+    p.graph_success = now['success'] & settling & p.graph_valid_extract & safe
+    p.graph_ground_drop = detached & now['ground_contact'] & ~p.graph_success
+    p.graph_enclosed = now['enclosed'].clone()
+    p.graph_slip = now['slip'].clone()
+    attached = ~detached
+    fit = .25*now['closure'] + .75*torch.minimum((p.graph_dwell/c['grip_dwell_s']).clamp(0,1),now['closure'])
+    score = 2*now['insertion']
+    score = torch.where(now['enclosed'], 2.+fit, score)
+    score = torch.where(p.graph_grip, 4.+(now['stem_force']/c['stem_detach_force_N']).clamp(0,1),score)
+    # Detached but uncontrolled fruit has no approach/grip/extraction credit.
+    score = torch.where(detached, 0., score)
+    carry = 1/(1+now['release_distance']/c['carry_range_m'])
+    score = torch.where(held, 6.+2*carry, score)
+    score = torch.where(p.graph_valid_release, 8., score)
+    score = torch.where(settling, 10.+(now['settle_time']/c['settle_seconds']).clamp(0,1),score)
+    score = torch.where(p.graph_success, 12., score)
+    score = torch.where(safe & ~p.graph_ground_drop & ~p.graph_invalid_extract,score,0.)
+    p.graph_score = score
+    stage = torch.zeros_like(p.graph_stage)
+    stage = torch.where(attached & now['enclosed'],1,stage)
+    stage = torch.where(attached & p.graph_grip,2,stage)
+    stage = torch.where(held,3,stage)
+    stage = torch.where((held & (now['release_distance'] <= c['release_clearance_m'])) | p.graph_valid_release,4,stage)
+    stage = torch.where(settling,5,stage)
+    stage = torch.where(p.graph_success,6,stage)
+    p.graph_stage = torch.where(safe & ~p.graph_ground_drop & ~p.graph_invalid_extract,stage,0)
+    p.graph_position_dwell = torch.where(attached & now['enclosed'] & safe,p.graph_position_dwell+p.control_dt,0.)
+    p.graph_completed['position'] |= p.graph_position_dwell >= c['grip_dwell_s']
+    p.graph_completed['grip'] |= attached & p.graph_grip
+    p.graph_completed['extract'] |= new_detach & p.graph_valid_extract
+    p.graph_completed['carry'] |= held & (now['release_distance'] <= c['release_clearance_m'])
+    p.graph_completed['deposit'] |= p.graph_success
+    p.graph_completed['complete'] |= p.graph_success
+    p.graph_components = {name:(score-2*i).clamp(0.,2.) for i,name in enumerate(STAGE_NAMES)}
     return score

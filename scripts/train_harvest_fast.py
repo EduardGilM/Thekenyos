@@ -9,10 +9,14 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from train_fast import update
 from train_physical_smoke import build_policy
+from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE
+from treesim.kiwi_rl.graph_training import graph_rank, acceptance, protect_skills, save_acceptance, StagePractice
 from treesim.kiwi_rl.fast_teacher import TEACHER_SCHEMA, build_privileged_policy, validate_teacher_report
 
 
 def evaluation_score(result):
+    if 'completed/position' in result:
+        return graph_rank(result)
     # A destructive detachment must not beat an intact, unsuccessful reach.
     if 'graph_score' in result:
         return (result['success'], -result['physical_failure'], result['graph_score'],
@@ -23,19 +27,25 @@ def evaluation_score(result):
 
 def evaluate(runtime, policy, gait, args, role='student'):
     from treesim.kiwi_rl.harvest_training import HarvestCollector,episode_metrics
-    collector = HarvestCollector(runtime,stall_seconds=args.stall_seconds,
-        max_episode_seconds=args.max_episode_seconds,guidance=0.,role=role,
-        reward_profile=('graph-harvest/v2' if args.reward_graph else 'potential-harvest/v1'))
-    completed = {}
-    for _ in range(int(args.max_episode_seconds / runtime.control_dt) // args.steps + 2):
-        _,_,episodes = collector.collect(policy,gait,args.steps,deterministic=True,store=False)
-        for episode in episodes:
-            completed.setdefault(episode['world'],episode)
-        if len(completed)==runtime.worlds:
-            break
-    if len(completed)!=runtime.worlds:
-        raise RuntimeError('Full-episode evaluation did not complete every world')
-    return episode_metrics(list(completed.values()))
+    import torch
+    episodes=[]
+    # Same scene, nominal plus two seeded stochastic trials. This tests action
+    # robustness, not scene generalization beyond the separate held-out scene.
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        for trial in range(3 if args.reward_graph else 1):
+            torch.manual_seed(args.seed+10000+trial)
+            collector = HarvestCollector(runtime,stall_seconds=args.stall_seconds,
+                max_episode_seconds=args.max_episode_seconds,guidance=0.,role=role,
+                reward_profile=(GRAPH_PROFILE if args.reward_graph else 'potential-harvest/v1'))
+            completed = {}
+            for _ in range(int(args.max_episode_seconds / runtime.control_dt) // args.steps + 2):
+                _,_,batch = collector.collect(policy,gait,args.steps,deterministic=trial==0,store=False)
+                for episode in batch: completed.setdefault(episode['world'],episode)
+                if len(completed)==runtime.worlds: break
+            if len(completed)!=runtime.worlds:
+                raise RuntimeError('Full-episode evaluation did not complete every world')
+            episodes.extend(completed.values())
+    return episode_metrics(episodes)
 
 
 def resume_history(output, checkpoint, config):
@@ -104,7 +114,7 @@ def run(args):
     args.output.mkdir(parents=True,exist_ok=bool(args.resume_from))
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
     config.update(role=role,scope=('temporal physical reward graph' if args.reward_graph else 'full physical episodes; bounded guidance'),
-        reward_profile=('graph-harvest/v2' if args.reward_graph else 'milestone-harvest/v1' if args.curriculum else REWARD_PROFILE),reward_gamma=HARVEST_GAMMA,
+        reward_profile=(GRAPH_PROFILE if args.reward_graph else 'milestone-harvest/v1' if args.curriculum else REWARD_PROFILE),reward_gamma=HARVEST_GAMMA,
         actor_inputs=('privileged simulator state and R84' if role=='teacher' else 'gripper RGB-D and R84'),
         checkpoint_roles={'student':'sensor-only PPO actor','teacher':'privileged PPO actor'},
         source_dir=str(Path(__file__).resolve().parents[1]),
@@ -117,6 +127,8 @@ def run(args):
         cti_optimizer='independent_adam_vtrace' if args.reward_graph else 'independent_adam',
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     if args.reward_graph:
+        config.update(stage_practice_fraction=.25, evaluation_trials=3, evaluation_scenes=2, acceptance_rate_tolerance=.05,
+            acceptance_distance_tolerance_m=.02, regression_penalty_per_stage=.5, terminal_potential=0.)
         from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS
         config['reward_graph_constants']={k:v for k,v in GRAPH_CONSTANTS.items()
             if k not in ('approach_radius_m','approach_outer_m','insertion_range_m')}
@@ -129,20 +141,23 @@ def run(args):
     try:
         camera='hand_camera' if role=='student' else None
         runtime=FastRuntime(args.scene,worlds=args.worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v2' if args.reward_graph else None)
+                task_profile=GRAPH_PROFILE if args.reward_graph else None)
         evaluation_runtime=FastRuntime(args.eval_scene or args.scene,worlds=args.eval_worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v2' if args.reward_graph else None)
+                task_profile=GRAPH_PROFILE if args.reward_graph else None)
+        training_evaluation_runtime = (FastRuntime(args.scene,worlds=args.eval_worlds,camera=camera,
+            arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],
+            jaw_cap_Nm=config['jaw_cap_Nm'],task_profile=GRAPH_PROFILE) if args.reward_graph else None)
         cti = None
         if args.cti:
             from treesim.kiwi_rl.selective_cti import SelectiveCTI, update_cti
             cti_runtime=FastRuntime(args.scene,worlds=args.cti_worlds*(args.cti_alternatives+1) if args.reward_graph else args.cti_worlds,camera=None,
                 arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],
                 jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v2' if args.reward_graph else None)
+                task_profile=GRAPH_PROFILE if args.reward_graph else None)
         config['epa_horizon_capacity']=runtime.epa_horizon_capacity
         gait=load_gait_artifact(args.gait_checkpoint).cuda().eval()
         if args.reward_graph:
-            for target in (runtime, evaluation_runtime, *([cti_runtime] if args.cti else [])):
+            for target in (runtime, evaluation_runtime, training_evaluation_runtime, *([cti_runtime] if args.cti else [])):
                 target.prepare_settled_reset(gait)
         if args.cti:
             if args.reward_graph:
@@ -166,11 +181,11 @@ def run(args):
                          'model_sha256':runtime.manifest['model_sha256']} if role=='teacher' else
                         {'camera':'hand_camera','camera_profile':runtime.manifest['cameras']})
             load_checkpoint(args.initialize_from,{role:policy},expected_meta=expected)
-            if args.curriculum:
+            if args.curriculum or args.reward_graph:
                 # Keep the grasping actor, relearn values for the changed rewards.
                 policy.value.reset_parameters()
-        optimizer=torch.optim.Adam(policy.parameters(),lr=1e-4)
-        cti_optimizer=torch.optim.Adam(policy.parameters(),lr=1e-4) if args.cti else None
+        optimizer=torch.optim.Adam(policy.parameters(),lr=args.learning_rate)
+        cti_optimizer=torch.optim.Adam(policy.parameters(),lr=args.learning_rate) if args.cti else None
         optimizer_states={role:optimizer}
         if cti_optimizer is not None: optimizer_states['cti']=cti_optimizer
         schema=TEACHER_SCHEMA if role=='teacher' else 'fast-harvest-rgbd-r84/v2'
@@ -183,8 +198,16 @@ def run(args):
             restored=load_checkpoint(args.resume_from,role_state,optimizer_states,expected_meta={
                 'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
 
-        def checkpoint(index):
-            path=args.output/f'checkpoint-{index:06d}.pt'
+        def evaluate_candidate():
+            result=evaluate(evaluation_runtime,policy,gait,args,role=role)
+            if training_evaluation_runtime is not None:
+                result.update({'training_scene/'+key:value for key,value in
+                    evaluate(training_evaluation_runtime,policy,gait,args,role=role).items()})
+            return result
+
+        def checkpoint(index, continuation=False):
+            prefix="continuation" if continuation else "checkpoint"
+            path=args.output/f'{prefix}-{index:06d}.pt'
             if path.exists():
                 return str(path)
             save_checkpoint(path,role_state,optimizer_states,
@@ -195,13 +218,14 @@ def run(args):
             baseline={k:v for k,v in resumed['evaluations'][0].items() if k!='update'}
         else:
             initial=checkpoint(0)
-            baseline=evaluate(evaluation_runtime,policy,gait,args,role=role)
+            baseline=evaluate_candidate()
             print(json.dumps(dict(update=0,evaluation=baseline)),flush=True)
             log.log({f'evaluation/{k}':v for k,v in baseline.items()},step=0)
         collector=HarvestCollector(runtime,stall_seconds=args.stall_seconds,
             max_episode_seconds=args.max_episode_seconds,guidance=1.,role=role,teacher_policy=teacher,
             reward_profile=config['reward_profile'],curriculum_stage=(1 if args.curriculum and
                 baseline['grasp']>=.75 and baseline['physical_failure']<=.1 else 0))
+        if args.reward_graph: collector.practice=StagePractice()
         cti_queue=None
         if cti is not None:
             from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
@@ -236,6 +260,16 @@ def run(args):
         best=evaluation_score(best_eval)
         best_checkpoint=str(args.output/f"checkpoint-{best_eval['update']:06d}.pt")
         best_result={k:v for k,v in best_eval.items() if k!='update'}
+        accepted_result=baseline
+        skill_floor=dict(baseline)
+        accepted_checkpoint=initial
+        gate_path=args.output/'accepted.json'
+        if resumed and args.reward_graph:
+            gate=json.loads(gate_path.read_text())
+            accepted_result=gate['evaluation'];accepted_checkpoint=gate['checkpoint']
+            skill_floor=gate.get('skill_floor',accepted_result)
+        if args.reward_graph:
+            save_acceptance(gate_path,accepted_checkpoint,accepted_result,skill_floor)
         phase=f'cti-v{config["cti_version"]}' if args.cti else role
         if restored:
             torch.set_rng_state(restored['rng']['torch'])
@@ -247,7 +281,9 @@ def run(args):
             print(json.dumps(event),flush=True)
         (args.output/'active-process.json').write_text(json.dumps(dict(pid=os.getpid(),status='running',phase=phase)))
         paused=False
+        policy_reverted=False
         while time.monotonic()-started < args.train_seconds:
+            policy_reverted=False
             tick=time.monotonic()
             rows,bootstrap,episodes=collector.collect(policy,gait,args.steps,
                 cti_queue=cti_queue,policy_version=index)
@@ -304,6 +340,7 @@ def run(args):
             metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
             metrics['reward/shaping_mean']=float(torch.stack([r['shaping_reward'] for r in rows]).mean())
             if args.reward_graph:
+                metrics['reward/completion_mean']=float(torch.stack([r['completion_reward'] for r in rows]).mean())
                 for name in rows[0]['stage_rewards']:
                     metrics[f'stage_reward/{name}'] = float(torch.stack([r['stage_rewards'][name] for r in rows]).mean())
                     metrics[f'stage_progress/{name}'] = float(torch.stack([r['stage_scores'][name] for r in rows]).mean())
@@ -325,7 +362,7 @@ def run(args):
             metrics.update({f'episode/{k}':v for k,v in episode_metrics(episodes).items()})
             if time.monotonic()-last_eval >= args.eval_every_seconds:
                 path=checkpoint(index)
-                result=evaluate(evaluation_runtime,policy,gait,args,role=role)
+                result=evaluate_candidate()
                 evaluations.append(dict(update=index,**result))
                 if args.curriculum and result['physical_failure']<=.1:
                     stage=collector.progress.curriculum_stage
@@ -334,9 +371,32 @@ def run(args):
                     collector.progress.curriculum_stage=stage
                 metrics.update({f'evaluation/{k}':v for k,v in result.items()})
                 score=evaluation_score(result)
-                if score>best:best,best_checkpoint,best_result=score,path,result
+                if args.reward_graph:
+                    promoted,regressions=acceptance(result,accepted_result,floor=skill_floor)
+                    metrics.update({'acceptance/promoted':int(promoted),'acceptance/rollback':int(bool(regressions)),
+                        'acceptance/regressions':regressions,'acceptance/checkpoint':accepted_checkpoint})
+                    if promoted:
+                        accepted_checkpoint,accepted_result=path,result
+                        skill_floor=protect_skills(skill_floor,result)
+                        best,best_checkpoint,best_result=score,path,result
+                        save_acceptance(gate_path,path,result,skill_floor)
+                    elif regressions:
+                        policy_reverted=True
+                        load_checkpoint(accepted_checkpoint,role_state,optimizer_states,expected_meta={
+                            'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
+                        practice=collector.practice
+                        collector=HarvestCollector(runtime,stall_seconds=args.stall_seconds,
+                            max_episode_seconds=args.max_episode_seconds,role=role,reward_profile=config['reward_profile'])
+                        collector.practice=practice
+                        if cti_queue is not None:
+                            cti_queue=PPODecisionQueue(worlds=args.cti_worlds,segment_steps=args.steps,minimum_remaining_seconds=6.)
+                    metrics['acceptance/checkpoint']=accepted_checkpoint
+                    for key,value in accepted_result.items(): metrics['accepted/'+key]=value
+                elif score>best:best,best_checkpoint,best_result=score,path,result
                 last_eval=time.monotonic()
             if args.reward_graph:
+                metrics['practice/starts']=collector.practice.starts
+                metrics['practice/boundaries']=len(collector.practice.bank)
                 metrics['graph/score_mean']=float(collector.progress.graph_score.mean())
                 metrics['graph/enclosure_fraction']=float(collector.progress.graph_enclosed.float().mean())
                 metrics['graph/secure_grip_fraction']=float(collector.progress.graph_grip.float().mean())
@@ -350,7 +410,7 @@ def run(args):
             log.log(metrics,step=index)
             print(json.dumps(metrics),flush=True)
             if (args.output/'pause-request.json').exists():
-                saved_path=checkpoint(index)
+                saved_path=checkpoint(index,continuation=policy_reverted)
                 (args.output/'pause-request.json').unlink()
                 (args.output/'active-process.json').write_text(json.dumps(dict(
                     pid=os.getpid(),status='paused',phase=phase,checkpoint=saved_path)))
@@ -359,11 +419,18 @@ def run(args):
         if paused:
             log.finish()
             return
-        final=checkpoint(index)
-        result=evaluate(evaluation_runtime,policy,gait,args,role=role)
+        final=checkpoint(index,continuation=policy_reverted)
+        result=evaluate_candidate()
         evaluations.append(dict(update=index,**result))
         score=evaluation_score(result)
-        if score>best:best,best_checkpoint,best_result=score,final,result
+        if args.reward_graph:
+            promoted,regressions=acceptance(result,accepted_result,floor=skill_floor)
+            if promoted and not policy_reverted:
+                accepted_checkpoint,accepted_result=final,result
+                skill_floor=protect_skills(skill_floor,result)
+                save_acceptance(gate_path,final,result,skill_floor)
+            best_checkpoint,best_result=accepted_checkpoint,accepted_result
+        elif score>best:best,best_checkpoint,best_result=score,final,result
         teacher_sha256=hashlib.sha256(Path(best_checkpoint).read_bytes()).hexdigest()
         report=dict(config=config,baseline=baseline,evaluation=result,evaluations=evaluations,
             updates=index,transitions=transitions,completed_episodes=total_episodes,
@@ -386,7 +453,7 @@ def run(args):
         # Preserve bounded diagnostic evidence before a later process/reset can
         # discard it. This is the state at detection, not the first bad substep.
         import numpy as np
-        for name in ('runtime', 'evaluation_runtime', 'cti_runtime'):
+        for name in ('runtime', 'evaluation_runtime', 'training_evaluation_runtime', 'cti_runtime'):
             failed_runtime = locals().get(name)
             if failed_runtime is None:
                 continue
@@ -420,6 +487,7 @@ def main():
     profiles=p.add_mutually_exclusive_group()
     profiles.add_argument('--curriculum',action='store_true')
     profiles.add_argument('--reward-graph',action='store_true')
+    p.add_argument('--learning-rate',type=float,default=1e-4)
     p.add_argument('--gae-lambda',type=float,default=.95)
     p.add_argument('--entropy-coef',type=float,default=0.)
     p.add_argument('--cti-time-fraction',type=float,default=.1)
@@ -451,7 +519,7 @@ def main():
             2<=a.cti_alternatives<=32 and 1<=a.cti_search_iterations<=5 and
             a.cti_every_seconds>=0 and 0<a.cti_coef<=1 and (not a.cti or (a.role=='teacher' and a.cti_worlds<=a.worlds))):
         p.error('Invalid training size or duration')
-    if not (0<=a.gae_lambda<=1 and 0<=a.entropy_coef<=.1 and 0<a.cti_time_fraction<=.5):
+    if not (0<a.learning_rate<=1e-3 and 0<=a.gae_lambda<=1 and 0<=a.entropy_coef<=.1 and 0<a.cti_time_fraction<=.5):
         p.error('Invalid learning settings')
     if (a.curriculum or a.reward_graph) and a.role!='teacher':
         p.error('Curriculum currently requires privileged teacher training')

@@ -181,7 +181,7 @@ class BranchCTI:
                 _, _, final_value, _ = (value_policy or policy)(privileged_observation(rt, final_obs), final_obs, memory)
                 bootstrap[finish] = torch.where(terminated, 0., final_value)[finish]
                 final_grade[finish] = progress.graph_score[finish]
-                success[finish], failed[finish] = now['success'][finish], now['failed'][finish]
+                success[finish], failed[finish] = progress.graph_success[finish], now['failed'][finish]
             active &= ~finish
             source_reset = recorded is not None and recorded.get('source_reset', False)
             if (bool(finish.any()) or source_reset) and bool(active.any()):

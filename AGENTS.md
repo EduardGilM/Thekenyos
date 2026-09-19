@@ -286,3 +286,15 @@ budget. Do not change factual and alternative termination rules independently.
 Both learners regularize bounded actions; report saturation and measured motor
 movement separately from Gaussian noise. Run scripts/check_graph_training.py
 and the reward, replay, branch-learning and full-size smoke checks before launch.
+
+## Prerequisite graph v3
+
+The user's prerequisite contract supersedes v1/v2 graded unheld detachment.
+Read the current section of docs/reward-graph.md. Keep archived profile replay.
+Extraction requires secure control at detachment; downstream scores depend on
+maintained prerequisites, except valid release into the basket. True terminals
+have zero shaping potential. Keep stage practice separate from full-task metrics.
+Accepted-checkpoint selection and rollback must preserve earlier demonstrated
+skills on both training and held-out scenes. Preserve candidate evidence, source
+checkpoint provenance, and both optimizers when rolling back. Do not claim the
+acceptance tolerances prove monotonic learning or broad generalization.

@@ -124,3 +124,12 @@ class LatestVideoTest(unittest.TestCase):
             with patch('training_dashboard.threading.Thread') as thread:
                 d.poll()
                 self.assertEqual(thread.call_args.kwargs['args'],('checkpoint-000025.pt','checkpoint-000000.pt'))
+
+
+class AcceptedCheckpointTest(unittest.TestCase):
+    def test_rejected_candidate_is_not_displayed_as_accepted(self):
+        rows=[dict(step=i, **{'evaluation/success':0.,'evaluation/physical_failure':0.,
+            'evaluation/grasp':1.,'evaluation/closest_distance_m':.01,
+            'evaluation/completed/position':1.,'evaluation/completed/grip':grip,
+            'acceptance/checkpoint':'/run/checkpoint-000000.pt'}) for i,grip in ((0,.9),(1,1.))]
+        self.assertEqual(select_checkpoint(rows,None)[0],'checkpoint-000000.pt')

@@ -1,7 +1,7 @@
 import unittest
 from copy import deepcopy
 import torch
-from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE, LEGACY_GRAPH_PROFILE, approach_score, enclosure_features, ellipsoid_extent, release_position_distance
+from treesim.kiwi_rl.reward_graph import CONTINUOUS_GRAPH_PROFILE as GRAPH_PROFILE, LEGACY_GRAPH_PROFILE, approach_score, enclosure_features, ellipsoid_extent, release_position_distance
 from treesim.kiwi_rl.harvest_training import EpisodeProgress
 from treesim.kiwi_rl.selective_cti import _choose_winners
 from tests.test_selective_cti import outcome

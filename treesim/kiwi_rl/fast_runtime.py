@@ -378,8 +378,8 @@ class FastRuntime:
         Existing runtime arrays stay in place for CUDA graph and replay safety.
         """
         import torch
-        from .reward_graph import GRAPH_PROFILE
-        if self.task_profile != GRAPH_PROFILE or hasattr(self, '_settled_previous'):
+        from .reward_graph import CONTINUOUS_GRAPH_PROFILES
+        if self.task_profile not in CONTINUOUS_GRAPH_PROFILES or hasattr(self, '_settled_previous'):
             return
         with torch.no_grad():
             zero = torch.zeros((self.worlds, 7), device=self.device_name)

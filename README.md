@@ -50,6 +50,14 @@ viscoelastic/plastic constitutive laws, calibrated wet friction and
 calibrated angle/torque-dependent abscission remain open work. Research ranges are not
 interchangeable across cultivars and test conditions.
 
+
+The current graph teacher uses [prerequisite graph v3](docs/reward-graph.md):
+controlled extraction, explicit regression costs, physical boundary practice,
+and evaluated checkpoint acceptance/rollback. Warm-start a new reward run with
+`--initialize-from /path/to/checkpoint-000111.pt --reward-graph --role teacher`;
+this preserves actor weights and resets the critic and optimizer state. Use
+`--resume-from` only to continue the same reward profile and W&B run.
+
 ## Install
 
 The tested GPU platform is Linux with an NVIDIA RTX 5090. Python 3.12,

@@ -56,7 +56,7 @@ def main():
             solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
             jaw_cap = saved['meta'].get('config', {}).get('jaw_cap_Nm', .3)
             reward_profile=saved['meta'].get('config',{}).get('reward_profile','potential-harvest/v1')
-            graph_profile=reward_profile in ('graph-harvest/v1','graph-harvest/v2')
+            graph_profile=reward_profile in ('graph-harvest/v1','graph-harvest/v2','graph-harvest/v3')
             rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,
                              solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap,
                              task_profile=reward_profile if graph_profile else None)
@@ -89,6 +89,7 @@ def main():
                             numerical=numerical,reward_profile=reward_profile,
                             arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
                             arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
+            if reward_profile=='graph-harvest/v3': metadata['success']=bool(progress.graph_success[0])
             if graph_profile:
                 metadata.update(graph_score=float(progress.graph_score[0]),
                     graph_stage=int(progress.graph_stage[0]),ground_drop=bool(progress.graph_ground_drop[0]))

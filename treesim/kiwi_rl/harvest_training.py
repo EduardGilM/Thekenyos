@@ -2,7 +2,7 @@
 import torch
 import warp as wp
 from treesim.basket import CENTER
-from .reward_graph import GRAPH_PROFILE, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
+from .reward_graph import GRAPH_PROFILE, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -66,6 +66,7 @@ class EpisodeProgress:
         self.curriculum_stage_ids = torch.full_like(self.age, curriculum_stage)
         self.curriculum_credit = torch.zeros_like(self.closest)
         self.graph_dwell = torch.zeros_like(self.closest)
+        self.graph_position_dwell = torch.zeros_like(self.closest)
         self.graph_grip = torch.zeros_like(self.ever_grasp)
         self.graph_detached = torch.zeros_like(self.ever_grasp)
         self.graph_enclosed = torch.zeros_like(self.ever_grasp)
@@ -73,6 +74,12 @@ class EpisodeProgress:
         self.graph_slip = torch.zeros_like(self.closest)
         self.graph_score = torch.zeros_like(self.closest)
         self.graph_stage = torch.zeros_like(self.age)
+        self.graph_valid_extract = self.ever_grasp.clone()
+        self.graph_invalid_extract = self.ever_grasp.clone()
+        self.graph_valid_release = self.ever_grasp.clone()
+        self.graph_success = self.ever_grasp.clone()
+        self.graph_completed = {name: self.ever_grasp.clone() for name in STAGE_NAMES}
+        self.graph_regressions = {name: self.age.clone() for name in STAGE_NAMES}
         if reward_profile in GRAPH_PROFILES:
             graph_step(self, initial)
             self.graph_dwell.zero_()
@@ -193,8 +200,10 @@ class EpisodeProgress:
         previous_score = self.graph_score.clone()
         previous_components = self.graph_components
         previous_stage = self.graph_stage.clone()
+        previous_grip = self.graph_grip.clone()
+        previous_enclosed = self.graph_enclosed.clone()
         score = graph_step(self, now)
-        if self.reward_profile == GRAPH_PROFILE:
+        if self.reward_profile in CONTINUOUS_GRAPH_PROFILES:
             # A moving reference recognizes accumulated small gains and recovery.
             # Regression re-arms it, but cannot itself reset the inactivity timer.
             improved = score > self.graph_reference + .005
@@ -212,16 +221,27 @@ class EpisodeProgress:
             extract=(self.graph_grip & ~detached) | (detached & ~self.graph_grip & ~settling),
             carry=detached & self.graph_grip,
             deposit=settling & ~now['success'], complete=now['success'])
+        if self.reward_profile == GRAPH_PROFILE:
+            activity = dict(position=self.graph_stage==0, grip=self.graph_stage==1,
+                extract=self.graph_stage==2, carry=(self.graph_stage==3)|(self.graph_stage==4),
+                deposit=self.graph_stage==5, complete=self.graph_stage==6)
+            losses = dict(position=previous_enclosed & ~now['enclosed'] & ~detached,
+                grip=previous_grip & ~self.graph_grip & ~self.graph_valid_release,
+                extract=self.graph_invalid_extract & ~self.previous['detached'],
+                carry=(previous_stage>=3) & (self.graph_stage<3),
+                deposit=(previous_stage>=5) & (self.graph_stage<5), complete=torch.zeros_like(detached))
+            for name, lost in losses.items(): self.graph_regressions[name] += lost.long()
         for name in STAGE_NAMES:
             self.graph_progress_reward[name] = self.gamma*self.graph_components[name] - previous_components[name]
             active = activity[name]
             self.graph_time[name] += active.float()*self.control_dt
             self.graph_reached[name] |= active
+            if self.reward_profile == GRAPH_PROFILE: self.graph_reached[name] |= self.graph_completed[name]
 
         self.closest = torch.minimum(self.closest, now['distance'])
         self.ever_grasp |= self.graph_grip
         self.ever_detached |= self.graph_detached
-        self.ever_held_detach |= self.graph_detached & self.graph_grip
+        self.ever_held_detach |= (self.graph_valid_extract & self.graph_grip if self.reward_profile == GRAPH_PROFILE else self.graph_detached & self.graph_grip)
         ending = physical_done | self.graph_ground_drop
         stalled = (self.stale >= self.stall_steps) & ~ending
         terminated = ending | stalled
@@ -230,6 +250,17 @@ class EpisodeProgress:
         self.task_reward = -.001 + 20*now['success'] - 5*failure - .5*stalled
         self.shaping_reward = self.gamma*score - previous_score
         self.previous = {k:v.clone() for k,v in now.items()}
+        if self.reward_profile == GRAPH_PROFILE:
+            failure = failure | self.graph_ground_drop | self.graph_invalid_extract | (physical_done & ~self.graph_success)
+            terminated = terminated | failure
+            truncated &= ~terminated
+            regression = (previous_stage-self.graph_stage).clamp_min(0).float()
+            self.task_reward = -.001 + 20*self.graph_success - 5*failure - .5*stalled - .5*regression
+            # True terminals have zero potential. Time-limit truncations still
+            # bootstrap the final critic; no artificial partial terminal prize.
+            self.shaping_reward = self.gamma*torch.where(terminated,0.,score)-previous_score
+            for name in STAGE_NAMES:
+                self.graph_progress_reward[name] = self.gamma*torch.where(terminated,0.,self.graph_components[name])-previous_components[name]
         return self.task_reward+self.shaping_reward, terminated, truncated, stalled
 
 
@@ -256,6 +287,8 @@ class HarvestCollector:
             reward_profile=reward_profile, curriculum_stage=curriculum_stage, control_dt=runtime.control_dt)
         self.tick = 0
         self.rgbd = None
+        self.practice = None
+        self.practice_mask = torch.zeros(runtime.worlds,dtype=torch.bool,device=runtime.device_name)
 
     def collect(self, policy, gait, steps, *, deterministic=False, store=True,
                 cti_queue=None, policy_version=0):
@@ -264,6 +297,7 @@ class HarvestCollector:
         if cti_queue is not None and steps != cti_queue.segment_steps:
             raise ValueError(f'CTI factual segments require exactly {cti_queue.segment_steps} PPO steps')
         rows, episodes = [], []
+        if self.practice is not None: self.practice.capture(self)
         cti_batch = None
         cti_active = torch.ones(rt.worlds,dtype=torch.bool,device=rt.device_name)
         from .fast_teacher import privileged_observation
@@ -296,6 +330,7 @@ class HarvestCollector:
                 now = signals(rt)
                 reward,terminated,truncated,stalled = self.progress.step(now,done)
                 ending = terminated | truncated
+                if self.practice is not None and self.tick % 10 == 0: self.practice.capture(self)
                 if cti_batch is not None:
                     cti_queue.record(cti_batch,obs=obs,raw_action=raw,action=raw.tanh(),
                         noise=(raw-mean)/logstd.exp(),
@@ -329,7 +364,7 @@ class HarvestCollector:
                     if self.progress.reward_profile in GRAPH_PROFILES:
                         row['stage_rewards'] = {k:v.clone() for k,v in self.progress.graph_progress_reward.items()}
                         row['stage_scores'] = {k:v.clone() for k,v in self.progress.graph_components.items()}
-                        row['stage_rewards']['complete'] = 20*now['success'].float()
+                        row['completion_reward'] = 20*(self.progress.graph_success if self.progress.reward_profile == GRAPH_PROFILE else now['success']).float()
                         row['joint_velocity'] = wp.to_torch(rt.data.qvel)[:, self.runtime.control.contract.dofs[12:]].clone()
                         row['target_error'] = (wp.to_torch(rt.control.targets)[:,12:] - wp.to_torch(rt.data.qpos)[:,rt.control.contract.qids[12:]]).clone()
                     rows.append(row)
@@ -338,12 +373,13 @@ class HarvestCollector:
                     rt.check()
                     # Summaries are episode outcomes; each world contributes once.
                     ids = ending.nonzero(as_tuple=False).flatten()
-                    packed = torch.stack((ids, now['success'][ids],
+                    outcome_success = self.progress.graph_success if self.progress.reward_profile == GRAPH_PROFILE else now['success']
+                    packed = torch.stack((ids, outcome_success[ids],
                         self.progress.ever_grasp[ids],self.progress.ever_detached[ids],self.progress.ever_held_detach[ids],
-                        (done & ~now['success'])[ids],stalled[ids],truncated[ids],
+                        (done & ~outcome_success)[ids],stalled[ids],truncated[ids],
                         self.progress.age[ids]*rt.control_dt,self.progress.closest[ids]),dim=1).cpu().tolist()
                     for world,success,grasp,detached,held_detach,failure,stall,timeout,duration,closest in packed:
-                        episodes.append(dict(world=int(world),success=bool(success),grasp=bool(grasp),
+                        episodes.append(dict(world=int(world),practice=bool(self.practice_mask[int(world)]),success=bool(success),grasp=bool(grasp),
                             detached=bool(detached),held_detach=bool(held_detach),physical_failure=bool(failure),stalled=bool(stall),
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
                     if self.progress.reward_profile in GRAPH_PROFILES:
@@ -358,12 +394,20 @@ class HarvestCollector:
                                 backward_transitions=int(self.progress.graph_backward[world]),
                                 **{f'reached/{k}':bool(v[world]) for k,v in self.progress.graph_reached.items()},
                                 **{f'time/{k}_seconds':float(v[world]) for k,v in self.progress.graph_time.items()})
+                    if self.progress.reward_profile == GRAPH_PROFILE:
+                        for entry, world in zip(episodes[-len(ids):], ids.tolist()):
+                            entry.update(task_failure=bool(self.progress.graph_invalid_extract[world] | self.progress.graph_ground_drop[world] | (done[world] & ~outcome_success[world])),
+                                invalid_extraction=bool(self.progress.graph_invalid_extract[world]),
+                                **{f'completed/{k}':bool(v[world]) for k,v in self.progress.graph_completed.items()},
+                                **{f'regression/{k}':int(v[world]) for k,v in self.progress.graph_regressions.items()})
                     rt.reset(ending)
                     self.episode_ids[ending] += 1
                     self.memory[ending] = 0
                     if self.teacher_memory is not None:
                         self.teacher_memory[ending] = 0
                     self.progress.reset(ending,signals(rt))
+                    self.practice_mask[ending]=False
+                    if self.practice is not None: self.practice.restore(self,ending)
                     if self.role == 'student':
                         # Only reset worlds receive a fresh initial frame. Do
                         # not change another world's 25 Hz sensor delivery.
@@ -386,10 +430,24 @@ class HarvestCollector:
 def episode_metrics(episodes):
     if not episodes:
         return {'episodes':0}
+    full=[row for row in episodes if not row.get('practice',False)]
+    if len(full)!=len(episodes):
+        result=episode_metrics(full)
+        practice=episode_metrics([dict(row,practice=False) for row in episodes if row.get('practice',False)])
+        result.update({'practice/'+key:value for key,value in practice.items()})
+        return result
     keys = ('success','grasp','detached','physical_failure','stalled','timeout','duration_s','closest_distance_m')
-    return {'episodes':len(episodes),
+    result = {'episodes':len(episodes),
             'held_detach':sum(r.get('held_detach',False) for r in episodes)/len(episodes),
             **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys},
             **{k:sum(r.get(k,0) for r in episodes)/len(episodes) for k in
-               ('graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop','forward_transitions','backward_transitions',
+               ('task_failure','invalid_extraction',*[f'completed/{k}' for k in STAGE_NAMES], *[f'regression/{k}' for k in STAGE_NAMES],
+                'graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop','forward_transitions','backward_transitions',
                 *[f'reached/{k}' for k in STAGE_NAMES], *[f'time/{k}_seconds' for k in STAGE_NAMES]) if any(k in r for r in episodes)}}
+
+    for name in STAGE_NAMES:
+        entered=sum(row.get('reached/'+name,False) for row in episodes)
+        completed=sum(row.get('completed/'+name,False) for row in episodes)
+        result['conditional/'+name]=completed/entered if entered else 0.
+        result['entries/'+name]=entered
+    return result

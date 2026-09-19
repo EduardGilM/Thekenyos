@@ -74,7 +74,7 @@ phase=active.get('phase')
 if not phase and events: phase=events[-1].get('phase')
 if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4,5,6,7,8) else 'ppo'
 status=active.get('status') if active.get('status') in ('paused','running') else None
-print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
+print(json.dumps({'rows':rows,'config':(read('checkpoint-000000.pt.json') or {}).get('config',{}),'report':read('report.json'),'failure':read('failure.json'),
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
                   'active_status':status,'phase':phase,'phase_events':events,'branch_diagnostics':branches}))
 '''
@@ -110,6 +110,8 @@ def _row_score(row):
     # Missing metrics stay missing; do not let fabricated zeros rank a checkpoint.
     if any(value is None for value in (success, failure, grasp, distance)):
         return None
+    if 'evaluation/completed/position' in row:
+        return tuple(row.get('evaluation/'+key,0.) for key in ('success','completed/deposit','completed/carry','completed/extract','completed/grip','completed/position'))+(-failure,-row.get('evaluation/ground_drop',0.),-row.get('evaluation/invalid_extraction',0.),-distance)
     graph=_number(row.get('evaluation/graph_score'))
     if graph is not None:
         return success, -failure, graph, _number(row.get('evaluation/held_detach')) or 0., grasp, -distance
@@ -130,6 +132,10 @@ def select_checkpoint(rows, report):
         if best_score is None or score > best_score:
             best_row, best_score = row, score
     checkpoint = f'checkpoint-{int(best_row.get("step", best_row.get("update"))):06d}.pt' if best_row else None
+    accepted=next((row.get('acceptance/checkpoint') for row in reversed(rows) if row.get('acceptance/checkpoint')),None)
+    if accepted:
+        checkpoint=Path(accepted).name
+        best_row=next((row for row in rows if f"checkpoint-{int(row.get('step',-1)):06d}.pt"==checkpoint),best_row)
     if isinstance(report, dict):
         reported = report.get('best_checkpoint') or report.get('teacher_checkpoint')
         if isinstance(reported, str):
@@ -229,6 +235,7 @@ class Dashboard:
                                   status=_status(dict(report=report, failure=failure,
                                                       process_alive=remote.get('process_alive'))),
                                   best_checkpoint=checkpoint, best_metrics=best_row,
+                                  budget_seconds=(remote.get('config') or {}).get('train_seconds',3600),
                                   elapsed_seconds=(report.get('elapsed_seconds') if isinstance(report, dict)
                                                    else (rows[-1].get('elapsed_seconds') if rows else None)))
                 if failure:
