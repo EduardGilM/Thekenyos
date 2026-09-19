@@ -1,4 +1,4 @@
-"""Native scripted grasp/pull fixture. No fruit-to-hand constraint.
+"""Native scripted grasp/pull fixture; optional explicitly labelled ideal grip.
 
 A prescribed wrist pulls at 9 mm/s. A collidable stalk joins the fruit surface;
 its reaction goes to the fixed world anchor. Tissue and damage are uncalibrated.
@@ -45,6 +45,10 @@ def run(a):
         junction=d.flexvert_xpos[apex].copy();fruit_body=m.body(body).name
         fruit_anchor=d.xmat[body].reshape(3,3).T@(junction-d.xpos[body])
     add_stem(root,fruit_body,fruit_anchor,junction)
+    if a.ideal_grip:
+        ET.SubElement(wrist,'site',name='ideal_hand',size='.0001',rgba='0 0 0 0')
+        ET.SubElement(fruit,'site',name='ideal_fruit',size='.0001',rgba='0 0 0 0')
+        ET.SubElement(root.find('equality'),'weld',name='ideal_grip',site1='ideal_hand',site2='ideal_fruit',active='false',solref='.0002 1',solimp='.99 .999 .0001')
     xml=ET.tostring(root,encoding='unicode');(a.output/'scene.xml').write_text(xml)
     m=mujoco.MjModel.from_xml_string(xml);d=mujoco.MjData(m)
     d.qpos[0]=-1;d.ctrl[0]=-1;mujoco.mj_forward(m,d)
@@ -70,7 +74,7 @@ def run(a):
         font=ImageFont.truetype('DejaVuSans.ttf',22)
         encoder=subprocess.Popen(['ffmpeg','-y','-loglevel','error','-f','rawvideo','-pix_fmt','rgb24','-s','1280x720','-r','30','-i','-','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(a.output/'grasp-pull.mp4')],stdin=subprocess.PIPE)
     detached=False;break_load=break_angle=break_time=None;ground=False;minvol=1.;peak=np.zeros(3);rows=[];next_sample=next_frame=0.;force6=np.zeros(6);max_slip=0.; max_penetration=0.;max_torque=0.; max_hand_penetration=0.; retention_origin=None; peak_stem=0.
-    abort_reason=None
+    abort_reason=None;assist_time=None;loads=np.zeros(3)
     filtered_load=0.;jaw_target=-1.;peak_stem_hand=0.;peak_stem_fruit=0.;max_attachment_error=0.;max_stem_penetration=0.
     rotation_pivot=None;feedback_roll=0.;angle_hold=0.;pull_start=None;angle_at_pull=None
     duration=a.duration if a.duration is not None else (10. if a.target_fsa is not None else 6.)
@@ -81,6 +85,17 @@ def run(a):
             if a.grip_force is not None:
                 jaw_target=float(np.clip(jaw_target+np.clip(.03*(a.grip_force-filtered_load),-.6,.6)*a.timestep,-1.,0.))
                 d.ctrl[0]=jaw_target
+            if a.ideal_grip and assist_time is None and t>=2 and min(loads[:2])>.1:
+                hand=m.body('wrist').id;fb=m.body('kiwi').id;hs=m.site('ideal_hand').id
+                m.site_pos[hs]=d.xmat[hand].reshape(3,3).T@(d.xpos[fb]-d.xpos[hand])
+                inverse=d.xquat[hand].copy();inverse[1:]*=-1
+                mujoco.mju_mulQuat(m.site_quat[hs],inverse,d.xquat[fb])
+                m.site_sameframe[hs]=0  # Site pose is now dynamic, not the compiled body frame.
+                mujoco.mj_kinematics(m,d)
+                assert np.linalg.norm(d.site_xpos[hs]-d.xpos[fb])<1e-9
+                assert np.allclose(d.site_xmat[hs],d.xmat[fb],atol=1e-9)
+                d.eq_active[m.equality('ideal_grip').id]=True;assist_time=t
+                print(f'{t:.3f}s IDEAL GRIP enabled after bilateral jaw contact',flush=True)
             pull=.009*np.clip(t-3,0,2)
             roll=np.deg2rad(a.roll_deg)*np.clip((t-3)/2,0,1)
             d.mocap_quat[0]=[np.cos((np.pi/2+roll)/2),np.sin((np.pi/2+roll)/2),0,0]
@@ -156,7 +171,7 @@ def run(a):
                 img=Image.fromarray(renderer.render());draw=ImageDraw.Draw(img);draw.rectangle((0,0,1280,105),fill=(18,24,32))
                 draw.text((16,10),f'SCRIPTED GRASP / PULL | {"RIGID SURROGATE" if a.rigid else "ELASTIC PROXY"} | {phase} | {t:.2f}s',font=font,fill='white')
                 draw.text((16,42),f'Stem {load:.1f}/{threshold:.1f} N | jaws {loads[0]:.1f}/{loads[1]:.1f} N | detached: {detached}',font=font,fill='white')
-                draw.text((16,74),f'{"FSA at detachment" if detached else "Fruit-stem angle"} {angle:.1f} deg | wrist roll {np.rad2deg(roll):.1f} deg | no grasp weld',font=font,fill='white');encoder.stdin.write(np.asarray(img).tobytes());next_frame+=1/30
+                draw.text((16,74),f'{"FSA at detachment" if detached else "Fruit-stem angle"} {angle:.1f} deg | wrist roll {np.rad2deg(roll):.1f} deg | {"IDEAL GRIP ASSIST" if a.ideal_grip else "no grasp weld"}',font=font,fill='white');encoder.stdin.write(np.asarray(img).tobytes());next_frame+=1/30
             if not np.isfinite(d.qpos).all() or not np.isfinite(d.qvel).all() or any(w.number for w in d.warning):raise RuntimeError('Numerical failure')
             if max_hand_penetration>.001 or max_stem_penetration>.001 or max_attachment_error>.001:
                 abort_reason='Stopped: hand/stalk contact penetration or attachment error exceeded 1 mm'
@@ -168,6 +183,7 @@ def run(a):
             if encoder.wait(): raise RuntimeError('Video encoding failed')
         if renderer:renderer.close()
     result = dict(
+        ideal_grip_assist=a.ideal_grip,ideal_grip_activation_s=assist_time,
         stem_model='four collidable beam segments with breakable fruit connection',
         peak_stem_hand_contact_N=peak_stem_hand,peak_stem_fruit_contact_N=peak_stem_fruit,
         max_attachment_error_m=max_attachment_error,max_stem_contact_penetration_m=max_stem_penetration,
@@ -183,9 +199,9 @@ def run(a):
         peak_jaw_force_N=peak[:2].tolist(),peak_palm_force_N=float(peak[2]), peak_stem_load_N=peak_stem,
         retention_slip_m=max_slip if detached else None,
         minimum_volume_ratio=minvol,
-        passed=bool(abort_reason is None and detached and (pull_start is not None and break_time>=pull_start if a.target_fsa is not None else 3<=break_time<=5) and d.time-break_time>=1 and not ground
+        passed=bool(abort_reason is None and (not a.ideal_grip or assist_time is not None) and detached and (pull_start is not None and break_time>=pull_start if a.target_fsa is not None else 3<=break_time<=5) and d.time-break_time>=1 and not ground
                     and max_slip<.02 and max_hand_penetration<.001 and max_stem_penetration<.001 and max_attachment_error<.001),
-        scope='Scripted fixture; fixed world stem reaction, prescribed wrist; '
+        scope=('IDEAL GRIP ASSIST; ' if a.ideal_grip else '')+'Scripted fixture; fixed world stem reaction, prescribed wrist; '
               'collidable segmented stalk; mixed-source elasticity/abscission diagnostic, '
               'not calibrated cultivar or damage model',
     )
@@ -198,6 +214,7 @@ if __name__=='__main__':
     p.add_argument('--relic',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--duration',type=float,help='Optional shorter numerical smoke check; does not imply harvest success')
+    p.add_argument('--ideal-grip',action='store_true',help='Diagnostic hand-fruit weld after closure; requires rigid fruit, not a physical-grasp validation')
     p.add_argument('--rigid',action='store_true')
     p.add_argument('--video',action='store_true')
     p.add_argument('--check',action='store_true')
@@ -218,4 +235,5 @@ if __name__=='__main__':
     if a.grip_force is not None and (not np.isfinite(a.grip_force) or not 0<a.grip_force<=50):p.error('Grip-force target must be in (0,50] N')
     if a.duration is not None and (not np.isfinite(a.duration) or a.duration<a.timestep):p.error('Duration must be finite and at least one timestep')
     if a.pull_after is not None and (not np.isfinite(a.pull_after) or not 2<a.pull_after< (a.duration or 10)-1 or a.target_fsa is None):p.error('pull-after requires target-fsa and time after closure with at least 1s remaining')
+    if a.ideal_grip and not a.rigid:p.error('Ideal-grip diagnostic currently requires --rigid')
     run(a)
