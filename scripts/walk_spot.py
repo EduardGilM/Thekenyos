@@ -71,13 +71,7 @@ def main():
     cfg.robot.payload_seed = args.payload_seed
     cfg.robot.payload_mass = (args.payload if args.payload is not None else
                               float(np.random.default_rng(args.payload_seed).uniform(0, 6))) if args.basket else 0.
-    cfg.fruit.enabled, cfg.fruit.max_count = True, 40
-    # Dimensions, mass and stem length come from kiwi_material's Hayward envelope.
-    cfg.fruit.joint = 'free'
-    cfg.fruit.colors = ((0.39, 0.27, 0.12), (0.48, 0.34, 0.17))
-    cfg.foliage.set_density(0.6)
-    cfg.foliage.min_order_for_leaves = 2
-    cfg.foliage.leaf_length, cfg.foliage.leaf_width = .22, .17
+    # Use the shared pergola canopy and fruit defaults.
     cfg.physics.terrain = args.terrain
     cfg.physics.terrain_kind = args.terrain_kind
     tree = builder.generate_and_build(cfg)

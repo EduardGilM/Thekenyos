@@ -104,27 +104,26 @@ def make_config(args) -> TreeConfig:
     if args.rupture is not None:
         cfg.breaking.rupture_stress = args.rupture
 
-    # foliage density dial: --foliage-density wins; else --foliage = medium; else off
+    # Explicit density overrides the shared pergola canopy default.
     if args.foliage_density is not None:
         cfg.foliage.set_density(args.foliage_density)
-    elif args.foliage:
-        cfg.foliage.set_density(1.0 if args.preset == "pergola" else 0.6)
-    elif args.preset == "pergola":
-        cfg.foliage.set_density(1.0)
+    elif args.foliage and args.preset != "pergola":
+        cfg.foliage.set_density(0.6)
     if args.leaves is not None:                 # explicit per-twig count overrides the dial
         cfg.foliage.leaves_per_terminal = args.leaves
     cfg.foliage.physics = args.foliage_physics
 
-    cfg.fruit.enabled = args.apples
-    cfg.fruit.max_count = args.apple_count if args.apple_count is not None else 40
+    if args.preset != "pergola":
+        cfg.fruit.enabled = args.apples
+        cfg.fruit.max_count = 40
+    if args.apple_count is not None:
+        cfg.fruit.max_count = args.apple_count
     if args.preset == "pergola":
         cfg.lsystem.target_height = args.canopy_height
         cfg.lsystem.pergola_rows = args.pergola_rows
         cfg.lsystem.pergola_columns = args.pergola_columns
         cfg.lsystem.pergola_spacing = args.pergola_spacing
         cfg.fruit.enabled = True
-        if args.apple_count is None:
-            cfg.fruit.max_count = 600
         # Initial geometry/material assumptions; stem mechanics remain the
         # upstream proxy until measured kiwi data is fitted.
         # Kiwi geometry/mass/stem length are selected by the material sampler.
@@ -197,10 +196,10 @@ def parse_args():
                    help="apple = default; pergola = hanging kiwis; ta-td = ABoP ternary classes")
     g.add_argument("--canopy-height", type=float, default=1.6,
                    help="pergola support/cane centreline height above level ground [m]")
-    g.add_argument("--pergola-rows", type=int, default=45,
-                   help="number of structural post rows (default 45, ~220 m field length)")
-    g.add_argument("--pergola-columns", type=int, default=40,
-                   help="posts along each row (default 40, ~195 m field width)")
+    g.add_argument("--pergola-rows", type=int, default=preset("pergola").pergola_rows,
+                   help="number of structural post rows (default 5, 20 m field length)")
+    g.add_argument("--pergola-columns", type=int, default=preset("pergola").pergola_columns,
+                   help="posts along each row (default 4, 15 m field width)")
     g.add_argument("--pergola-spacing", type=float, default=5.0,
                    help="structural row/post spacing [m], constrained to 4.5-5.0")
     g.add_argument("--depth", "-n", type=int, default=-1,
@@ -235,7 +234,7 @@ def parse_args():
     ap.add_argument("--apple-count", "--fruit-count", type=int, default=None,
                     help="how many apples (each is a free body and is the MAIN sim cost; "
                         "foliage and --break are nearly free). Defaults to 40 for apple "
-                        "and 600 for pergola")
+                        "and 192 for pergola")
 
     ro = p.add_argument_group("robot")
     ro.add_argument("--robot", action="store_true",

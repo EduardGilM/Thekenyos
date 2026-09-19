@@ -101,11 +101,10 @@ python scripts/grow_tree.py --preset pergola --foliage --terrain --terrain-kind 
 ```
 
 The scene is built programmatically in Python; it is not a hand-authored pergola
-XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
-4.3 hectares. Use `--pergola-rows`, `--pergola-columns`, and
+XML. The default pergola is 5 rows by 4 posts at 5 m centres (20 by 15 m). Use `--pergola-rows`, `--pergola-columns`, and
 `--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
 enabled by default for this preset, while `--foliage-density 0` disables it.
-Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
+Use `--fruit-count` to cap the independent kiwi bodies (the default is 192 for
 the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` for
 the procedural noise floor, or `--terrain --terrain-kind orchard` for the
 retained orchard floor (grassed aisles, planting strips, slope and noise). The native compression bench writes its own generated
@@ -810,3 +809,21 @@ Leaf count now scales with shoot length, so adding support ties cannot inflate d
 
 Use --preset pergola --pergola-rows 5 --pergola-columns 4 --seed 42
 --foliage-density 2 --leaves 40 --fruit-count 192 --terrain --terrain-seed 42.
+
+### Accepted canopy experiment baseline
+
+All pergola configurations now inherit the accepted canopy through
+`TreeConfig(lsystem=preset("pergola"))` (including `TreeConfig.compliant`):
+5 x 4 posts, upward-facing leaves on lateral shoots, 40 leaves per 2.2 m of
+shoot, 0.22 x 0.17 m nominal blades, and 192 independent kiwis. The CLI and
+Spot walk preview use the same defaults. Explicit leaf, fruit, size, and
+bare-canopy overrides remain available. Small single-fruit physics fixtures
+keep their explicit size and fruit caps. Apple experiment defaults are unchanged.
+
+Reproduce the accepted scene with:
+```bash
+python scripts/grow_tree.py --preset pergola --seed 42 --terrain --terrain-seed 42 \
+  --device cuda:0 --substeps 40 --viewer usd --headless --frames 2 \
+  --output output/kiwi-default-canopy.usda
+```
+Terrain, seed, solver settings, and camera remain separate experiment controls.

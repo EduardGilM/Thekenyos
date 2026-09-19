@@ -24,13 +24,13 @@ class KiwiPlacement:
     mass: float
 
 
-def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
-             columns: int = 40, spacing: float = 5.0,
+def generate(height: float = 1.6, seed: int = 0, rows: int = 5,
+             columns: int = 4, spacing: float = 5.0,
              ground_z=None, canopy_z=None) -> TreeSkeleton:
     """Generate a connected commercial plantation of kiwi pergola rows.
 
     ``rows`` and ``columns`` count structural post lines, not fruiting plants.
-    The default 45 x 40 layout at 5 m centres is about 4.3 ha. Main beams,
+    The default 5 x 4 layout at 5 m centres spans 20 x 15 m. Main beams,
     row connectors and posts are structural; paired long canes fill each
     corridor while keeping the grid connected to one rooted skeleton. Height
     denotes the support/cane centreline above the aisle plane. On level

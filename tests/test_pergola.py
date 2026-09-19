@@ -80,6 +80,32 @@ class PergolaTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             place_fruit(a, fp)
 
+    def test_shared_canopy_defaults_and_explicit_overrides(self):
+        from treesim.config import TreeConfig
+        cfg = TreeConfig(lsystem=preset('pergola'))
+        self.assertEqual((cfg.lsystem.pergola_rows, cfg.lsystem.pergola_columns), (5, 4))
+        self.assertTrue(cfg.foliage.enabled and cfg.foliage.pergola)
+        self.assertEqual(cfg.foliage.leaves_per_terminal, 40)
+        self.assertEqual(cfg.fruit.max_count, 192)
+        bare = FoliageParams(enabled=False)
+        single = FruitParams(enabled=True, max_count=1)
+        overridden = TreeConfig(lsystem=preset('pergola'), foliage=bare, fruit=single)
+        self.assertIs(overridden.foliage, bare)
+        self.assertIs(overridden.fruit, single)
+        self.assertFalse(TreeConfig(lsystem=preset('apple')).foliage.enabled)
+        from unittest.mock import patch
+        from scripts.grow_tree import make_config, parse_args
+        with patch('sys.argv', ['grow_tree.py', '--preset', 'pergola', '--seed', '42']):
+            cli = make_config(parse_args())
+        self.assertEqual(cli.foliage, cfg.foliage)
+        self.assertEqual(cli.fruit, cfg.fruit)
+        with patch('sys.argv', ['grow_tree.py', '--preset', 'pergola',
+                               '--foliage-density', '0', '--fruit-count', '1']):
+            cli = make_config(parse_args())
+        self.assertFalse(cli.foliage.enabled)
+        self.assertEqual(cli.fruit.max_count, 1)
+
+
     def test_pergola_leaf_normals_and_lateral_coverage(self):
         params = preset('pergola')
         params.pergola_rows, params.pergola_columns = 5, 4
@@ -301,7 +327,7 @@ class PergolaTest(unittest.TestCase):
         self.assertEqual(a.physics.terrain_kind, 'noise')
         with patch('sys.argv', command + ['--foliage']):
             lush = make_config(parse_args())
-        self.assertEqual(lush.foliage.leaves_per_terminal, 5)
+        self.assertEqual(lush.foliage.leaves_per_terminal, 40)
         with patch('sys.argv', command + ['--terrain-kind', 'orchard']):
             args = parse_args()
         with patch('random.SystemRandom.randrange') as random_seed:

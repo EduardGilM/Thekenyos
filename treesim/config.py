@@ -77,10 +77,10 @@ class LSystemParams:
     # [M.9 rootstock caliper / trunk cross-sectional-area data].
     base_radius: float = 0.035    # trunk radius [m] after rescaling
 
-    # Commercial kiwi pergola layout.  Forty columns by forty-five rows at
-    # 5 m centres covers about 4.3 ha before the perimeter allowance.
-    pergola_rows: int = 45
-    pergola_columns: int = 40
+    # Accepted kiwi experiment layout: 5 x 4 posts at 5 m centres.
+    # Larger commercial blocks remain available through explicit overrides.
+    pergola_rows: int = 5
+    pergola_columns: int = 4
     pergola_spacing: float = 5.0  # structural post/row spacing [m]
 
     # Gaussian domain-randomisation sigma on shape params (paper: sigma=0.1).
@@ -131,7 +131,7 @@ def preset(name: str) -> LSystemParams:
     }
     if name == "pergola":
         return LSystemParams(kind="pergola", target_height=1.6,
-                             pergola_rows=45, pergola_columns=40,
+                             pergola_rows=5, pergola_columns=4,
                              pergola_spacing=5.0)
     if name == "apple":
         # central-leader apple tree; ``n`` is the max branch order (recursion depth)
@@ -550,14 +550,32 @@ class TreeConfig:
     physics: PhysicsParams = field(default_factory=PhysicsParams)
     breaking: BreakParams = field(default_factory=BreakParams)
     render: RenderParams = field(default_factory=RenderParams)
-    foliage: FoliageParams = field(default_factory=FoliageParams)
-    fruit: FruitParams = field(default_factory=FruitParams)
+    foliage: FoliageParams | None = None
+    fruit: FruitParams | None = None
     robot: RobotParams = field(default_factory=RobotParams)
 
     # Global toggles ----------------------------------------------------------
     deformable: bool = False     # False -> all joints welded rigid; True -> compliant
     seed: int = 0
     device: str = "cuda"         # "cuda" | "cpu"
+
+    def __post_init__(self):
+        # Resolve omitted settings once; preserve explicitly supplied experiments.
+        pergola = self.lsystem.kind == "pergola"
+        if self.foliage is None:
+            self.foliage = FoliageParams()
+            if pergola:
+                self.foliage.set_density(2.0)
+                self.foliage.pergola = True
+                self.foliage.leaves_per_terminal = 40
+                self.foliage.min_order_for_leaves = 2
+                self.foliage.leaf_length, self.foliage.leaf_width = .22, .17
+        if self.fruit is None:
+            self.fruit = FruitParams()
+            if pergola:
+                self.fruit.enabled, self.fruit.max_count = True, 192
+                self.fruit.joint = "free"
+                self.fruit.colors = ((.39, .27, .12), (.48, .34, .17))
 
     @classmethod
     def rigid(cls, preset_name: str = "tb", n: int = 5) -> "TreeConfig":
