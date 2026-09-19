@@ -142,9 +142,12 @@ def jaw_hold_q(close_frac, jaw_open, jaw_closed):
 
 
 def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
-    """Pick the lightest close-fraction that retains without exceeding the load gate.
+    """Pick a close-fraction that retains. Prefer staying under the 15 N gate.
 
-    ``max_load_N`` is a rigid-sim contact result, not a tissue-safe force.
+    If several static holds keep the fruit, take one step tighter than the
+    lightest keeper so a moving carry is less likely to drop it. If nothing
+    retains, fully close. ``max_load_N`` is a rigid-sim contact result, not a
+    tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
         raise ValueError('hold sweep rows must be a non-empty sequence')
@@ -166,14 +169,18 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         if not np.isfinite([close, slip, load]).all() or not 0.0 <= close <= 1.0 or slip < 0 or load < 0:
             raise ValueError('hold sweep row values must be finite and physically ranged')
         cleaned.append({'close_frac': close, 'slip_m': slip, 'max_load_N': load, 'retained': retained})
-    viable = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok
-              and row['max_load_N'] <= load_limit]
-    if viable:
-        return min(viable, key=lambda row: row['close_frac'])
-    under = [row for row in cleaned if row['max_load_N'] <= load_limit]
-    if under:
-        return min(under, key=lambda row: (row['slip_m'], row['close_frac']))
-    return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
+    retained = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok]
+    if retained:
+        under = [row for row in retained if row['max_load_N'] <= load_limit]
+        pool = under or retained
+        ordered = sorted(pool, key=lambda row: row['close_frac'])
+        # One step tighter than the lightest keeper so a moving carry does not
+        # drop a fruit that only survived a static hold.
+        idx = 1 if len(ordered) > 1 and under else 0
+        return ordered[idx]
+    # Nothing retained: fully close, matching the unassisted carry that already
+    # kept fruit at the TCP. DEPOSIT_ONLY still skips jaw-overload failure.
+    return max(cleaned, key=lambda row: row['close_frac'])
 
 
 def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qposadr,
