@@ -65,6 +65,8 @@ def main():
     a=p.parse_args()
     if a.steps <= 0 or a.eval_episodes <= 0: p.error('Steps and evaluation episodes must be positive')
     contact=json.loads(a.contact_report.read_text())
+    if not a.evaluate_only and not contact.get('transfer_accepted', False):
+        raise RuntimeError('Rigid/flex contact agreement has not passed. Finish physics validation before training; archived checkpoints can still use --evaluate-only.')
     if any(x.get('warnings',0) or x.get('execution_returncode',0) for x in contact['cases'].values() if x['rigid']):
         raise RuntimeError('Resolve rigid contact numerical failures before the rigid pilot')
     a.output.mkdir(parents=True,exist_ok=True)

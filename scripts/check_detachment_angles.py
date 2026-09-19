@@ -20,9 +20,12 @@ from treesim.kiwi_material import STEM_LENGTH, detachment_force
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--timestep', type=float, default=.001)
+p.add_argument('--device', choices=('cpu','cuda:0'), default='cuda:0')
 p.add_argument('--video', type=Path)
 p.add_argument('--output', type=Path, default=Path('output/detachment-angles.json'))
 a = p.parse_args()
+if a.device == 'cpu' and a.video: p.error('CPU fixture is headless; use the GPU path for this viewer')
+wp.set_device(a.device)
 steps = round(.02/a.timestep) if a.timestep > 0 else 0
 if steps < 2 or steps % 2 or not np.isclose(steps*a.timestep,.02):
     p.error('timestep must divide .02 into a positive even number of steps')
@@ -47,7 +50,7 @@ for index, angle in enumerate(angles):
         linear_axes=[b.JointDofConfig(axis=axis)])
     b.add_articulation([j])
     parents.append(parent); fruits.append(fruit)
-m = b.finalize()
+m = b.finalize(device=a.device)
 def states():
     pair = m.state(),m.state()
     for s in pair: newton.eval_fk(m,m.joint_q,m.joint_qd,s)
@@ -58,7 +61,7 @@ tree = SimpleNamespace(model=m,config=cfg,state_pair=states,apple_data=dict(
     hang_drop=np.full(3,STEM_LENGTH+.03249),detach_force=np.full(3,36.5)))
 field = KiwiField(tree,a.timestep)
 s0,s1 = states()
-solver = newton.solvers.SolverMuJoCo(m,disable_contacts=True,solver=1)
+solver = newton.solvers.SolverMuJoCo(m,disable_contacts=True,solver=1,use_mujoco_cpu=m.device.is_cpu)
 ctrl,contacts = m.control(),m.contacts()
 ext = wp.zeros(m.body_count,dtype=wp.spatial_vector)
 @wp.kernel
@@ -79,7 +82,9 @@ def step():
         wp.launch(release_load, dim=3, inputs=[field.apple_body, field._flag, m.body_mass, s0.body_f])
         solver.step(s0,s1,ctrl,contacts,a.timestep)
         s0,s1=s1,s0
-with wp.ScopedCapture() as cap: step()
+cap = None
+if not m.device.is_cpu:
+    with wp.ScopedCapture() as cap: step()
 viewer = encoder = None
 if a.video:
     import newton.viewer as V
@@ -96,7 +101,11 @@ try:
         for i,body in enumerate(fruits):
             if not field.detached[i]: f[body,2]=-10*t
         ext.assign(f)
-        wp.capture_launch(cap.graph)
+        if cap is None:
+            step()
+            if any(w.number for w in solver.mj_data.warning): raise RuntimeError('Native MuJoCo numerical warning')
+        else:
+            wp.capture_launch(cap.graph)
         field.update(s0)
         poses = s0.body_q.numpy()
         if not np.isfinite(poses).all(): raise RuntimeError('Nonfinite state')
@@ -148,5 +157,5 @@ for i,angle in enumerate(angles):
     assert abs(measured-expected) < .5, (angle,measured,expected)
     results.append(dict(fsa_deg=angle,expected_N=expected,measured_break_load_N=measured,release_speed_m_s=release_speeds[i]))
 a.output.parent.mkdir(parents=True,exist_ok=True)
-a.output.write_text(json.dumps(dict(timestep_s=a.timestep,cases=results,passed=True),indent=2)+'\n')
+a.output.write_text(json.dumps(dict(timestep_s=a.timestep,device=a.device,cases=results,passed=True),indent=2)+'\n')
 print(a.output.read_text())
