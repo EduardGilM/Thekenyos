@@ -168,3 +168,36 @@ importing MuJoCo. Native solver conversion omits visual-only robot meshes;
 the navigation renderer mirrors original URDF visuals and the exact physical
 heightfield into a separate, never-stepped model. Preserve the render/physics
 pose and terrain equivalence checks rather than changing collisions for looks.
+
+## Explicit assisted reach/grab task
+
+The user-approved `treesim.assisted_kiwi_env` is an isolated easy-grasp RL task,
+not a relaxation of contact-only harvesting validation. It uses native CPU
+MuJoCo, frozen RELIC walking, ideal target observations and artificial stem/grip
+welds; never present it as physical grasp, detachment or damage validation.
+Run `ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_assisted_kiwi_env -v`.
+Preserve hanging-fruit, no-teleport attachment-frame, seeded-reset, walking,
+fall, and two-timestep assisted-retention checks. Dynamic hand sites must use
+`mjSAMEFRAME_NONE`; otherwise MuJoCo skips changed site transforms. Anchor stem
+constraints at each fruit rather than using a distant world-origin weld frame.
+The launcher `scripts/train_assisted_kiwi.py` writes periodic text/PNG evaluations
+and checkpoints to a new directory, and checks actual weight changes. EGL must
+be selected before importing MuJoCo. On dayone the isolated learning environment
+is `/home/ubuntu/assisted-kiwi-venv`; the source worktree is
+`/home/ubuntu/Thekenyos-assisted-training`. Do not change the legacy environment.
+Longer runs use `/home/ubuntu/Thekenyos-assisted-training-v2`, preserving the
+original source and checkpoints. The launcher has subprocess workers and
+weight-only warm starts: trainer changes may be accepted, but environment/Spot
+hashes, physical task settings and observation/action spaces must still match.
+Exact resume also checks trainer hashes and learning configuration. Keep per-stage
+best checkpoints, compare initial/best policies on fresh held-out seeds, and
+retain failed evaluations. Test the harness via
+`python -B -m unittest tests.test_assisted_kiwi_env.TrainingHarnessTest -v`.
+The body-workspace curriculum lives in the trainer's `WorkspaceApproach` wrapper,
+not the physical environment: `--workspace-weight 1` enables training-only
+shaping and combined workspace/grab promotion. Evaluations always set this weight
+to zero; `--eval-all-stages` compares one monitoring-selected checkpoint on all
+three distances. Preserve the action/trajectory-equivalence test, one-time bonus,
+original anchor goal and frozen RELIC hash check. The workspace is a fixture-specific
+engineering heuristic, not calibrated robot reachability. Updated source snapshots
+use `/home/ubuntu/Thekenyos-assisted-training-v3`, preserving both earlier versions.

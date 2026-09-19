@@ -584,6 +584,185 @@ everything with title cards into `showreel.mp4` plus `manifest.json`. Every
 frame is labelled as scripted; these are visual material, not validation.
 EGL is unavailable on CPU-only hosts, hence `MUJOCO_GL=glfw` (needs a display).
 
+### Easy assisted kiwi approach/grab training
+
+This opt-in task is separate from contact-only harvesting and its physics gates.
+A floating Spot uses the frozen RELIC gait, while PPO learns seven actions at
+10 Hz: forward/lateral/yaw commands, Cartesian hand-velocity commands through
+Jacobian IK, and jaw closure. Each episode selects one of six hanging kiwis in
+a small fixed, collidable pergola. The initial raised-arm pose is initialized
+with IK; it is not learned. Observations use ideal simulator target positions
+and proprioception, not cameras. Native MuJoCo CPU physics runs at 1 kHz;
+Torch can run the PPO network on CUDA. For this small MLP, CPU Torch may be faster.
+
+**Grasp assistance is intentional:** within a 12 cm capture radius, a close
+command, actual jaw closure and low base speed enable an artificial retaining
+weld and disable an artificial stem constraint. Success requires 0.3 seconds
+of retention. Fruit is not teleported. This is neither physical detachment nor
+contact-only grasp validation; there is no damage-safety claim or basket deposit.
+The existing `KiwiField.hold()` prohibition and rigid/flex training gates remain
+unchanged. The simplified stems are constraints with visual lines, not collidable
+physical stalks. No successful full-distance policy is implied by these commands.
+
+Use a separate environment with the pinned simulation stack and the `[rl]`
+dependencies (Torch 2.10.0, Stable-Baselines3 2.9.0, Gymnasium 1.3.0):
+
+```bash
+ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_assisted_kiwi_env -v
+python scripts/train_assisted_kiwi.py --relic ../relic \
+  --output output/assisted-smoke --smoke --steps 150
+python scripts/train_assisted_kiwi.py --relic ../relic \
+  --output output/assisted-training --steps 32768 --num-envs 8 \
+  --eval-every 4096 --eval-episodes 8 --policy-device cpu
+```
+
+Output directories must be new. Use `--no-images --policy-device cpu` without
+NVIDIA EGL. The smoke controller is scripted and never supplies training
+teacher actions. Training starts with 0–0.15 m extra approach distance, then
+0.25–0.65 m and 0.75–1.5 m. Two consecutive monitoring evaluations with at least
+75% assisted success schedule promotion at an episode boundary; `--fixed-stage`
+disables promotion and `--stage 0/1/2` selects the starting level. This small
+promotion screen is not statistical evidence of generalization. Episode horizon
+is configurable with `--episode-seconds`; `--physics-hz 2000` checks timestep
+sensitivity. Falls, boundary exits and numerical failures remain active.
+
+The improved launcher supports independent subprocess environments (four by
+default), 128-step rollouts per worker, lower exploration noise (0.45 for motion,
+0.25 for the gripper), learning rate 1e-4, entropy coefficient 0.002 and PPO KL
+early stopping at 0.02. The environment, rewards, capture radius and hold
+requirement are unchanged. Worker stages change only on reset. Training step
+counts must be multiples of `num_envs * rollout_steps`.
+
+Progress is printed every 1,024 aggregate transitions and after each evaluation.
+Files include `progress.jsonl`, PPO `progress.csv`, source/dependency
+`manifest.json`, `initial-policy.zip`, periodic `policy-*.zip` checkpoints with
+metadata, and labeled start/final PNGs plus JSON for each evaluation. The first
+successful example, when present, is saved separately and labeled as selected.
+`best.json` identifies the strongest monitoring checkpoint per stage, prioritizing
+success rate over distance. Seeds 10000+ monitor progress; final seeds default to
+30000+, reserved from curriculum selection in the new run. Each best-stage
+checkpoint is compared against the initial policy on those identical fresh
+seeds. Use a new `--heldout-seed` range for subsequent experiments after inspecting
+these results. `--record-video` records the first fixed held-out seed per stage,
+including failures, rather than selecting only successful videos.
+
+`--resume /path/to/policy-XXXXXXXX.zip` restores weights/optimizer and requires
+matching source hashes, task and training configuration. It is not an exact
+simulator/RNG-state replay. `--warm-start /path/to/policy-XXXXXXXX.zip` explicitly
+starts a new experiment from existing network weights, with a fresh optimizer
+and configured exploration noise. Warm starts permit a new trainer or starting
+stage, but still require identical environment/Spot source hashes, physics,
+capture and hold settings, observation/action spaces and network architecture.
+The parent checkpoint hash and loading mode are recorded. This supports
+continuing the original 4,096-step policy without weakening physical task checks:
+
+```bash
+python scripts/train_assisted_kiwi.py --relic ../relic \
+  --warm-start /path/to/assisted-kiwi-ppo-01/policy-00004096.zip \
+  --output output/assisted-training-longer --steps 32768 --num-envs 8 \
+  --eval-every 4096 --eval-episodes 8 --heldout-seed 30000 --record-video
+```
+
+The final report checks actual network weight changes. Images and metrics always
+distinguish assisted policy behavior from physical grasp success.
+
+For body-first approach shaping, use `--workspace-weight 1 --stage 1` and
+`--eval-all-stages`. A trainer-only wrapper rewards reducing the horizontal
+body-to-workspace error, penalizes remaining outside it and gives a one-time
+settling bonus. The engineering workspace is a target 0.45–0.75 m ahead of the
+chassis and within 0.15 m laterally in its yaw frame. Settling requires three
+10 Hz samples inside that region below 0.3 m/s horizontal speed. This is a
+curriculum heuristic for the fixed-height fixture, not a calibrated reachability
+map. The target remains the original fruit anchor after capture so carrying
+fruit cannot move the approach goal. Rewards do not override actions or change
+observations, dynamics, termination or grasp criteria. RELIC remains frozen;
+its ONNX hash is recorded and checked after training.
+
+With shaping enabled, promotion requires at least 75% **combined workspace
+settling and assisted-grab success in the same episodes** on two consecutive
+monitoring evaluations. All evaluations disable the added shaping and report
+workspace entry/settling, combined success, net body travel, path length, gripper
+gap and failures separately. `--eval-all-stages` compares one recommended
+checkpoint against its initial weights on identical held-out seeds at all three
+distances, including close-range retention. The recommendation uses monitoring
+results, not held-out selection. These runs still use ideal sensing and assisted
+grasps, and do not adapt the low-level gait.
+
+```bash
+python scripts/train_assisted_kiwi.py --relic ../relic \
+  --warm-start /path/to/assisted-kiwi-ppo-03/policy-00012288.zip \
+  --output output/assisted-workspace --steps 32768 --num-envs 8 --stage 1 \
+  --workspace-weight 1 --learning-rate .0003 --entropy 0 \
+  --exploration-std .3 --gripper-std .15 --eval-every 4096 \
+  --eval-episodes 16 --heldout-seed 50000 --eval-all-stages --record-video
+```
+
+Initial L4-host screen (19 September 2026): 4,096 PPO steps, CUDA policy updates
+with native CPU physics. On the four fixed monitoring seeds, assisted success
+went from 0/4 to 1/4 and mean closest hand-to-fruit distance from 26.5 to 14.9 cm.
+A separate four-seed final evaluation also scored 1/4. Network parameter-change
+L2 norm was 1.926. The curriculum remained at stage 0: this is an initial
+close-range learning result, not reliable picking or learned long-distance
+approach. Ten environment tests passed, including commanded walking, reset,
+canopy attachment and scripted assisted retention at both 1 and 0.5 ms.
+
+Longer follow-up on the same host: 32,768 additional transitions with eight
+workers, followed by a 16,384-transition medium-distance fine-tune. The first
+continuation improved close-range held-out success from 1/8 to 8/8 (seeds 30000+),
+but medium-distance success was only 1/8 despite 4/8 on monitoring seeds. The
+fine-tune retained that failure evidence and used learning rate 3e-4, entropy 0,
+motion noise 0.3 and gripper noise 0.15, without changing the environment. On
+fresh seeds 40000–40007, its best medium-distance checkpoint improved from 3/8
+at initialization to 7/8. That same checkpoint scored 8/8 on close starts and
+0/8 on long approaches; the long failures were timeouts. The longest stage
+remains unsolved, and eight-seed screens do not establish broad robustness.
+
+The recommended checkpoint from that run is `assisted-kiwi-ppo-03/policy-00012288.zip`, not
+the final checkpoint after entering the harder stage. Full artifacts, initial
+policies, failed evaluations and first-fixed-seed videos are retained locally
+under `/home/fran/Thekenyos-assisted-results-02` and
+`/home/fran/Thekenyos-assisted-results-03`, and remotely under the corresponding
+`/home/ubuntu/assisted-kiwi-ppo-02` and `assisted-kiwi-ppo-03` directories. The
+learner uses CPU PPO/native physics with EGL rendering on the L4. Learning
+updates are verified by parameter changes; no new low-level gait was trained.
+
+Body-workspace follow-up: 32,768 additional transitions using the optional
+workspace shaping, with all other physical task settings unchanged. Starting
+from the recommended medium checkpoint above, the curriculum passed medium
+workspace-plus-grab monitoring at 14/16 and then 16/16, advancing after 20,480
+steps. The remaining 12,288 steps trained long approaches. The final checkpoint
+`assisted-kiwi-ppo-04/policy-00032768.zip` is now recommended for this fixture.
+All evaluation shaping was disabled. One checkpoint was compared against its
+initial weights on seeds 50000–50015 across all distances:
+
+| Stage | Assisted grabs, before → after | Workspace settling + grab, before → after |
+|---|---|---|
+| Close | 16/16 → 16/16 | 14/16 → 11/16 |
+| Medium | 11/16 → 16/16 | 5/16 → 15/16 |
+| Long | 0/16 → 16/16 | 0/16 → 15/16 |
+
+Mean long-range net body movement increased from 0.254 m to 0.977 m, with all
+six fruit targets represented and no falls in these final evaluations. The
+stricter close-range settling metric regressed, despite unchanged grab success;
+this is not perfect approach-and-settle behavior. The old failing long-range
+video case (seed 40000) was also replayed: the old final policy again timed out
+after 0.419 m net movement, while the new policy moved 1.154 m and grabbed in
+4.7 s. That learned replay also succeeded at 2 kHz (1.166 m, 4.9 s). This is
+not the earlier scripted-base diagnostic: every high-level action is learned,
+with frozen RELIC gait inference below it. The ONNX hash was unchanged and PPO
+parameter-change L2 was 4.279. Nineteen assisted environment/harness tests passed,
+including shaping/action trajectory equivalence; twenty existing lightweight
+regressions passed, with five navigation integration checks skipped locally.
+
+Artifacts are saved under `/home/fran/Thekenyos-assisted-results-04` and
+`/home/ubuntu/assisted-kiwi-ppo-04`. `summary.json` contains matched-seed results;
+`cross-trained-stage-2.mp4` shows the first fresh long-range seed, and
+`previous-failed-case-learned-1000hz.mp4` shows the previously failing scene.
+`learning-progress.png` tracks monitoring results and actual body displacement.
+Earlier failed evaluations and checkpoints remain preserved. These are small,
+fixed-fixture assisted-grasp screens with ideal sensing, not orchard robustness,
+contact-only grasp validation or physical-robot transfer. Training has stopped.
+
 ### Fixed-base harvesting environment
 
 See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
