@@ -994,6 +994,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
             if preview.get('easy'):
+                from treesim.kiwi_rl.curriculum import EASY_PRESET
                 from treesim.kiwi_rl.reach_teacher import (
                     adapt_scripted_hold_q, fruit_in_release_zone, jaw_hold_q,
                     jaw_open_closed_q, scripted_jaw_target,
@@ -1008,16 +1009,21 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                     np.asarray(data.xpos[chassis], dtype=np.float64)
                     + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
                 rim_z = float(SIZE[2])
+                tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+                release_center = bool(EASY_PRESET.get('release_at_center'))
                 desired = scripted_jaw_target(
-                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z)
-                slip = float(np.linalg.norm(data.site_xpos[tcp_site] - data.xpos[fruit_body]))
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z,
+                    tcp_xy=tcp_xyz, release_at_center=release_center)
+                slip = float(np.linalg.norm(tcp_xyz - data.xpos[fruit_body]))
                 over = fruit_in_release_zone(
-                    fruit_xyz, basket_xyz, open_xy_m=0.15, rim_z_m=rim_z)
+                    fruit_xyz, basket_xyz, open_xy_m=0.15, rim_z_m=rim_z,
+                    tcp_xyz=tcp_xyz, release_at_center=release_center)
                 hold = adapt_scripted_hold_q(
                     hold, opened, closed, slip_m=slip, over_basket=over)
                 easy_hold_q = hold
                 desired = scripted_jaw_target(
-                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z)
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z,
+                    tcp_xy=tcp_xyz, release_at_center=release_center)
                 arm = np.asarray(arm, dtype=np.float64).copy()
                 arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
             controller.update_gait(data, command)

@@ -141,6 +141,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('HOLD_SWEEP_CLEARANCE_M', runtime_src)
         self.assertIn('start_over_opening', runtime_src)
         self.assertIn('easy_over_opening_local_m', runtime_src)
+        self.assertIn('shape_hand_fruit', runtime_src)
+        self.assertIn('release_at_center', runtime_src)
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)

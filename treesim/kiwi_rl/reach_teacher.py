@@ -529,12 +529,38 @@ def adapt_scripted_hold_q(hold, opened, closed, *, slip_m, over_basket,
     return float(np.clip(nxt, min(lo, hi), max(lo, hi)))
 
 
-def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m):
-    """True when the free fruit COM is over the opening and below the rim.
+def at_basket_center(fruit_xyz, tcp_xyz, basket_xyz, *, open_xy_m):
+    """True when fruit and TCP XY both sit over the basket centre.
 
-    XY-only release at hover height dumps beside the liner. Floor is
-    ``basket_floor_xyz``; the rim is ``floor.z + rim_z_m``. Not a weld.
+    Used to force a scripted release. Fruit stays a free body.
     """
+    fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(-1)
+    tcp = np.asarray(tcp_xyz, dtype=np.float64).reshape(-1)
+    basket = np.asarray(basket_xyz, dtype=np.float64).reshape(-1)
+    radius = float(open_xy_m)
+    if fruit.size < 2 or tcp.size < 2 or basket.size < 2:
+        raise ValueError('fruit, tcp and basket must include X and Y')
+    if not np.isfinite(fruit[:2]).all() or not np.isfinite(tcp[:2]).all() or not np.isfinite(basket[:2]).all():
+        raise ValueError('fruit, tcp and basket XY must be finite')
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError('open_xy_m must be finite and > 0')
+    fruit_xy = (float(fruit[0] - basket[0]) ** 2 + float(fruit[1] - basket[1]) ** 2) < radius * radius
+    hand_xy = (float(tcp[0] - basket[0]) ** 2 + float(tcp[1] - basket[1]) ** 2) < radius * radius
+    return bool(fruit_xy and hand_xy)
+
+
+def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m,
+                         tcp_xyz=None, release_at_center=False):
+    """True when the scripted jaw should open.
+
+    Default: fruit COM over the opening and below the rim. With
+    ``release_at_center``, fruit and TCP XY over the centre, any height.
+    Not a weld.
+    """
+    if release_at_center:
+        if tcp_xyz is None:
+            raise ValueError('release_at_center requires tcp_xyz')
+        return at_basket_center(fruit_xyz, tcp_xyz, basket_floor_xyz, open_xy_m=open_xy_m)
     fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(-1)
     basket = np.asarray(basket_floor_xyz, dtype=np.float64).reshape(-1)
     radius = float(open_xy_m)
@@ -551,12 +577,13 @@ def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m):
     return bool((dx * dx + dy * dy) < radius * radius and 0.0 < dz < rim)
 
 
-def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m=None):
-    """Hold while the fruit is away from the opening; open once it is over.
+def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m=None,
+                       tcp_xy=None, release_at_center=False):
+    """Hold while away from the opening; open once the release gate is met.
 
     Fruit stays a free body. ``open_xy_m`` is an XY radius around the basket
-    centre. When both arguments include Z and ``rim_z_m`` is set, open only
-    if the COM is also below the rim. That is not a validated release pose.
+    centre. Default rim-gated open still needs Z. ``release_at_center``
+    opens when fruit and hand XY are over the hole, including hover height.
     """
     fruit = np.asarray(fruit_xy, dtype=np.float64).reshape(-1)
     basket = np.asarray(basket_xy, dtype=np.float64).reshape(-1)
@@ -569,7 +596,11 @@ def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m
         raise ValueError('fruit and basket XY must be finite')
     if not np.isfinite([hold_q, open_q, radius]).all() or radius <= 0:
         raise ValueError('jaw targets and open_xy_m must be finite, radius > 0')
-    if fruit.size >= 3 and basket.size >= 3 and rim_z_m is not None:
+    if release_at_center:
+        if tcp_xy is None:
+            raise ValueError('release_at_center requires tcp_xy')
+        over = at_basket_center(fruit, tcp_xy, basket, open_xy_m=radius)
+    elif fruit.size >= 3 and basket.size >= 3 and rim_z_m is not None:
         over = fruit_in_release_zone(fruit[:3], basket[:3], open_xy_m=radius, rim_z_m=rim_z_m)
     else:
         dx = float(fruit[0] - basket[0])

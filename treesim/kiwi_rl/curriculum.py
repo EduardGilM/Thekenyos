@@ -69,19 +69,20 @@ EASY_PRESET = {
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    # Student starts over the opening so the 1.28 s window only has to lower
-    # and release. 0.16 m / +6 cm inset had no IK-safe pose on the live
-    # scene; the already-solved hover at 0.28 m does. Flip
-    # start_over_opening to restore the 0.32 m outside-crate carry. The
-    # hold sweep stays at 0.40 m / 0.28 m so a closer student pose cannot
-    # poison close-fraction.
+    # Carry from the original outside-crate start. Reward fruit 3D and hand
+    # XY toward the basket centre; force the jaw open once both are over
+    # the hole. Over-opening starts stay available behind this flag.
+    # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
+    # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
     # not a measured length.
-    'start_over_opening': True,
+    'start_over_opening': False,
+    'shape_hand_and_fruit': True,
+    'release_at_center': True,
     'start_open_radius_m': 0.06,
     'start_inset_x_m': 0.0,
     'start_margin_m': 0.32,
-    'start_clearance_m': 0.28,
+    'start_clearance_m': 0.10,
     'shaping_length_m': 0.60,
     'n_start_poses': 24,
     'start_x_span_m': 0.08,
@@ -89,7 +90,7 @@ EASY_PRESET = {
     # Kept for the outside-crate restore path. Over-opening samples a disk
     # around CENTER + [inset_x, 0], not this side Y.
     'start_side_y_m': 0.10,
-    'start_z_span_m': 0.04,
+    'start_z_span_m': 0.08,
     # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
     # stay away. 100 was still small next to a window of ground hits.
     # 500 is the enable_easy ceiling: an engineering jackpot, not a

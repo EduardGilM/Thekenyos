@@ -180,6 +180,10 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('easy_over_opening_local_m', inspect.getsource(apply_native_easy_start))
         self.assertIn('tcp_over_opening_above_rim', inspect.getsource(apply_native_easy_start))
         self.assertIn('start_over_opening', inspect.getsource(apply_native_easy_start))
+        from treesim.kiwi_rl.training_monitor import _record_progress_video_locked as _rec
+        rec_src = inspect.getsource(_rec)
+        self.assertIn('release_at_center', rec_src)
+        self.assertIn('tcp_xy', rec_src)
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))

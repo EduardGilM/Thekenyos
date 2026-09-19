@@ -1,8 +1,10 @@
 """Reward/v3 ledger: once-per-fruit, damage separate from spill."""
 import unittest
 
+import numpy as np
+
 from treesim.kiwi_rl.rewards import (
-    RewardEvaluator, RewardState, shaping_step,
+    RewardEvaluator, RewardState, approach_center_potential, shaping_step,
 )
 
 
@@ -49,6 +51,15 @@ class LedgerTest(unittest.TestCase):
         self.assertGreater(r2, 0.0)
         r3, _ = shaping_step(st, 0.5, 0.99, "b")
         self.assertEqual(r3, 0.0)
+
+    def test_approach_center_pays_fruit_and_hand(self):
+        far = approach_center_potential([1.0, 0.0, 0.2], [1.0, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        near = approach_center_potential([0.05, 0.0, 0.2], [0.04, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        self.assertGreater(near, far)
+        hand_only = approach_center_potential([1.0, 0.0, 0.2], [0.04, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        self.assertGreater(hand_only, far)
+        with self.assertRaises(ValueError):
+            approach_center_potential([np.nan, 0, 0], [0, 0, 0], [0, 0, 0])
 
 
 if __name__ == "__main__":

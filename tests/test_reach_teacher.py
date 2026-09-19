@@ -167,6 +167,23 @@ class ReachTeacherMathTest(unittest.TestCase):
                                                open_xy_m=0.15, rim_z_m=0.28))
         self.assertTrue(fruit_in_release_zone([0.05, 0.04, 0.30], [0.0, 0.0, 0.145],
                                               open_xy_m=0.15, rim_z_m=0.28))
+        # Force-open at centre: hover height is enough if the hand is there too.
+        self.assertAlmostEqual(
+            scripted_jaw_target([0.05, 0.04, 0.70], [0.0, 0.0, 0.145], -1.2, 0.0,
+                                open_xy_m=0.15, rim_z_m=0.28, tcp_xy=[0.02, 0.01, 0.70],
+                                release_at_center=True),
+            0.0)
+        self.assertAlmostEqual(
+            scripted_jaw_target([0.05, 0.04, 0.70], [0.0, 0.0, 0.145], -1.2, 0.0,
+                                open_xy_m=0.15, rim_z_m=0.28, tcp_xy=[1.0, 0.0, 0.70],
+                                release_at_center=True),
+            -1.2)
+        self.assertTrue(fruit_in_release_zone(
+            [0.05, 0.04, 0.70], [0.0, 0.0, 0.145], open_xy_m=0.15, rim_z_m=0.28,
+            tcp_xyz=[0.02, 0.01, 0.70], release_at_center=True))
+        self.assertFalse(fruit_in_release_zone(
+            [0.05, 0.04, 0.70], [0.0, 0.0, 0.145], open_xy_m=0.15, rim_z_m=0.28,
+            tcp_xyz=[1.0, 0.0, 0.70], release_at_center=True))
         with self.assertRaises(ValueError):
             scripted_jaw_target([np.nan, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15)
 
