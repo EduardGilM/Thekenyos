@@ -108,7 +108,7 @@ def make_config(args) -> TreeConfig:
     if args.foliage_density is not None:
         cfg.foliage.set_density(args.foliage_density)
     elif args.foliage:
-        cfg.foliage.set_density(0.6)
+        cfg.foliage.set_density(1.0 if args.preset == "pergola" else 0.6)
     elif args.preset == "pergola":
         cfg.foliage.set_density(1.0)
     if args.leaves is not None:                 # explicit per-twig count overrides the dial

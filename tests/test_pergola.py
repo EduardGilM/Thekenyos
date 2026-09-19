@@ -274,6 +274,9 @@ class PergolaTest(unittest.TestCase):
             random_seed.assert_not_called()
         self.assertEqual((a.physics.terrain_seed, b.physics.terrain_seed), (7, 7))
         self.assertEqual(a.physics.terrain_kind, 'noise')
+        with patch('sys.argv', command + ['--foliage']):
+            lush = make_config(parse_args())
+        self.assertEqual(lush.foliage.leaves_per_terminal, 5)
         with patch('sys.argv', command + ['--terrain-kind', 'orchard']):
             args = parse_args()
         with patch('random.SystemRandom.randrange') as random_seed:
