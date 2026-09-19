@@ -951,6 +951,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     distances = []
     basket_distances = []
     command = np.zeros(3, dtype=np.float32)
+    easy_hold_q = None
     stage_label = preview['stage'] or 'hanging'
     easy_tag = (
         f'easy-carry far_frac={float(preview.get("easy_far_frac") or 0.0):.2f} '
@@ -970,14 +971,25 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
             if preview.get('easy'):
-                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, jaw_open_closed_q, scripted_jaw_target
+                from treesim.kiwi_rl.reach_teacher import (
+                    adapt_scripted_hold_q, jaw_hold_q, jaw_open_closed_q, scripted_jaw_target,
+                )
                 opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
                 frac = preview.get('hold_close_frac')
-                hold = jaw_hold_q(0.6 if frac is None else float(frac), opened, closed)
+                if easy_hold_q is None:
+                    easy_hold_q = jaw_hold_q(0.6 if frac is None else float(frac), opened, closed)
+                hold = float(easy_hold_q)
                 fruit_xy = np.asarray(data.xpos[fruit_body], dtype=np.float64)[:2]
                 basket_xy = (
                     np.asarray(data.xpos[chassis], dtype=np.float64)
                     + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
+                desired = scripted_jaw_target(
+                    fruit_xy, basket_xy[:2], hold, opened, open_xy_m=0.15)
+                slip = float(np.linalg.norm(data.site_xpos[tcp_site] - data.xpos[fruit_body]))
+                over = float(np.linalg.norm(fruit_xy - basket_xy[:2])) < 0.15
+                hold = adapt_scripted_hold_q(
+                    hold, opened, closed, slip_m=slip, over_basket=over)
+                easy_hold_q = hold
                 desired = scripted_jaw_target(
                     fruit_xy, basket_xy[:2], hold, opened, open_xy_m=0.15)
                 arm = np.asarray(arm, dtype=np.float64).copy()

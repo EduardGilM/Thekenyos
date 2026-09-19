@@ -359,6 +359,35 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
 
 
 @wp.kernel
+def _adapt_scripted_jaw(site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
+                        xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                        chassis: int, fruit_bodies: wp.array(dtype=int),
+                        active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
+                        jaw_hold: wp.array(dtype=float), jaw_open: float, jaw_closed: float,
+                        open_xy_m: float, slip_tighten_m: float, max_close_frac: float):
+    """Tighten the hold if the free fruit is leaving the mouth. Not a weld."""
+    world = wp.tid()
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    fruit_pos = xpos[world, fruit]
+    dx = fruit_pos[0] - basket_world[0]
+    dy = fruit_pos[1] - basket_world[1]
+    if wp.sqrt(dx * dx + dy * dy) < open_xy_m:
+        return
+    slip = wp.length(fruit_pos - site_xpos[world, tcp_site])
+    if slip <= slip_tighten_m:
+        return
+    max_hold = jaw_open + max_close_frac * (jaw_closed - jaw_open)
+    nxt = jaw_hold[world] + float(0.25) * (jaw_closed - jaw_hold[world])
+    lo = wp.min(jaw_hold[world], max_hold)
+    hi = wp.max(jaw_hold[world], max_hold)
+    jaw_hold[world] = wp.clamp(nxt, lo, hi)
+
+
+@wp.kernel
 def _pin_scripted_jaw(enabled: wp.array(dtype=int),
                       xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                       chassis: int, fruit_bodies: wp.array(dtype=int),
@@ -643,6 +672,12 @@ class FastRuntime:
         with wp.ScopedDevice(self.device):
             wp.copy(self._actions, action_wp)
             if self._easy:
+                wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
+                    self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
+                    self.chassis, self.task.fruit_body, self.task.active_fruit,
+                    self._basket_center, self._easy_jaw_hold, float(self._jaw_open),
+                    float(self._jaw_closed), float(self._open_xy_m), 0.04, 0.70],
+                    device=self.device)
                 wp.launch(_scripted_jaw_hold, dim=self.worlds, inputs=[
                     self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
                     self.task.active_fruit, self._basket_center, self.control.targets,

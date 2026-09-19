@@ -432,6 +432,32 @@ def hold_close_fracs(n_levels=None, close_min=None, close_max=None):
     return np.linspace(lo, hi, n, dtype=np.float64)
 
 
+def adapt_scripted_hold_q(hold, opened, closed, *, slip_m, over_basket,
+                          slip_tighten_m=0.04, max_close_frac=0.70, step=0.25):
+    """Tighten a scripted hold when the free fruit is leaving the mouth.
+
+    Does not weld. Open stays the caller's job once fruit XY is over the
+    basket. ``slip_m`` is TCP-to-fruit distance, not a tissue metric.
+    """
+    hold_q = float(hold)
+    open_q = float(opened)
+    closed_q = float(closed)
+    slip = float(slip_m)
+    radius = float(slip_tighten_m)
+    frac = float(max_close_frac)
+    mix = float(step)
+    if not np.isfinite([hold_q, open_q, closed_q, slip, radius, frac, mix]).all():
+        raise ValueError('adapt hold inputs must be finite')
+    if radius <= 0 or not 0 < frac <= 1 or not 0 < mix <= 1:
+        raise ValueError('slip_tighten_m, max_close_frac and step must be in range')
+    if over_basket or slip <= radius:
+        return hold_q
+    max_hold = open_q + frac * (closed_q - open_q)
+    nxt = hold_q + mix * (closed_q - hold_q)
+    lo, hi = (hold_q, max_hold) if closed_q >= hold_q else (max_hold, hold_q)
+    return float(np.clip(nxt, min(lo, hi), max(lo, hi)))
+
+
 def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m):
     """Hold while the fruit is away from the opening; open once it is over.
 
@@ -469,12 +495,13 @@ def jaw_hold_q(close_frac, jaw_open, jaw_closed):
 def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
     """Pick a close-fraction that retains under the 15 N engineering gate.
 
-    If several static holds keep the fruit without crossing the load gate, take
-    one step tighter than the lightest keeper so a moving carry is less likely
-    to drop it. If every keeper is over 15 N, take the lightest of those rather
-    than an empty close that dumps. If nothing retains, take the tightest
-    close still under 15 N. ``max_load_N`` is a rigid-sim contact result, not a
-    tissue-safe force.
+    Static light keepers (close 0.25–0.30) still dump as soon as the arm
+    moves. If several contacting holds keep the fruit under the load gate,
+    take the tightest of those so the carry sees fruit mass. Ignore 0 N
+    "keepers" while a real pad load exists. If every keeper is over 15 N,
+    take the lightest of those rather than an empty close that dumps. If
+    nothing retains, take the tightest close still under 15 N. ``max_load_N``
+    is a rigid-sim contact result, not a tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
         raise ValueError('hold sweep rows must be a non-empty sequence')
@@ -498,10 +525,11 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         cleaned.append({'close_frac': close, 'slip_m': slip, 'max_load_N': load, 'retained': retained})
     viable = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok
               and row['max_load_N'] <= load_limit]
+    contacting = [row for row in viable if row['max_load_N'] >= 0.5]
+    if contacting:
+        return max(contacting, key=lambda row: (row['close_frac'], -row['slip_m']))
     if viable:
-        ordered = sorted(viable, key=lambda row: row['close_frac'])
-        idx = 1 if len(ordered) > 1 else 0
-        return ordered[idx]
+        return max(viable, key=lambda row: (row['close_frac'], -row['slip_m']))
     keepers = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok]
     if keepers:
         return min(keepers, key=lambda row: (row['max_load_N'], row['close_frac']))

@@ -65,7 +65,7 @@ class ReachTeacherMathTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             easy_start_local_m(1.1)
 
-    def test_hold_sweep_picks_lightest_retaining_close(self):
+    def test_hold_sweep_picks_tightest_contacting_keeper(self):
         fracs = hold_close_fracs()
         self.assertEqual(len(fracs), 10)
         self.assertAlmostEqual(jaw_hold_q(0.0, 0.2, -0.4), 0.2)
@@ -108,6 +108,21 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 1.0, 'slip_m': 0.96, 'max_load_N': 0.0, 'retained': False},
         ], slip_ok_m=0.04, load_limit_n=15.0)
         self.assertAlmostEqual(empty['close_frac'], 0.6)
+        live_like = select_hold_close([
+            {'close_frac': 0.25, 'slip_m': 0.033, 'max_load_N': 10.9, 'retained': True},
+            {'close_frac': 0.30, 'slip_m': 0.030, 'max_load_N': 13.3, 'retained': True},
+            {'close_frac': 0.55, 'slip_m': 0.024, 'max_load_N': 0.0, 'retained': True},
+            {'close_frac': 0.65, 'slip_m': 0.022, 'max_load_N': 12.6, 'retained': True},
+        ], slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(live_like['close_frac'], 0.65)
+        from treesim.kiwi_rl.reach_teacher import adapt_scripted_hold_q
+        held = adapt_scripted_hold_q(-1.10, -1.57, 0.0, slip_m=0.01, over_basket=False)
+        self.assertAlmostEqual(held, -1.10)
+        tighter = adapt_scripted_hold_q(-1.10, -1.57, 0.0, slip_m=0.08, over_basket=False)
+        self.assertGreater(tighter, -1.10)
+        self.assertLessEqual(tighter, -1.57 + 0.70 * 1.57 + 1e-9)
+        opened = adapt_scripted_hold_q(-1.10, -1.57, 0.0, slip_m=0.08, over_basket=True)
+        self.assertAlmostEqual(opened, -1.10)
         with self.assertRaises(ValueError):
             select_hold_close([])
 
