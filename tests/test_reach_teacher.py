@@ -226,11 +226,36 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertFalse(over_opening_xy(front, tcp, basket, yaw, inset_m=0.04))
         self.assertTrue(over_opening_xy([0.05, 0.20, 0.70], [0.05, 0.20, 0.70],
                                        basket, yaw, inset_m=0.04))
+        hover = [0.0, 0.0, 0.145 + 0.28 + 0.28]
+        dip = [0.0, 0.0, 0.145 + 0.28 + 0.10]
+        self.assertTrue(over_opening_xy(hover, hover, basket, inset_m=0.04))
+        self.assertFalse(over_opening_xy(
+            hover, hover, basket, inset_m=0.04, max_above_rim_m=0.16))
+        self.assertTrue(over_opening_xy(
+            dip, dip, basket, inset_m=0.04, max_above_rim_m=0.16))
+        self.assertFalse(fruit_in_release_zone(
+            hover, basket, open_xy_m=0.15, rim_z_m=0.28, tcp_xyz=hover,
+            release_over_opening=True, inset_m=0.04, max_above_rim_m=0.16))
+        self.assertTrue(fruit_in_release_zone(
+            dip, basket, open_xy_m=0.15, rim_z_m=0.28, tcp_xyz=dip,
+            release_over_opening=True, inset_m=0.04, max_above_rim_m=0.16))
+        self.assertAlmostEqual(
+            scripted_jaw_target(hover, basket, -1.2, 0.0, open_xy_m=0.15, rim_z_m=0.28,
+                                tcp_xy=hover, release_over_opening=True, inset_m=0.04,
+                                max_above_rim_m=0.16),
+            -1.2)
+        self.assertAlmostEqual(
+            scripted_jaw_target(dip, basket, -1.2, 0.0, open_xy_m=0.15, rim_z_m=0.28,
+                                tcp_xy=dip, release_over_opening=True, inset_m=0.04,
+                                max_above_rim_m=0.16),
+            0.0)
         with self.assertRaises(ValueError):
             opening_half_xy_m(inset_m=0.20)
         with self.assertRaises(ValueError):
             fruit_in_release_zone(front, basket, open_xy_m=0.15, rim_z_m=0.28,
                                  release_over_opening=True)
+        with self.assertRaises(ValueError):
+            over_opening_xy(dip, dip, basket, inset_m=0.04, max_above_rim_m=0.5)
 
     def test_grasp_offset_stays_between_pads_not_at_tcp(self):
         tcp = np.array([0.0, 0.0, 0.10])

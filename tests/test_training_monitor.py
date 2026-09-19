@@ -184,6 +184,7 @@ class TrainingMonitorTests(unittest.TestCase):
         rec_src = inspect.getsource(_rec)
         self.assertIn('release_at_center', rec_src)
         self.assertIn('release_over_opening', rec_src)
+        self.assertIn('max_above_rim_m', rec_src)
         self.assertIn('tcp_xy', rec_src)
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))

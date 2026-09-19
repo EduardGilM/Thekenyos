@@ -72,9 +72,11 @@ EASY_PRESET = {
     # Carry from the original outside-crate start. Reward fruit 3D and hand
     # XY toward the *open hover* (rim + 28 cm), not the liner floor: a
     # low swing over the hole puts the wrist through the crate. Force the
-    # jaw open once both XY sit over the opening AABB (wall inset), not
-    # only a 15 cm centre disk: a front-rim carry stays outside that
-    # disk. Over-opening starts stay available behind this flag.
+    # jaw open once both XY sit over the opening AABB (wall inset) *and*
+    # the fruit is at most 16 cm above the rim. A hover-high dump bounces
+    # out (easy27 u150). Far starts stay capped: annealing to 1.0 by
+    # update 200 erased the eval@100 deposits (4 → 0). Over-opening
+    # starts stay available behind this flag.
     # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
     # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
@@ -84,6 +86,7 @@ EASY_PRESET = {
     'release_at_center': True,
     'release_over_opening': True,
     'release_opening_inset_m': 0.04,
+    'release_max_above_rim_m': 0.16,
     'start_open_radius_m': 0.06,
     'start_inset_x_m': 0.0,
     'start_margin_m': 0.32,
@@ -105,7 +108,8 @@ EASY_PRESET = {
     'n_hold_levels': 10,
     'hold_close_min': 0.25,
     'hold_close_max': 0.70,
-    'far_horizon_updates': 200,
+    'far_horizon_updates': 2000,
+    'far_frac_cap': 0.25,
     'default_shaping_coef': 2.0,
     'default_shaping_length_m': 0.25,
 }
@@ -361,15 +365,20 @@ def apply_easy_preset(values: dict) -> dict:
     return out
 
 
-def easy_start_far_frac(update_index, horizon=None):
+def easy_start_far_frac(update_index, horizon=None, cap=None):
     """How far from the crate the easy start may sample. 0=nearest outside."""
     if horizon is None:
         horizon = EASY_PRESET['far_horizon_updates']
+    if cap is None:
+        cap = EASY_PRESET.get('far_frac_cap', 1.0)
     if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 0:
         raise ValueError('update_index must be a non-negative integer')
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
         raise ValueError('horizon must be a positive integer')
-    return float(min(1.0, update_index / float(horizon)))
+    limit = float(cap)
+    if not np.isfinite(limit) or not 0.0 <= limit <= 1.0:
+        raise ValueError('far_frac_cap must be finite in [0, 1]')
+    return float(min(limit, min(1.0, update_index / float(horizon))))
 
 
 def easy_teacher_mix(update_index, start_mix=None, horizon=None, anneal_after=0):

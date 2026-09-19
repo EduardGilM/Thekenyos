@@ -373,14 +373,14 @@ def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dt
 def _in_release_zone(fruit: wp.vec3, tcp: wp.vec3, basket: wp.vec3,
                      rot: wp.mat33, open_half_xy: wp.vec2,
                      open_xy_m: float, rim_z_m: float, release_at_center: int,
-                     release_over_opening: int) -> int:
+                     release_over_opening: int, open_max_above_rim_m: float) -> int:
     """1 if the scripted jaw should open. Not a weld."""
     if release_over_opening != 0:
         f_local = wp.transpose(rot) @ (fruit - basket)
         t_local = wp.transpose(rot) @ (tcp - basket)
         fruit_ok = wp.abs(f_local[0]) < open_half_xy[0] and wp.abs(f_local[1]) < open_half_xy[1]
         tcp_ok = wp.abs(t_local[0]) < open_half_xy[0] and wp.abs(t_local[1]) < open_half_xy[1]
-        if fruit_ok and tcp_ok:
+        if fruit_ok and tcp_ok and f_local[2] < rim_z_m + open_max_above_rim_m:
             return 1
         return 0
     fdx = fruit[0] - basket[0]
@@ -407,7 +407,7 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
                        jaw_open: float, open_xy_m: float, rim_z_m: float, max_delta: float,
                        release_at_center: wp.array(dtype=int),
                        release_over_opening: wp.array(dtype=int),
-                       open_half_xy: wp.vec2,
+                       open_half_xy: wp.vec2, open_max_above_rim_m: float,
                        actions: wp.array2d(dtype=float)):
     """Overwrite only the jaw increment. The student still moves the arm."""
     world = wp.tid()
@@ -420,7 +420,7 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
                             xmat[world, chassis], open_half_xy,
                             open_xy_m, rim_z_m, release_at_center[0],
-                            release_over_opening[0])
+                            release_over_opening[0], open_max_above_rim_m)
     desired = jaw_open if over == 1 else jaw_hold[world]
     current = targets[world, 18]
     delta = wp.clamp(desired - current, -max_delta, max_delta)
@@ -436,7 +436,7 @@ def _adapt_scripted_jaw(site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                         open_xy_m: float, rim_z_m: float, slip_tighten_m: float,
                         max_close_frac: float, release_at_center: wp.array(dtype=int),
                         release_over_opening: wp.array(dtype=int),
-                        open_half_xy: wp.vec2):
+                        open_half_xy: wp.vec2, open_max_above_rim_m: float):
     """Tighten the hold if the free fruit is leaving the mouth. Not a weld."""
     world = wp.tid()
     idx = active_fruit[world]
@@ -448,7 +448,7 @@ def _adapt_scripted_jaw(site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
     if _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
                         xmat[world, chassis], open_half_xy,
                         open_xy_m, rim_z_m, release_at_center[0],
-                        release_over_opening[0]) == 1:
+                        release_over_opening[0], open_max_above_rim_m) == 1:
         return
     slip = wp.length(fruit_pos - site_xpos[world, tcp_site])
     if slip <= slip_tighten_m:
@@ -471,7 +471,7 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
                       rim_z_m: float, site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                       release_at_center: wp.array(dtype=int),
                       release_over_opening: wp.array(dtype=int),
-                      open_half_xy: wp.vec2):
+                      open_half_xy: wp.vec2, open_max_above_rim_m: float):
     """Kinematic jaw hold/open. The 0.3 N·m PD alone lets the kiwi slip out."""
     if enabled[0] == 0:
         return
@@ -485,7 +485,7 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
                             xmat[world, chassis], open_half_xy,
                             open_xy_m, rim_z_m, release_at_center[0],
-                            release_over_opening[0])
+                            release_over_opening[0], open_max_above_rim_m)
     desired = jaw_open if over == 1 else jaw_hold[world]
     qpos[world, jaw_qposadr] = desired
     qvel[world, jaw_dofadr] = 0.0
@@ -503,7 +503,7 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
                                site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                                release_at_center: wp.array(dtype=int),
                                release_over_opening: wp.array(dtype=int),
-                               open_half_xy: wp.vec2,
+                               open_half_xy: wp.vec2, open_max_above_rim_m: float,
                                out_applied: wp.array2d(dtype=float)):
     world, joint = wp.tid()
     active = 1 if (goal[world] == 0 or detached[world] != 0) else 0
@@ -519,7 +519,7 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
                             xmat[world, chassis], open_half_xy,
                             open_xy_m, rim_z_m, release_at_center[0],
-                            release_over_opening[0])
+                            release_over_opening[0], open_max_above_rim_m)
     if joint < 6:
         if over == 1:
             out_applied[world, joint] = 0.0
@@ -653,6 +653,13 @@ class FastRuntime:
             self._open_rim_z_m = float(SIZE[2])
             hx, hy = opening_half_xy_m(inset_m=float(EASY_PRESET['release_opening_inset_m']))
             self._open_half_xy = wp.vec2(float(hx), float(hy))
+            # Captured into the CUDA graph: changing this later does not
+            # retarget `_pin_scripted_jaw`. 16 cm above the rim is below
+            # the 28 cm hover so a hover-high dump is not forced.
+            self._open_max_above_rim_m = float(EASY_PRESET['release_max_above_rim_m'])
+            if (not np.isfinite(self._open_max_above_rim_m)
+                    or not 0.0 <= self._open_max_above_rim_m <= 0.4):
+                raise ValueError('release_max_above_rim_m must be finite in [0, 0.4] m')
             # Floor-to-hover: SIZE.z + 28 cm. A 10 cm-over-hole TCP puts the
             # ~0.20 m wrist through the liner; this is the known-safe IK height.
             self._hover_offset = wp.vec3(
@@ -716,7 +723,8 @@ class FastRuntime:
                         float(self._jaw_open), float(self._open_xy_m),
                         float(self._open_rim_z_m), self.data.site_xpos, int(self.tcp_site),
                         self._release_at_center, self._release_over_opening,
-                        self._open_half_xy], device=self.device)
+                        self._open_half_xy, float(self._open_max_above_rim_m)],
+                        device=self.device)
                     self.control.apply()
                     mw.step(self.gpu_model, self.data)
                     self._refresh(mw)
@@ -781,7 +789,8 @@ class FastRuntime:
                     self._basket_center, self._easy_jaw_hold, float(self._jaw_open),
                     float(self._jaw_closed), float(self._open_xy_m),
                     float(self._open_rim_z_m), 0.04, 0.70, self._release_at_center,
-                    self._release_over_opening, self._open_half_xy],
+                    self._release_over_opening, self._open_half_xy,
+                    float(self._open_max_above_rim_m)],
                     device=self.device)
                 wp.launch(_scripted_jaw_hold, dim=self.worlds, inputs=[
                     self.data.xpos, self.data.xmat, self.data.site_xpos, int(self.tcp_site),
@@ -790,7 +799,8 @@ class FastRuntime:
                     self._easy_jaw_hold, float(self._jaw_open), float(self._open_xy_m),
                     float(self._open_rim_z_m), float(2.5 * self.control_dt),
                     self._release_at_center, self._release_over_opening,
-                    self._open_half_xy, self._actions], device=self.device)
+                    self._open_half_xy, float(self._open_max_above_rim_m),
+                    self._actions], device=self.device)
             wp.capture_launch(self.graph)
         return self.observe(), wp.to_torch(self._reward), wp.to_torch(self._terminated).bool(), {
             'distance_m': wp.to_torch(self._distance),
@@ -981,12 +991,13 @@ class FastRuntime:
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
         Does not weld fruit, spawn the arm inside the liner, or write fruit
-        into the liner.         Starts stay outside the crate. Shaping pulls fruit 3D and hand
-        XY toward the open hover (rim + 28 cm), not the liner floor, so
-        the wrist is not paid to ram the crate. The script opens when
-        both XY sit over the opening AABB. Eval still sets guidance_weight=0
-        and must keep teacher_mix at 0. Jaw close fractions are a rigid
-        contact sweep, not a calibrated tissue-safe force.
+        into the liner. Starts stay outside the crate. Shaping pulls fruit 3D
+        and hand XY toward the open hover (rim + 28 cm), not the liner floor,
+        so the wrist is not paid to ram the crate. The script opens when both
+        XY sit over the opening AABB and the fruit is at most 16 cm above the
+        rim. Far starts stay capped so nearby deposits are not erased. Eval
+        still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
+        fractions are a rigid contact sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
@@ -1078,6 +1089,9 @@ class FastRuntime:
             'release_at_center': release_center,
             'release_over_opening': release_opening,
             'release_opening_inset_m': float(EASY_PRESET['release_opening_inset_m']),
+            'release_max_above_rim_m': float(self._open_max_above_rim_m),
+            'far_horizon_updates': int(EASY_PRESET['far_horizon_updates']),
+            'far_frac_cap': float(EASY_PRESET['far_frac_cap']),
             'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
             'shape_to_hover': shape_both,
             'weld': False,
@@ -1145,7 +1159,7 @@ class FastRuntime:
                 float(self._open_rim_z_m), float(max_delta),
                 self.data.site_xpos, int(self.tcp_site), self._release_at_center,
                 self._release_over_opening, self._open_half_xy,
-                self._teacher_applied],
+                float(self._open_max_above_rim_m), self._teacher_applied],
                 device=self.device)
         applied = wp.to_torch(self._teacher_applied)
         if tuple(applied.shape) != (self.worlds, 7):

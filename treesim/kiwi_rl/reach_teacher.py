@@ -110,11 +110,13 @@ def opening_half_xy_m(*, inset_m=0.04):
     return hx, hy
 
 
-def over_opening_xy(fruit_xyz, tcp_xyz, basket_xyz, rotation=None, *, inset_m=0.04):
-    """True when fruit and TCP XY sit over the open top, any height.
+def over_opening_xy(fruit_xyz, tcp_xyz, basket_xyz, rotation=None, *, inset_m=0.04,
+                    max_above_rim_m=None):
+    """True when fruit and TCP XY sit over the open top.
 
-    ``rotation`` is chassis-to-world. Identity means the basket axes already
-    match world XY. Fruit stays a free body; this is not a weld.
+    ``max_above_rim_m`` caps fruit height above the rim so a hover-high
+    dump is not forced. ``rotation`` is chassis-to-world. Fruit stays a
+    free body; this is not a weld.
     """
     fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(-1)
     tcp = np.asarray(tcp_xyz, dtype=np.float64).reshape(-1)
@@ -140,7 +142,15 @@ def over_opening_xy(fruit_xyz, tcp_xyz, basket_xyz, rotation=None, *, inset_m=0.
     tcp_local = rot.T @ (tcp3 - basket3)
     fruit_ok = abs(float(fruit_local[0])) < hx and abs(float(fruit_local[1])) < hy
     tcp_ok = abs(float(tcp_local[0])) < hx and abs(float(tcp_local[1])) < hy
-    return bool(fruit_ok and tcp_ok)
+    if not (fruit_ok and tcp_ok):
+        return False
+    if max_above_rim_m is None:
+        return True
+    from treesim.basket import SIZE
+    max_above = float(max_above_rim_m)
+    if not np.isfinite(max_above) or not 0.0 <= max_above <= 0.4:
+        raise ValueError('max_above_rim_m must be finite in [0, 0.4] m')
+    return float(fruit_local[2]) < float(SIZE[2]) + max_above
 
 
 def tcp_outside_basket(local, *, margin_m=0.08, above_rim_m=0.0):
@@ -619,19 +629,21 @@ def at_basket_center(fruit_xyz, tcp_xyz, basket_xyz, *, open_xy_m):
 
 def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m,
                          tcp_xyz=None, release_at_center=False,
-                         rotation=None, release_over_opening=False, inset_m=0.04):
+                         rotation=None, release_over_opening=False, inset_m=0.04,
+                         max_above_rim_m=None):
     """True when the scripted jaw should open.
 
     Default: fruit COM over the opening and below the rim. With
     ``release_over_opening``, fruit and TCP XY over the open top AABB
-    (wall inset), any height. ``release_at_center`` keeps the centre
-    disk. Not a weld.
+    (wall inset), optionally below ``max_above_rim_m``. ``release_at_center``
+    keeps the centre disk. Not a weld.
     """
     if release_over_opening:
         if tcp_xyz is None:
             raise ValueError('release_over_opening requires tcp_xyz')
         return over_opening_xy(fruit_xyz, tcp_xyz, basket_floor_xyz,
-                               rotation, inset_m=inset_m)
+                               rotation, inset_m=inset_m,
+                               max_above_rim_m=max_above_rim_m)
     if release_at_center:
         if tcp_xyz is None:
             raise ValueError('release_at_center requires tcp_xyz')
@@ -654,12 +666,13 @@ def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m,
 
 def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m=None,
                        tcp_xy=None, release_at_center=False,
-                       rotation=None, release_over_opening=False, inset_m=0.04):
+                       rotation=None, release_over_opening=False, inset_m=0.04,
+                       max_above_rim_m=None):
     """Hold while away from the opening; open once the release gate is met.
 
     Fruit stays a free body. ``open_xy_m`` is an XY radius around the basket
     centre. Default rim-gated open still needs Z. ``release_over_opening``
-    uses the open-top AABB. ``release_at_center`` keeps the centre disk.
+    uses the open-top AABB, optionally below ``max_above_rim_m``.
     """
     fruit = np.asarray(fruit_xy, dtype=np.float64).reshape(-1)
     basket = np.asarray(basket_xy, dtype=np.float64).reshape(-1)
@@ -675,7 +688,8 @@ def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m
     if release_over_opening:
         if tcp_xy is None:
             raise ValueError('release_over_opening requires tcp_xy')
-        over = over_opening_xy(fruit, tcp_xy, basket, rotation, inset_m=inset_m)
+        over = over_opening_xy(fruit, tcp_xy, basket, rotation, inset_m=inset_m,
+                              max_above_rim_m=max_above_rim_m)
     elif release_at_center:
         if tcp_xy is None:
             raise ValueError('release_at_center requires tcp_xy')
