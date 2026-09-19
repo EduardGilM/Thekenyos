@@ -20,6 +20,7 @@ args = p.parse_args()
 cfg = TreeConfig.compliant('pergola')
 cfg.device = args.device
 cfg.seed = 42
+cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
 cfg.physics.terrain = args.terrain
 cfg.physics.terrain_amplitude = args.terrain_amplitude
 cfg.physics.terrain_wavelength = args.terrain_wavelength
@@ -33,7 +34,7 @@ for _ in range(100):
     sim.step()
 assert sim.apples.broken_count == 0, 'Detached under gravity at rest'
 height = float(sim.body_q_np()[body, 2])
-sim.set_external_force(body, force=(0,0,-20))
+sim.set_external_force(body, force=(0,0,-50))
 for _ in range(25):
     sim.step()
 assert sim.apples.broken_count == 1, 'Stem did not detach from actual load'

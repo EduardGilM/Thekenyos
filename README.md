@@ -14,7 +14,8 @@ coordination, maturity perception and automatic unloading come later.
 
 | Component | Current implementation |
 |---|---|
-| Pergola | Seeded 3 × 4 m bay, posts, wires, compliant canes and hanging fruit |
+| Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, tied canes, compliant tips and hanging fruit |
+| Terrain | Optional procedural noise heightfield by default; explicit `--terrain-kind orchard` retains grassed aisles, furrows, slope and terrain-aligned posts/Spot |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -22,13 +23,15 @@ coordination, maturity perception and automatic unloading come later.
 | Stems | Axial/bending stiffness derived from measured stalk dimensions; irreversible load-triggered detachment |
 | Damage | Persistent contact/strain **proxy**, with negative increments available as reward terms |
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
-| RL training | **Not implemented here yet.** Walking uses an existing policy; penalties do not retrain it |
+| Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
+| RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
+| RL training | Earlier diagnostic pilot used faulty CPU hand collision filtering; checkpoint retained for regression only. Training paused for physics validation |
 
 **The GPU orchard fruit is still rigid collision geometry.** The native flex
 bench deforms, but is not yet integrated into the GPU orchard or Spot's jaws.
 Neither model is a validated predictor of bruising. Layered skin/core,
 viscoelastic/plastic constitutive laws, calibrated wet friction and
-angle/torque-dependent abscission remain open work. Research ranges are not
+calibrated angle/torque-dependent abscission remain open work. Research ranges are not
 interchangeable across cultivars and test conditions.
 
 ## Install
@@ -74,9 +77,48 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
+Select the retained grassed orchard-floor generator explicitly:
+
+```bash
+python scripts/grow_tree.py --preset pergola --foliage --terrain --terrain-kind orchard --seed 42 \
+  --collisions --substeps 40 --viewer gl
+```
+
 The scene is built programmatically in Python; it is not a hand-authored pergola
-XML. Change geometry in `treesim/pergola.py`. The native compression bench
-writes its own generated MuJoCo XML to its output directory.
+XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
+4.3 hectares. Use `--pergola-rows`, `--pergola-columns`, and
+`--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
+enabled by default for this preset, while `--foliage-density 0` disables it.
+Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
+the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` for
+the procedural noise floor, or `--terrain --terrain-kind orchard` for the
+retained orchard floor (grassed aisles, planting strips, slope and noise). The native compression bench writes its own generated
+MuJoCo XML to its output directory.
+
+On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
+render-only foliage). This is a scripted flyover, not Spot gait. The flag
+refuses a CPU fallback:
+
+```bash
+python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
+  --video output/orchard-mujoco.mp4
+```
+
+Newton GL with foliage is a separate viewer. A 4 GB card should crop the
+grid; a larger NVIDIA GPU can keep the commercial default:
+
+```bash
+python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
+  --preset pergola --terrain --terrain-kind orchard --foliage --seed 42 --frames 600 \
+  --pergola-rows 5 --pergola-columns 4
+```
+
+The trellis has fixed transverse support wires. Main cane sections are tied
+rigidly to this frame; only the final 0.35 m tips bend. This is an ideal-support
+assumption, not calibrated wire tension or tie compliance. It replaces the
+unsupported 2.3 m cantilevers that sagged into the robot's workspace. Fruit
+stems are drawn between the actual force attachment sites and disappear on
+rupture; fruit remains an independent physical body.
 
 ### Uneven kiwi terrain for future RL episodes
 
@@ -88,9 +130,19 @@ embedded below the surface, rather than reshaping the ground around them; the
 canopy stays at its world-space height. Kiwi terrain gets a **fresh random seed
 each launch**, even with a fixed canopy `--seed`. Flat ground remains the default,
 and the apple terrain retains its flat trunk area and original seed behaviour.
+The noise generator takes priority for `--terrain`; select `--terrain-kind
+orchard` (Python: `cfg.physics.terrain_kind = "orchard"`) only for the retained
+slope/furrow generator. Noise amplitude/wavelength/extent controls do not tune
+that alternative; it uses the `orchard_*` parameters. Both modes support an
+explicit `terrain_seed`; orchard mode otherwise inherits the scene seed.
+
+The CPU examples crop the newer plantation geometry to **3 × 3 posts**, retaining
+supported canes and compliant tips. This fits a 12 m terrain patch and supports
+40 fruit without instantiating the default commercial field.
 
 ```bash
 python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
   --terrain --terrain-amplitude .24 \
   --terrain-wavelength 1.8 --terrain-extent 6 \
   --device cpu --substeps 40 --viewer gl --headless --frames 360 \
@@ -114,15 +166,18 @@ Terrain controls (engineering assumptions, **not measured orchard soil**):
   Three noise scales share a finite-resolution grid, so very small wavelengths
   cannot create arbitrarily fine geometry.
 - `--terrain-extent`: ground half-extent in metres; 6 gives a 12 × 12 m patch.
-  It must cover the kiwi posts plus a 0.5 m margin. Outside it, ground is flat;
-  constrain training episodes to the patch (the edge may have a step).
+  If omitted (`terrain_extent=None` in Python), it fits the plantation with a
+  0.5 m post margin and a minimum half-extent of 14 m. An explicit value must
+  cover the posts plus that margin. Outside the patch, ground is flat; constrain
+  training episodes to the patch (the edge may have a step).
 - `--terrain-seed`: specify a nonnegative integer (for example,
   `--terrain-seed 7`) to reproduce exactly the same ground. **Omit it for new
   random kiwi ground on every launch**, independently of the canopy and fruit.
   The chosen seed is printed at startup and saved in metrics. Rebuild at episode
   reset with a new seed or amplitude for curriculum/domain randomization.
-  Batched worlds currently share one terrain; independent per-world terrain
-  and RL training are not implemented.
+  Batched worlds share one terrain; independent per-world terrain generation
+  and terrain-aware RL integration are not implemented here. The existing
+  fixed-base harvesting interface is documented separately below.
 
 Programmatic use: set `cfg.physics.terrain = True`, `terrain_seed`,
 `terrain_amplitude`, `terrain_wavelength`, and `terrain_extent` before calling
@@ -146,7 +201,10 @@ python -m unittest discover -s tests -v
 python scripts/check_kiwi_physics.py --device cpu --terrain
 ```
 
-The terrain demo, drop regression and unit tests still use MuJoCo-Warp on CPU.
+CPU scene stepping retains main's native MuJoCo contact adapter and collision
+coverage fixes. GPU scene stepping uses MuJoCo-Warp. The isolated fast-impact
+unit test additionally exercises MuJoCo-Warp on CPU. These are different
+backends; passing the CPU checks does not establish GPU equivalence.
 
 The terrain check verifies attachment at rest, physical pull detachment, falling,
 settling on the elevated ground and measured contact force. The suite also
@@ -156,8 +214,10 @@ These checks do not establish rough-terrain Spot locomotion or harvesting succes
 #### Three reproducible terrain examples
 
 Use terrain seeds **101**, **202**, and **303** to compare three different
-surfaces. All three use canopy/fruit seed **42**, the same camera path, a
-12 × 12 m patch, 0.24 m height range, 1.8 m dominant wavelength, and 40 kiwis.
+surfaces. All three use canopy/fruit seed **42**, a 3 × 3 post layout, the same
+camera path, a 12 × 12 m patch, 0.24 m height range, 1.8 m dominant wavelength,
+and 40 kiwis. These commands use the integrated supported-cane geometry;
+pre-integration render files must be regenerated to match it.
 Only the terrain seed changes. Each video covers 3 simulated seconds
 (180 physics frames, encoded as 90 frames at 30 fps); the PNG is the final view.
 
@@ -167,6 +227,7 @@ Run from the repository root with the pinned environment installed:
 for terrain_seed in 101 202 303; do
   .venv/bin/python scripts/grow_tree.py \
     --preset pergola --foliage --seed 42 \
+    --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
     --terrain --terrain-seed "$terrain_seed" \
     --terrain-amplitude .24 --terrain-wavelength 1.8 --terrain-extent 6 \
     --device cpu --substeps 40 --viewer gl --headless --frames 180 \
@@ -195,6 +256,7 @@ For interactive viewing of one example:
 
 ```bash
 .venv/bin/python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
   --terrain --terrain-seed 202 --terrain-amplitude .24 \
   --terrain-wavelength 1.8 --terrain-extent 6 \
   --device cpu --substeps 40 --viewer gl
@@ -251,7 +313,9 @@ for episode in range(3):
     cfg = TreeConfig.compliant("pergola")
     cfg.device = "cpu"
     cfg.seed = 42
+    cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
     cfg.physics.terrain = True
+    cfg.physics.terrain_kind = "noise"
     cfg.physics.terrain_seed = int(terrain_rng.integers(0, 2**31))
     cfg.physics.terrain_amplitude = 0.05
     cfg.physics.terrain_wavelength = 1.8
@@ -287,6 +351,8 @@ Agent integration rules:
 - **Batching:** worlds currently share one periodic heightfield; changing
   `num_envs` changes the display tiling and may change the generated field.
   Use separate single-environment builds for different terrain seeds today.
+  The retained native CPU contact adapter supports one world only; do not use
+  `--num-envs` greater than 1 for CPU kiwi physics.
 - **Curriculum:** start around 0.03–0.05 m amplitude, then increase deliberately.
   The 0.24 m renders exaggerate relief for inspection; they are not validated
   traversability targets. Keep evaluation seeds fixed and separate from training
@@ -307,9 +373,18 @@ python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --metrics output/spot-basket.json
 ```
 
-Omit `--payload` to sample 0–6 kg using `--payload-seed`. The arm holds its ready
-pose; random arm poses and payload-aware locomotion retraining are not complete.
-For a numerical run, replace the video options with `--no-render`.
+Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add
+`--terrain --terrain-kind orchard` to walk the same scripted oval on the
+retained orchard floor; sampled slope, rut, noise and
+friction are written into the metrics JSON. The pretrained gait was not trained
+on this surface. The arm holds its ready pose; random arm poses and payload-aware
+locomotion retraining are not complete. For a numerical run, replace the video
+options with `--no-render`.
+
+```bash
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain --terrain-kind orchard \
+  --frames 600 --video output/spot-orchard.mp4 --metrics output/spot-orchard.json
+```
 
 `--spill-test` applies a deliberate 400 N·m roll torque (`--spill-torque` overrides it) from 2.0 to 2.4 seconds. This is
 an adverse-motion test, not a learned behaviour. Each lost fruit receives one
@@ -333,6 +408,51 @@ forces before changing it. The pads are ideal parallel surfaces, not Spot's
 actual gripper. Zero gravity isolates compression; geometry recovery does not
 clear the persistent damage proxy.
 
+### Actual Spot gripper bench
+
+```bash
+MUJOCO_GL=egl python scripts/check_spot_gripper.py --relic ../relic \
+  --torque .3 --check --output output/spot-gripper \
+  --video output/spot-gripper.mp4
+MUJOCO_GL=egl python scripts/check_spot_gripper.py --relic ../relic \
+  --torque .3 --timestep .000005 --check --output output/spot-gripper-halfstep
+```
+
+This separate native MuJoCo bench uses the external Spot wrist/finger meshes,
+URDF hinge limits and finger inertia. It holds the wrist sideways in a test
+fixture. One **free, detached** kiwi is initially weight-compensated, squeezed
+with a torque-limited jaw, loaded by gravity at 1.5 s, then released at 2.8 s.
+There is no fruit weld, grasp assistance, arm trajectory or stem in this test.
+The floor catches the released fruit; this deliberate drop is not a harvesting
+success. Videos are scripted and shown at 2x slow motion.
+
+`--rigid --timestep .0005` isolates collision geometry. The default fruit is a
+native tetrahedral elastic body with the same homogeneous Xuxiang flesh proxy
+as the compression bench. `--torque 1` is a stronger-grip comparison. The motor
+torque limit is in **N·m**, distinct from measured per-jaw contact load in **N**;
+neither is a calibrated safe grasp setting. The assumed friction coefficient
+is 0.44; actual Spot pad friction needs measurement.
+
+Outputs include the generated scene, sub-sampled force/position measurements
+and metrics. Forces and numerical warnings are checked each physics step;
+shape compression removes rigid rotation and is sampled every millisecond.
+The 9–12 mm tetrahedral grid is coarse relative to the teeth. Mesh refinement
+and pad calibration are still required; the rigid and flex surfaces also differ
+in discretization. The strain damage proxy cannot predict local tooth injury
+or delayed bruising.
+Grip damage is reported separately from the later floor impact. `--check`
+uses a 20 mm displacement tolerance during 1.7–2.7 s, no early ground contact,
+bilateral contact during the run and contact-free release
+to the floor. Test results apply to this one initial pose and fruit geometry.
+
+### Fixed-base harvesting environment
+
+See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
+The chassis is fixed; the agent controls six arm joints and the jaw. Physics
+and failure checks run at every substep. This uses rigid orchard fruit and is
+a control/reward integration milestone, not validated material transfer from
+the deformable bench.
+
 ## Physics and evidence
 
 Read [the evidence table](docs/kiwi-material-evidence.md) before changing a
@@ -347,9 +467,10 @@ known source inconsistencies and missing measurements.
   the actual basket liner and other fruit remain uncalibrated.
 - **Stems:** beam stiffness derives from `EA/L` and `3EI/L³`. The attachment is
   at the fruit surface, so forces act with a moment arm and react on the cane.
-  An implicit spring approximation supports small timesteps. Pooled detachment
-  forces are sampled; the threshold is conditioned to support static weight.
-  This is not a measured angle-conditioned fracture law.
+  An implicit spring approximation supports small timesteps. A Fang2023 Hayward
+  mean-force proxy sets the tensile break threshold by fruit–stem angle. Some
+  points are approximate figure readings; interpolation and fracture dynamics
+  remain uncalibrated. It does not prescribe a robot picking trajectory.
 - **GPU damage:** native MuJoCo contact forces feed a Hertz equivalent-patch
   estimate of pressure and indentation. A persistent score uses a 5% strain
   reference and 0.26 MPa flesh stress reference, with an **assumed** one-second
@@ -362,6 +483,13 @@ known source inconsistencies and missing measurements.
   collision path allowed a fruit to escape a stationary basket. Planar Spot
   lower-leg collision hulls receive 1 mm thickness for native compatibility;
   the original body inertia is retained.
+- **Orchard floor:** `--terrain --terrain-kind orchard` samples an assumed domain-
+  randomization heightfield (2 m vine rows, grassed pasillos, ~0.64 m bare
+  surcos, slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and 20–60 cm wide,
+  friction 0.6–1.3). It is an assumed compact layout, not a measured
+  orchard-floor survey.
+  Apple `--terrain` remains the older value-noise field. Wet soil friction is
+  still an explicit calibration gap.
 
 ## Validate a change
 
@@ -370,6 +498,9 @@ python -m unittest discover -s tests -v
 python scripts/check_loose_fruit.py
 python scripts/check_loose_fruit.py --timestep .0005
 python scripts/check_kiwi_physics.py
+python scripts/check_detachment_angles.py
+python scripts/check_detachment_angles.py --timestep .0005
+python scripts/check_harvest_observer.py --relic ../relic
 python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --frames 300 --no-render --metrics output/walk-check.json
 ```
@@ -388,11 +519,13 @@ real-fruit calibration or evidence that a harvesting policy has been trained.
 
 | Check | Result |
 |---|---|
-| Unit/integration suite | 8 tests passed in the Linux environment |
+| Unit/integration suite | 15 tests passed in the Linux environment |
 | Stationary basket, 60 fruit | Zero spills over 5 s at both 1 ms and 0.5 ms physics steps |
 | Loaded walking | 12 s, 2.83 m travelled, 7.6° maximum tilt, zero spills, zero canopy detachments |
 | Deliberate 400 N·m roll disturbance | 36 fruit spilled; total spill penalty −36 |
-| Stem/drop regression | Attached at rest; detached under a 20 N pull; landed without tunnelling |
+| Angle fixture, 60° / 120° / 180° | 5.99 / 21.39 / 36.59 N at 1 ms; under 0.07 N change at 0.5 ms |
+| Spot observer | Read-only measurement; actual ground contact and forced-drop failure detected |
+| Stem/drop regression | Attached at rest; detached under a 50 N pull (updated angle model); landed without tunnelling |
 | Original apple / pergola smoke runs | 60 / 120 frames completed |
 | Native 3% timestep refinement | 10 µs vs 5 µs: force difference 0.069%; strain difference 0.00046 percentage points |
 | Native 10% commanded squeeze | 8.72% measured compression, 71.38 N per pad, no solver warnings; damage proxy saturated |
@@ -401,11 +534,80 @@ The 10% command differs from tissue strain because the pads also have compliant
 contact. The native 3% case records zero strain-based damage proxy; that is not
 a guarantee of unbruised real fruit. Outputs are generated under `output/`.
 
+### Fixed-base environment validation, 19 September 2026
+
+The Gymnasium API, reset identity, bounded seeded step repeatability, fixed
+chassis, action validation, joint targets, transient overload, finite-horizon
+timeout, physical forced loss, ground-drop fixture and basket-settling fixture
+pass at both 1 and 0.5 ms. The transient test injects one observation spike to
+check sampling; the loss and settling fixtures use actual contacts. Native
+solver robot poses match forward kinematics in the check. The existing free-base
+locomotion path still moves Spot (0.104 m in a 1.5 s smoke run). All 15 existing
+tests pass. No end-to-end successful pick or trained harvesting policy is claimed.
+
+The canopy regression now checks every joint connection, fixed supports and
+free-tip sag throughout the scripted arm test, and compares forward kinematics
+for all bodies. Seeded reset remains exact. GPU step repeatability is bounded
+separately: 10 µm position, 1e-4 quaternion components, 1 mm/s linear velocity
+and 1 mrad/s joint velocity; measured drift is saved in the JSON output. These
+are numerical regression tolerances, not physical calibration accuracy.
+The supported-canopy check passed at 1 and 0.5 ms: maximum tip sag 2.24 mm,
+maximum attachment gap 2.21 µm, no unintended fruit detachment. The merged
+terrain/physics suite has 22 passing tests and one expected CPU-host check
+skipped on the NVIDIA workstation.
+
+### Spot jaw benchmark, 19 September 2026
+
+The integrated CPU pilot exposed a separate collision-discovery bug: the
+converted model's MuJoCo midphase skipped the front jaw and tooth, allowing
+27.5 mm overlap with the fruit. A nonzero load on another jaw section did not
+establish whole-hand collision correctness. The CPU native-contact path now
+bypasses that optimization and retains the original collision masks and native
+narrowphase. Hand/fruit contact solver settings match the native bench
+(`solref=.004 1`, `solimp=.95 .99 .001 .5 2`); these are numerical settings,
+not measured tissue compliance. The GPU path is unchanged and needs its own
+equivalent coverage check before training resumes.
+
+```bash
+python scripts/check_hand_contacts.py --relic ../relic
+# Optional: replay the archived failed pilot, without training.
+python scripts/check_hand_contacts.py --relic ../relic \
+  --policy output/reach-grasp-pilot/policy.zip
+python scripts/check_hand_contacts.py --relic ../relic --physics-hz 2000 \
+  --policy output/reach-grasp-pilot/policy.zip \
+  --output output/hand-contacts-halfstep.json
+```
+
+The check probes all eight hand collision meshes and cross-checks collision
+discovery against an independent ellipsoid/convex-mesh intersection test.
+Its penetrating static fixtures are never stepped. The archived-policy replay
+checks every physics step, with no fruit pose edits or artificial attachment.
+At 1 and 0.5 ms the corrected replay has no missed overlapping pairs and
+about 0.43/0.41 mm maximum penetration; the fruit moves about 40 mm.
+The policy still fails through a forbidden collision. These results establish
+this collision regression, not successful harvesting or accurate soft tissue.
+
+| Model / torque | Result in this fixture |
+|---|---|
+| Rigid / 0.3 and 0.6 N·m | Slipped out before commanded release |
+| Rigid / 1.0 N·m | Passed; maximum hold displacement 7.29 mm |
+| Deformable / 0.3 N·m | Passed at 10 and 5 µs; hold displacement 15.94 / 15.95 mm; peak jaw loads 5.58 / 7.44 N |
+| Deformable / 1.0 N·m | Failed the 20 mm stability tolerance at both 10 and 5 µs; displacement 23.98 mm; no early drop |
+
+The gentler deformable run reached 0.457% rotation-corrected whole-fruit
+compression. Halving the timestep changed peak jaw loads by less than 0.06%
+and hold displacement by 0.013 mm. The final floor pose differs, so this is
+not evidence that post-release rolling trajectories have converged. All runs completed without MuJoCo numerical warnings. These are
+one-pose bench results, not an optimal grip or evidence of bruise-free fruit.
+The differing rigid/flex outcomes mean the rigid model cannot yet stand in for
+the flex benchmark without further contact and mesh-resolution checks.
+
 ## Continue the project
 
 1. Fit compression/hold/release and impact tests to one cultivar and harvest
    condition. Add layered, viscoelastic/plastic response without mixing datasets.
-2. Validate the actual Spot jaw contact and a stem angle/torque break law.
+2. Resolve rigid/deformable contact disagreement and improve force-aware approach
+   in the [local PPO pilot](docs/harvest-task.md#local-reachgrasp-pilot) before longer training.
 3. Train locomotion over 0–6 kg payload and arm configurations; compare against
    the existing policy on matched seeds, spills, tracking and falls.
 4. Train reach, grip, detach and deposit, then integrate a full harvesting task.
@@ -417,12 +619,15 @@ only after the native material and contact benchmarks agree with measurements.
 | Path | Purpose |
 |---|---|
 | `treesim/pergola.py` | Procedural structure and fruit placement |
+| `treesim/orchard_terrain.py` | Seeded kiwi orchard floor (aisles, furrows, slope, noise) |
 | `treesim/kiwi_material.py` | Source-backed constants, geometry sampler, damage helper |
+| `treesim/harvest_task.py` | Task contract, privileged oracle and simulator measurement bridge |
 | `treesim/kiwi.py` | Stem dynamics and GPU contact damage diagnostics |
 | `treesim/basket.py` | Mounted basket, loose payload, spill events |
 | `treesim/spot.py` | URDF import, observation mapping, policy and PD control |
 | `treesim/sim.py` | Solver and stepping integration |
 | `scripts/walk_spot.py` | Loaded walking and spill recordings |
+| `scripts/record_orchard_mujoco.py` | Native MuJoCo orbit of the orchard heightfield |
 | `scripts/kiwi_compression.py` | Native MuJoCo material bench |
 | `tests/` | Fast geometry, mass, independence and event checks |
 | `docs/kiwi-material-evidence.md` | Research sources and calibration gaps |

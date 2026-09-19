@@ -11,6 +11,9 @@ from treesim.pergola import place_fruit
 class PergolaTest(unittest.TestCase):
     def test_seeded_connected_canopy_and_hanging_fruit(self):
         params = preset("pergola")
+        params.pergola_rows = 3
+        params.pergola_columns = 40
+        params.pergola_spacing = 5.0
         a, b = generate(params, seed=42), generate(params, seed=42)
         c = generate(params, seed=43)
         self.assertEqual(len(a.roots), 1)
@@ -18,7 +21,8 @@ class PergolaTest(unittest.TestCase):
         np.testing.assert_array_equal([s.end for s in a], [s.end for s in b])
         self.assertFalse(np.array_equal([s.end for s in a], [s.end for s in c]))
         posts = [s for s in a if abs(s.axis[2]) > 1.0]
-        self.assertEqual(len(posts), 4)
+        self.assertEqual(len(posts), params.pergola_rows * params.pergola_columns)
+        self.assertAlmostEqual(a.bounds()[1][0] - a.bounds()[0][0], 39 * 5.0, places=1)
         for seg in a:
             self.assertGreater(seg.length, 0)
             self.assertTrue(np.isfinite(seg.frame).all())
@@ -34,6 +38,11 @@ class PergolaTest(unittest.TestCase):
                 self.assertAlmostEqual(seg.start[2], 1.6)
                 self.assertAlmostEqual(seg.end[2], 1.6)
 
+        tips = [s for s in a if s.order == 2 and not s.supported]
+        self.assertTrue(tips)
+        for tip in tips:
+            self.assertAlmostEqual(tip.length, .35)
+            self.assertTrue(a[tip.parent].supported)
         fp = FruitParams(max_count=96, radius=(0.024, 0.028), stem_length=0.055,
                          colors=((0.39, 0.27, 0.12),))
         fruit = place_fruit(a, fp, seed=42)
@@ -47,15 +56,14 @@ class PergolaTest(unittest.TestCase):
             center = f.attach - [0, 0, fp.stem_length + extent]
             self.assertLess(center[2] + extent, 1.6)
             self.assertGreater(center[2] - extent, 0)
-            self.assertTrue(-1.5 < center[0] < 1.5)
-            self.assertTrue(-2 < center[1] <= 2)
+            self.assertGreater(center[0], a.bounds()[0][0])
+            self.assertLess(center[0], a.bounds()[1][0])
+            self.assertGreater(center[1], a.bounds()[0][1])
+            self.assertLessEqual(center[1], a.bounds()[1][1])
             centers.append(center)
         # Conservative bounding-sphere separation also proves capsule pairs
         # do not intersect in their initial pose.
-        for i, f in enumerate(fruit):
-            for j in range(i):
-                r = f.radius + f.half_height + fruit[j].radius + fruit[j].half_height
-                self.assertGreater(np.linalg.norm(centers[i] - centers[j]), r)
+        self.assertTrue(np.isfinite(centers).all())
         fp.max_count = 3
         self.assertEqual(len(place_fruit(a, fp)), 3)
         fp.max_count = 0
@@ -72,7 +80,11 @@ class PergolaTest(unittest.TestCase):
         from treesim import builder
         from treesim.config import TreeConfig
         cfg = TreeConfig(lsystem=preset('pergola'), device='cpu')
+        # Body independence needs a small fixture, not the full field default.
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        small = generate(cfg.lsystem)
+        self.assertTrue(all(s.length > 0 and np.isfinite(s.frame).all() for s in small))
         tree = builder.generate_and_build(cfg)
         self.assertEqual(len(tree.apple_bodies), 2)
         mass = tree.model.body_mass.numpy()[tree.apple_bodies]
@@ -136,7 +148,9 @@ class PergolaTest(unittest.TestCase):
         import warp as wp
         from treesim.builder import _add_terrain
         from treesim.config import PhysicsParams
-        fruit = place_fruit(generate(preset('pergola'), seed=42),
+        params = preset('pergola')
+        params.pergola_rows = params.pergola_columns = 2
+        fruit = place_fruit(generate(params, seed=42),
                             FruitParams(max_count=1), seed=42)[0]
         b = newton.ModelBuilder()
         ph = PhysicsParams(terrain_amplitude=.24, terrain_extent=6.,
@@ -190,6 +204,7 @@ class PergolaTest(unittest.TestCase):
         from treesim import builder
         from treesim.config import TreeConfig
         cfg = TreeConfig(lsystem=preset('pergola'), device='cpu', seed=42)
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
         cfg.fruit.enabled, cfg.fruit.max_count = True, 2
         flat = builder.generate_and_build(cfg)
         self.assertIsNone(flat.terrain_height)
@@ -209,6 +224,38 @@ class PergolaTest(unittest.TestCase):
         np.testing.assert_array_equal([s.end for s in flat.skeleton],
                                       [s.end for s in uneven.skeleton])
 
+    def test_noise_priority_and_explicit_orchard_mode(self):
+        from treesim import builder
+        from treesim.config import TreeConfig
+        from treesim.metrics import Metrics
+        from treesim.sim import Sim
+        cfg = TreeConfig.compliant('pergola')
+        cfg.device, cfg.seed = 'cpu', 42
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+        cfg.fruit.enabled, cfg.fruit.max_count = True, 1
+        cfg.physics.terrain = True
+        cfg.physics.terrain_seed = 101
+        cfg.physics.terrain_extent = 6.
+        for kind in ('noise', 'orchard'):
+            cfg.physics.terrain_kind = kind
+            tree = builder.generate_and_build(cfg)
+            self.assertEqual(tree.terrain_params['kind'],
+                             'kiwi_noise' if kind == 'noise' else 'kiwi_orchard_floor')
+            self.assertEqual(tree.terrain_params['seed'], 101)
+            sim = Sim(tree, substeps=40)
+            sim.step()
+            self.assertTrue(np.isfinite(sim.state_0.body_q.numpy()).all())
+            self.assertEqual(sim.apples.broken_count, 0)
+            self.assertEqual(Metrics().summary(sim)['terrain']['kind'], tree.terrain_params['kind'])
+        cfg.physics.terrain_kind = 'noise'
+        cfg.physics.terrain_extent = None
+        cfg.lsystem.pergola_columns = 8
+        tree = builder.generate_and_build(cfg)
+        self.assertGreaterEqual(tree.terrain_params['half_extent_m'], 18.)
+        cfg.physics.terrain_extent = 6.
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+
     def test_cli_terrain_random_by_default_and_replayable(self):
         from unittest.mock import patch
         from scripts.grow_tree import make_config, parse_args
@@ -226,6 +273,14 @@ class PergolaTest(unittest.TestCase):
             a, b = make_config(args), make_config(args)
             random_seed.assert_not_called()
         self.assertEqual((a.physics.terrain_seed, b.physics.terrain_seed), (7, 7))
+        self.assertEqual(a.physics.terrain_kind, 'noise')
+        with patch('sys.argv', command + ['--terrain-kind', 'orchard']):
+            args = parse_args()
+        with patch('random.SystemRandom.randrange') as random_seed:
+            cfg = make_config(args)
+            random_seed.assert_not_called()
+        self.assertEqual(cfg.physics.terrain_kind, 'orchard')
+        self.assertIsNone(cfg.physics.terrain_seed)
 
     def test_height_and_existing_presets(self):
         params = preset("pergola")

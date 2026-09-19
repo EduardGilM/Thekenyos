@@ -30,6 +30,18 @@ already present. State a short plan before substantial implementation.
   torque must remain explicit calibration gaps. Do not sample unrelated source
   extremes as if they form one measured distribution.
 
+## Harvesting objective
+
+Read docs/harvest-task.md before adding RL controls. The oracle evaluates
+physical outcomes; it must not enforce a paper angle or a grasp sequence.
+Keep optional guidance separate from the persistent task objective and evaluate
+with guidance disabled. An evaluator is not an action teacher. Any future
+imitation must use physically verified demonstrations and permit divergence.
+The generic measurement bridge samples contacts when called. The Gymnasium
+adapter uses one physics substep per call and evaluates failures immediately.
+Preserve this behavior when batching or adding CUDA graphs. RL interface changes
+require `scripts/check_harvest_env.py` with the external RELIC assets.
+
 ## Implementation
 
 Use the smallest change that meets the task. Reuse the existing runtime and
@@ -50,9 +62,22 @@ captured loop. Validate buffer swaps if changing substep counts.
 
 Run the affected checks in README.md. Material changes require native
 compression/release results and timestep sensitivity. Contact changes require
-stationary retention, falls/ground contact and adversarial spill tests. Policy
-changes require matched-seed tracking/fall/spill comparisons. A video does not
+stationary retention, falls/ground contact and adversarial spill tests. Actual
+jaw geometry changes require `scripts/check_spot_gripper.py` and timestep
+comparison; keep failed torque cases visible. Policy changes require matched-seed
+tracking/fall/spill comparisons. A video does not
 replace numerical checks; metrics do not replace visual inspection.
+
+For the reach/grasp pilot, retain matched-seed untrained/trained evaluations
+with guidance off. Keep failed contact cases and native crashes in the report;
+model disagreement permits only a labelled diagnostic rigid pilot. CPU contact
+adapter changes require `check_harvest_env.py --device cpu` at both timesteps.
+Whole-hand contacts require `check_hand_contacts.py`: a force on one jaw does
+not prove collision coverage of the palm, opposite jaw or teeth. Preserve the
+independent geometric intersection check and the archived failed-pilot replay.
+The CPU native-contact midphase bypass is a pinned-stack workaround; do not
+remove it without passing coverage and dynamic checks. GPU equivalence and
+calibrated deformable fruit remain gates before further harvesting training.
 
 Show the user a video when a useful visual milestone is ready. Label scripted
 motions, pretrained inference and learned behaviour accurately. Report what

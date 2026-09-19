@@ -1,6 +1,6 @@
 # Kiwi physical properties: evidence for simulation
 
-Research checked 18 September 2026. This is a parameter-selection document, not a claim that the current simulator is calibrated. No simulation constants were changed by this research.
+Research checked 18 September 2026. This is a parameter-selection document, not a claim that the current simulator is calibrated. Implemented approximations are identified below; these are not joint calibration of the simulator.
 
 **Use cultivar- and condition-specific presets.** Harvest-ready fruit is not necessarily soft eating-ripe fruit. Geometry, stiffness, damage and stem detachment cannot be sampled independently without creating unrealistic fruit. Keep the source, cultivar, temperature, firmness, loading rate and contact geometry with each preset.
 
@@ -117,7 +117,36 @@ Above: [He et al.,2024](https://doi.org/10.4081/jae.2024.1640), §§Materials/Me
 
 For detachment itself, Mu2020Table1 reports **1.08–12.25N**, mean4.91N, pooled over angle tests; mean stalk length58.7mm in that separate sample. Its minimum force occurred near60° between fruit and stem axes. **This pooled range is not an angle-conditioned break law.**
 
-[Fang et al.,2023](https://doi.org/10.1016/j.compag.2023.108225) tests60–180° in five cultivars. Minimum detachment occurred at60° for Hayward/Xuxiang/Huayou,80° for Qinmei/Cuixiang; Xuxiang stems could break at160/180°. The numerical per-angle force table was not accessible. Verified kiwi-specific abscission torsional stiffness, failure torque, and fracture-energy ranges remain **unknown**. Cutting torque is not twisting-detachment torque.
+[Fang et al.,2023](https://doi.org/10.1016/j.compag.2023.108225) tests60–180° in five cultivars. Minimum detachment occurred at60° for Hayward/Xuxiang/Huayou,80° for Qinmei/Cuixiang; Xuxiang stems could break at160/180°. The user-supplied full paper is now available. The tests used 210 fruit (42 per
+cultivar), six fruit per angle, a 9 mm/s fixture pull, and fruit tested within
+four hours of harvest on 23 October 2022 in Zhouzhi, China. Fruit–stem angle is
+between the junction-to-fruit-tip vector and the junction-to-stem-anchor vector:
+a straight hanging fruit is 180 degrees.
+
+The implemented Hayward mean-force proxy uses the following points:
+
+| Angle degrees | Mean detachment force N | Evidence |
+|---:|---:|---|
+| 60 | 5.98 | Reported in text |
+| 80 | 6.3 | Approximate visual reading of Fig. 7 mean marker |
+| 100 | 13.8 | Approximate visual reading of Fig. 7 mean marker |
+| 120 | 21.3 | Approximate visual reading of Fig. 7 mean marker |
+| 140 | 30.7 | Approximate visual reading of Fig. 7 mean marker |
+| 160 | 40.27 | Reported in text |
+| 180 | 36.5 | Approximate visual reading of Fig. 7 mean marker |
+
+Intermediate readings have roughly 1 N digitization precision; their decimals
+are not raw experimental precision. Linear interpolation and clamping below
+60 degrees are **assumptions**. Only tensile load along the instantaneous stem
+axis triggers this rule. The default strength multiplier is one; changing it
+is an engineering sensitivity test, not a measured population distribution.
+The mean curve does not reproduce experimental variance, rate dependence,
+shear failure, torque failure or cultivar differences. This replaces the older
+Mu2020 pooled uniform-force sampling. Geometry, stem stiffness and detachment
+still come from different experimental populations.
+
+These forces are attachment loads, not safe jaw forces. The paper's preferred
+fixture angle does not prescribe the optimal motion for Spot's gripper. Verified kiwi-specific abscission torsional stiffness, failure torque, and fracture-energy ranges remain **unknown**. Cutting torque is not twisting-detachment torque.
 
 For a reduced model, use a bending/torsion-capable stalk connected at the fruit's actual stem site, with a separate breakable attachment. Derive beam EA/EI from stem geometry and tissue modulus if used; calibrate the break law separately. A COM spring cannot represent the correct moment arm or picking-angle response.
 
@@ -132,5 +161,6 @@ These are **engineering proposals**, not measured distributions:
 5. **Calibration campaign:** sample the intended cultivar at harvest; record temperature, mass, three axes, displaced volume, firmness and moisture loss. Test compression/release at grasp speeds and holds; compare multiple locations and pad areas. Inspect tissue immediately and after storage. Fit parameters on one subset and evaluate the remaining fruit.
 6. **Detachment campaign:** measure force/torque versus pulling direction and fruit angle, stem dimensions, detachment location and damage. Add twisting only after its torque response is measured. Preserve low-force bending behaviour without allowing spontaneous gravity detachment.
 7. **Basket campaign:** drop individual fruit onto the actual liner and other fruit over a height/speed range, then run repeated shaking and spill tests. Match rebound, rolling, packing and delayed damage. Loss from the basket is independently observable and can already be penalized; calibrated bruise prediction comes later.
+8. **Orchard floor:** the pergola `--terrain` ranges (slope ±4°, noise 0–4 cm, rut depth 0–8 cm, rut width 20–60 cm, friction 0.6–1.3) are **assumed** domain-randomization bounds for a dry soil/grass proxy. The 2 m vine-row pitch and ~0.64 m bare planting strip are an **assumed** compact layout so the block reads as grassed pasillos plus cultivated surcos; they are not a surveyed commercial pergola spacing (often ~4–5 m). Wet soil, wheel-rut geometry on a specific farm, and foot–pad friction remain **unknown**. Do not treat them as interchangeable with fruit–rubber gripper coefficients.
 
 No research found here provides a complete, jointly validated Hayward-or-SunGold parameter distribution covering all these behaviours. The useful result is a set of measured starting envelopes, reproducible benchmark protocols, and explicit calibration gaps—not a claim that all constants can safely be copied into one material.
