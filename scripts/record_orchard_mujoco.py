@@ -25,8 +25,15 @@ import numpy as np
 from treesim.config import FoliageParams, FruitParams
 from treesim.gl_backend import bind_mujoco_gl
 from treesim.kiwi_material import STEM_LENGTH
-from treesim.orchard_terrain import floor_kwargs_for_plantation, sample_orchard_floor
+from treesim.orchard_terrain import (
+    earth_cut_png_bytes, floor_kwargs_for_plantation, sample_orchard_floor,
+)
 from treesim.pergola import generate, place_fruit
+
+# Steep afternoon sun. The shadow map is recentered on the look-at each frame
+# so a large hillside does not stretch one 4k map across the whole field.
+_SUN_DIR = np.array([0.26, 0.42, -1.0], dtype=float)
+_SUN_DIR /= float(np.linalg.norm(_SUN_DIR))
 
 
 def _rgba(rgb, a=1.0) -> str:
@@ -98,47 +105,58 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     # Visual earth bulk so the heightfield is a hillside cut, not a floating card.
     bulk = max(6.0, 0.35 * elevation)
     skirt = 0.45
-    earth = "0.27 0.17 0.08 1"
+    sun_dir = _SUN_DIR
+    sun_pos = np.array([0.0, 0.0, float(floor.canopy_z(0.0, 0.0))]) - 28.0 * sun_dir
     soil_geoms = [
         f'    <geom name="earth_mass" type="box" size="{half + 0.8:.3f} {half + 0.8:.3f} {bulk:.3f}" '
-        f'pos="0 0 {min_z - bulk:.4f}" rgba="{earth}" contype="0" conaffinity="0"/>',
+        f'pos="0 0 {min_z - bulk:.4f}" material="earth_cut" contype="0" conaffinity="0" group="3"/>',
         f'    <geom name="earth_x_pos" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
-        f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
-        f'contype="0" conaffinity="0"/>',
+        f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
+        f'contype="0" conaffinity="0" group="3"/>',
         f'    <geom name="earth_x_neg" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
-        f'pos="{-half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
-        f'contype="0" conaffinity="0"/>',
+        f'pos="{-half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
+        f'contype="0" conaffinity="0" group="3"/>',
         f'    <geom name="earth_y_pos" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
-        f'pos="0 {half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
-        f'contype="0" conaffinity="0"/>',
+        f'pos="0 {half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
+        f'contype="0" conaffinity="0" group="3"/>',
         f'    <geom name="earth_y_neg" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
-        f'pos="0 {-half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
-        f'contype="0" conaffinity="0"/>',
+        f'pos="0 {-half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
+        f'contype="0" conaffinity="0" group="3"/>',
     ]
     return f'''<mujoco model="kiwi_plantation">
   <compiler angle="radian"/>
   <option gravity="0 0 -9.81"/>
   <visual>
     <global offwidth="{int(width)}" offheight="{int(height)}" azimuth="125" elevation="-22" fovy="46"/>
-    <headlight ambient=".18 .19 .16" diffuse=".42 .44 .38" specular=".12 .12 .10"/>
+    <headlight ambient=".14 .15 .13" diffuse=".10 .11 .09" specular="0 0 0"/>
     <rgba haze=".70 .78 .86 1"/>
-    <map fogstart="35" fogend="180" znear=".05" zfar="420"/>
-    <quality shadowsize="2048" offsamples="4"/>
+    <map fogstart="35" fogend="180" znear=".12" zfar="220" shadowclip=".98" shadowscale=".45"/>
+    <quality shadowsize="4096" offsamples="4"/>
   </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1=".42 .62 .86" rgb2=".90 .93 .96"
              width="512" height="512"/>
     <texture type="2d" name="orchard" file="orchard_ground.png"/>
+    <texture type="2d" name="earth_cut" file="earth_cut.png"/>
     <material name="orchard" texture="orchard" texrepeat="1 1" texuniform="false"
-              reflectance="0.02" rgba="1 1 1 1"/>
+              reflectance="0.0" specular="0.04" shininess="0.06"
+              roughness="0.92" metallic="0.0" rgba="1 1 1 1"/>
+    <material name="earth_cut" texture="earth_cut" texrepeat="8 8" texuniform="true"
+              reflectance="0.0" specular="0.03" shininess="0.05"
+              roughness="0.95" metallic="0.0"/>
     <hfield name="orchard_ground" nrow="{nrow}" ncol="{ncol}"
             size="{half} {half} {elevation:.5f} {bulk:.3f}"/>
 {leaf_xml}
   </asset>
   <worldbody>
-    <light pos="30 -70 80" dir="-0.15 0.42 -1" directional="true"
-           diffuse=".70 .66 .52" specular=".18 .16 .12"/>
-    <light pos="-40 30 55" diffuse=".16 .18 .14"/>
+    <light name="sun" directional="true" castshadow="true"
+           pos="{sun_pos[0]:.3f} {sun_pos[1]:.3f} {sun_pos[2]:.3f}"
+           dir="{sun_dir[0]:.4f} {sun_dir[1]:.4f} {sun_dir[2]:.4f}"
+           diffuse=".82 .74 .58" specular=".20 .16 .10" ambient=".05 .055 .04"
+           bulbradius="0.08"/>
+    <light name="fill" directional="true" castshadow="false"
+           pos="{-0.4 * half:.3f} {0.3 * half:.3f} {max(18.0, 0.7 * half):.3f}"
+           dir="-0.12 -0.08 -1" diffuse=".14 .18 .16" specular="0 0 0"/>
     <camera name="orbit" pos="80 -110 60" xyaxes="0.81 0.59 0 -0.18 0.25 0.95"
             fovy="46"/>
     <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
@@ -158,6 +176,13 @@ def apply_hfield(model, floor) -> None:
     min_z = float(heights.min())
     span = max(float(heights.max()) - min_z, 1e-4)
     model.hfield_data[:] = ((heights - min_z) / span).astype(np.float64).ravel()
+
+
+def aim_sun(model, lookat, distance_m: float = 26.0) -> None:
+    """Place the shadow-casting sun so its map covers the current view."""
+    lookat = np.asarray(lookat, dtype=float)
+    model.light_pos[0] = lookat - float(distance_m) * _SUN_DIR
+    model.light_dir[0] = _SUN_DIR
 
 
 def free_camera_eye(lookat, distance, azimuth, elevation) -> np.ndarray:
@@ -308,7 +333,10 @@ def main():
         args.xml.write_text(xml)
 
     model = mujoco.MjModel.from_xml_string(
-        xml, assets={"orchard_ground.png": floor.texture_png_bytes()})
+        xml, assets={
+            "orchard_ground.png": floor.texture_png_bytes(),
+            "earth_cut.png": earth_cut_png_bytes(args.seed),
+        })
     apply_hfield(model, floor)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
@@ -342,6 +370,7 @@ def main():
         for frame in range(args.frames):
             lookat, distance, azimuth, elevation = camera_pose(
                 frame, args.frames, floor, half, spacing)
+            aim_sun(model, lookat)
             camera.lookat[:] = lookat
             camera.distance = distance
             camera.azimuth = azimuth

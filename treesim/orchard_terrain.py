@@ -220,6 +220,16 @@ def _appearance_rgb(x: np.ndarray, y: np.ndarray, xx: np.ndarray, yy: np.ndarray
         worn = worn * (0.25 + 0.75 * grit) * grass
         rgb = rgb * (1.0 - 0.18 * worn)[..., None] + worn[..., None] * np.array(
             [0.34, 0.27, 0.13])
+    rgb = np.clip(rgb, 0.0, 1.0)
+    # Fine grass blades and soil crumbs baked into the albedo. This is a
+    # procedural PBR-style base colour for classic MuJoCo GL, not a scanned
+    # Filament material set.
+    blade = np.sin(yy * (2.0 * np.pi / 0.032) + 0.55 * np.sin(xx * (2.0 * np.pi / 0.11)))
+    blade = 0.68 + 0.32 * (0.5 + 0.5 * blade) ** 1.35
+    tuft = 0.90 + 0.10 * clump
+    grain = 0.84 + 0.16 * grit + 0.08 * speck
+    mix = grass * blade * tuft + (1.0 - grass) * grain
+    rgb = rgb * mix[..., None]
     return np.clip(rgb, 0.0, 1.0)
 
 
@@ -334,6 +344,27 @@ class OrchardFloor:
         buf = BytesIO()
         Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
         return buf.getvalue()
+
+
+def earth_cut_png_bytes(seed: int = 0) -> bytes:
+    """Small tiled loam albedo for the hillside cut (procedural, not a photo)."""
+    from io import BytesIO
+    from PIL import Image
+    rng = np.random.default_rng((int(seed) * 19 + 5) & 0x7FFFFFFF)
+    n = 128
+    x = np.linspace(-2.0, 2.0, n)
+    y = np.linspace(-2.0, 2.0, n)
+    xx, yy = np.meshgrid(x, y)
+    field = _value_noise(rng, x, y, 2.0, wavelength_m=0.55)
+    grit = _value_noise(rng, x, y, 2.0, wavelength_m=0.14)
+    loam = np.array([0.30, 0.19, 0.10])
+    dry = np.array([0.50, 0.34, 0.18])
+    rgb = (1.0 - field)[..., None] * loam + field[..., None] * dry
+    rgb = rgb * (0.86 + 0.20 * grit[..., None])
+    pixels = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def floor_kwargs_for_plantation(rows, columns, spacing, params=None,

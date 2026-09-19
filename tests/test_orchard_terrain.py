@@ -61,6 +61,31 @@ class OrchardTerrainTest(unittest.TestCase):
         # furrow is still more soil-like than the aisle centre.
         near_rgb = floor.color_at(0.5 * pitch - 0.15, 0.0)
         self.assertGreater(aisle_rgb[1] - aisle_rgb[0], near_rgb[1] - near_rgb[0])
+        grass_g = [floor.color_at(0.0, y)[1] for y in np.linspace(-0.8, 0.8, 48)]
+        self.assertGreater(float(np.std(grass_g)), 0.003)
+
+    def test_preview_uses_matte_ground_and_a_focused_sun(self):
+        from scripts.record_orchard_mujoco import _SUN_DIR, aim_sun, mjcf
+        from treesim.orchard_terrain import earth_cut_png_bytes
+        floor = _pinned()
+        xml = mjcf(floor, [], [])
+        self.assertIn('castshadow="false"', xml)
+        self.assertIn('roughness="0.92"', xml)
+        self.assertIn('shadowsize="4096"', xml)
+        self.assertIn('earth_cut.png', xml)
+        png = earth_cut_png_bytes(0)
+        self.assertGreater(len(png), 64)
+        self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
+
+        class Lights:
+            light_pos = np.zeros((2, 3))
+            light_dir = np.zeros((2, 3))
+
+        model = Lights()
+        look = np.array([1.0, -4.0, 1.2])
+        aim_sun(model, look, 10.0)
+        np.testing.assert_allclose(model.light_dir[0], _SUN_DIR)
+        np.testing.assert_allclose(model.light_pos[0], look - 10.0 * _SUN_DIR)
 
     def test_slope_plane_and_canopy(self):
         floor = _pinned(slope_deg=2.0, rut_depth_m=0.0, noise_m=0.0)
