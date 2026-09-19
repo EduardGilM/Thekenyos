@@ -385,6 +385,22 @@ def apply_easy_preset(values: dict) -> dict:
     return out
 
 
+def apply_easy_hover_cohort(indices, cohort, hover_index):
+    """Keep success worlds on the hover start row. Catalog draws stay elsewhere.
+
+    This is a host index rewrite, not a weld and not an eval start recipe.
+    """
+    idx = np.asarray(indices, dtype=np.int32).reshape(-1).copy()
+    mask = np.asarray(cohort, dtype=np.int32).reshape(-1)
+    if idx.size != mask.size:
+        raise ValueError('hover cohort length must match start indices')
+    hover = int(hover_index)
+    if hover < 0:
+        raise ValueError('hover_index must be non-negative')
+    idx[mask != 0] = hover
+    return idx
+
+
 def easy_start_far_frac(update_index, horizon=None, cap=None):
     """How far from the crate the easy start may sample. 0=nearest outside."""
     if horizon is None:

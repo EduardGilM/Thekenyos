@@ -4,9 +4,9 @@ import unittest
 import numpy as np
 
 from treesim.kiwi_rl.curriculum import (
-    STAGES, evaluate_skills, evaluation_horizon_s, first_unsatisfied_stage,
-    fruit_block_reason, next_stage, promotion_ready, sample_world_skills,
-    stage_named,
+    STAGES, apply_easy_hover_cohort, evaluate_skills, evaluation_horizon_s,
+    first_unsatisfied_stage, fruit_block_reason, next_stage, promotion_ready,
+    sample_world_skills, stage_named,
 )
 
 
@@ -278,6 +278,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _prefer_hover_after_success', src)
         self.assertIn('self._hover_start_index', src)
         self.assertIn('self._easy_catalog_n', src)
+        self.assertIn('self._easy_hover_cohort', src)
+        self.assertIn('apply_easy_hover_cohort', src)
+        self.assertIn('def clear_easy_hover_starts', src)
         self.assertLess(
             src.index('self._prefer_hover_after_success(mask)'),
             src.index('self.task.reset(mask_wp)'),
@@ -352,6 +355,16 @@ class CurriculumTest(unittest.TestCase):
             hover_tcp_local_m(0.0)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(-0.1)
+
+    def test_hover_cohort_keeps_success_worlds_on_hover_row(self):
+        idx = apply_easy_hover_cohort([3, 11, 7, 0], [0, 1, 0, 1], 24)
+        np.testing.assert_array_equal(idx, np.array([3, 24, 7, 24], dtype=np.int32))
+        same = apply_easy_hover_cohort([2, 5], [0, 0], 24)
+        np.testing.assert_array_equal(same, np.array([2, 5], dtype=np.int32))
+        with self.assertRaises(ValueError):
+            apply_easy_hover_cohort([1, 2], [1], 24)
+        with self.assertRaises(ValueError):
+            apply_easy_hover_cohort([1], [1], -1)
 
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')

@@ -410,9 +410,14 @@ def np_finite(value):
 def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0.02,
                      eval_profile='default'):
     """Deterministic eval over the stage horizon without stacking RGBD history."""
+    import numpy as np
     import torch
     runtime.configure_skills(evaluate_skills(stage, runtime.worlds))
     horizon = evaluation_horizon_steps(stage, control_dt, profile=eval_profile)
+    saved_hover = None
+    if getattr(runtime, '_easy', False) and hasattr(runtime, 'clear_easy_hover_starts'):
+        saved_hover = runtime.snapshot_easy_hover()
+        runtime.clear_easy_hover_starts(np.random.default_rng(0))
     runtime.reset()
     worlds = runtime.worlds
     memory = torch.zeros(worlds, 64, device='cuda:0')
@@ -471,7 +476,7 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     if not bool(torch.isfinite(closest_basket).all()):
         closest_basket = closest
         final_basket = final_distance
-    return {
+    result = {
         'evaluation/horizon_s': float(horizon * control_dt),
         'evaluation/horizon_steps': int(horizon),
         'evaluation/final_distance_m': float(final_distance.mean()),
@@ -493,6 +498,9 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/eval_profile': eval_profile,
         'evaluation/worlds': worlds,
     }
+    if saved_hover is not None:
+        runtime.restore_easy_hover(saved_hover)
+    return result
 
 
 def evaluate(runtime, policy, gait, steps, camera_every, *, stage=None):
@@ -737,6 +745,7 @@ def run(args):
                 easy_far_frac=float(start_info.get('easy_far_frac', 0.0)),
                 easy_start_index_mean=float(start_info.get('easy_start_index_mean', 0.0)),
                 easy_start_index_max=int(start_info.get('easy_start_index_max', 0)),
+                easy_hover_cohort_worlds=int(start_info.get('easy_hover_cohort_worlds', 0)),
                 easy_hold_close_mean=float(start_info.get('easy_hold_close_mean', 0.0)),
                 easy_hold_index_mean=float(start_info.get('easy_hold_index_mean', 0.0)),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)

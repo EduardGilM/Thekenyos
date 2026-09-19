@@ -15,7 +15,10 @@ import numpy as np
 import warp as wp
 
 from .control_warp import WarpSpotControl, _set_gait_targets
-from .curriculum import EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M
+from .curriculum import (
+    EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M,
+    apply_easy_hover_cohort,
+)
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
     W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
@@ -706,6 +709,7 @@ class FastRuntime:
             self._hover_start_index = int(start_qs.shape[0] - 1)
             self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
             self._easy_start_index = wp.zeros(worlds, dtype=int, device=self.device)
+            self._easy_hover_cohort = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
             self._easy_jaw_hold_next = wp.zeros(worlds, dtype=float, device=self.device)
             closed_holds = np.full(worlds, self._jaw_closed, dtype=np.float32)
@@ -989,6 +993,8 @@ class FastRuntime:
         if n < 1:
             raise ValueError('easy start catalog is empty')
         idx = np.asarray(rng.integers(0, n, size=self.worlds), dtype=np.int32)
+        cohort = np.asarray(self._easy_hover_cohort.numpy(), dtype=np.int32).reshape(-1)
+        idx = apply_easy_hover_cohort(idx, cohort, self._hover_start_index)
         close = float(self._chosen_close_frac)
         jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
         self._easy_start_index.assign(idx)
@@ -996,14 +1002,35 @@ class FastRuntime:
         self._easy_far_frac = frac
         return {
             'easy_far_frac': frac,
-            'easy_start_index_max': int(n - 1),
-            'easy_start_index_mean': float(idx.mean()),
+            'easy_start_index_max': int(idx.max()) if idx.size else int(n - 1),
+            'easy_start_index_mean': float(idx.mean()) if idx.size else 0.0,
             'easy_hold_close_mean': close,
             'easy_hold_index_mean': close,
+            'easy_hover_cohort_worlds': int(np.count_nonzero(cohort)),
         }
 
+    def snapshot_easy_hover(self):
+        """Host copy of start indices and the success hover cohort."""
+        return {
+            'index': np.asarray(self._easy_start_index.numpy(), dtype=np.int32).reshape(-1).copy(),
+            'cohort': np.asarray(self._easy_hover_cohort.numpy(), dtype=np.int32).reshape(-1).copy(),
+        }
+
+    def restore_easy_hover(self, saved):
+        if not saved:
+            return
+        self._easy_start_index.assign(np.asarray(saved['index'], dtype=np.int32).reshape(-1))
+        self._easy_hover_cohort.assign(np.asarray(saved['cohort'], dtype=np.int32).reshape(-1))
+
+    def clear_easy_hover_starts(self, rng):
+        """Eval catalog restore. Does not weld fruit. Training cohort is the caller's to restore."""
+        self._easy_hover_cohort.assign(np.zeros(self.worlds, dtype=np.int32))
+        if hasattr(self, 'task') and hasattr(self.task, 'success'):
+            self.task.success.assign(np.zeros(self.worlds, dtype=np.uint8))
+        return self.set_easy_progress(0.0, rng)
+
     def _prefer_hover_after_success(self, mask):
-        """A world that just deposited respawns at hover, not a far catalog draw.
+        """A world that just deposited stays in the hover cohort, including later fails.
 
         Read ``task.success`` before ``task.reset`` clears it. Fruit stays free.
         """
@@ -1020,7 +1047,10 @@ class FastRuntime:
         if not np.any(hit):
             return
         idx = np.asarray(self._easy_start_index.numpy(), dtype=np.int32).reshape(-1)
+        cohort = np.asarray(self._easy_hover_cohort.numpy(), dtype=np.int32).reshape(-1)
+        cohort[hit] = 1
         idx[hit] = int(self._hover_start_index)
+        self._easy_hover_cohort.assign(cohort)
         self._easy_start_index.assign(idx)
 
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
