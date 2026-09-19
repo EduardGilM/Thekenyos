@@ -125,6 +125,8 @@ class FastTrainerCLITest(unittest.TestCase):
         run_src = inspect.getsource(train_fast.run)
         self.assertIn('ground_contact_worlds', run_src)
         self.assertIn('basket_distance_mean_m', run_src)
+        self.assertIn('easy_far_frac', run_src)
+        self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')

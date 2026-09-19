@@ -36,6 +36,7 @@ PRIORITY_CHARTS = (
     'recovered_worlds', 'overflow_worlds', 'evaluation/recovered_worlds', 'evaluation/overflow_worlds',
     'evaluation/terminal_transitions', 'terminal_transitions',
     'curriculum_index', 'guidance_weight', 'teacher_mix', 'shaping_coef',
+    'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
 )
@@ -199,7 +200,7 @@ def _video_figure(video: Mapping[str, Any]) -> str:
     if is_chartable(basket):
         extra += f' · min cesta {float(basket):.3f} m'
     if video.get('easy'):
-        extra += ' · easy-airdrop'
+        extra += ' · easy-carry'
     return (
         f'<figure><figcaption>update {html.escape(str(video.get("step")))}'
         f'{html.escape(extra)} · {html.escape(str(video.get("label", "")))}</figcaption>'
@@ -211,13 +212,15 @@ _DASHBOARD_SCRIPT = r'''
 <script>
 const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_dim", "reward_mean",
   "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
-  "basket_distance_mean_m", "evaluation/mean_closest_basket_distance_m",
+  "basket_distance_mean_m", "basket_xy_mean_m", "easy_far_frac",
+  "evaluation/mean_closest_basket_distance_m",
   "ground_contact_worlds", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
   "torch_peak_allocated_gb"];
 const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
   "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
+  "easy_far_frac", "easy_start_index_mean", "easy_start_index_max",
   "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
   "ground_contact_worlds", "fallen_worlds", "failed_worlds", "hand_load_max_N",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
@@ -301,7 +304,7 @@ function renderVideo(video) {
   if (chartable(video.min_basket_distance_m)) {
     extra += ` · min cesta ${Number(video.min_basket_distance_m).toFixed(3)} m`;
   }
-  if (video.easy) extra += " · easy-airdrop";
+  if (video.easy) extra += " · easy-carry";
   return `<figure><figcaption>update ${esc(video.step)}${esc(extra)} · ${esc(video.label || "")}</figcaption>
     <video controls preload="metadata" src="${esc(video.url)}"></video></figure>`;
 }
@@ -557,11 +560,19 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     config = dict(info.get('config') or {})
     name = meta.get('curriculum_stage') or config.get('stage')
     easy = bool(config.get('easy', False))
+    far_frac = 0.0
+    if easy:
+        raw = config.get('easy_far_frac', 0.0)
+        far_frac = float(raw)
+        if not math.isfinite(far_frac) or not 0.0 <= far_frac <= 1.0:
+            raise ValueError('easy_far_frac must be finite in [0, 1]')
     if not name:
-        return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy)
+        return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
+                    easy_far_frac=far_frac)
     stage = stage_named(str(name))
     return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
-                allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy)
+                allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy,
+                easy_far_frac=far_frac)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -595,7 +606,10 @@ def _arm_limits(model, controller):
 
 def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
                             clearance_m: float | None = None) -> float:
-    """Move the native arm to the privileged basket-hover TCP. Fruit is not written."""
+    """Move the native arm to the privileged basket-hover TCP. Fruit is not written.
+
+    This is the teacher drop pose above the opening, not the episode start.
+    """
     import mujoco
     import numpy as np
     from treesim.kiwi_rl.curriculum import EASY_PRESET
@@ -622,8 +636,48 @@ def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
     return float(err)
 
 
+def apply_native_easy_start(model, data, controller, tcp_site: int, *,
+                            far_frac: float = 0.0) -> float:
+    """Move the native arm to an outside-crate carry start. Fruit is not written."""
+    import mujoco
+    import numpy as np
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    from treesim.kiwi_rl.reach_teacher import easy_start_local_m, solve_tcp_hover, tcp_outside_basket
+    frac = float(far_frac)
+    if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+        raise ValueError('far_frac must be finite in [0, 1]')
+    mujoco.mj_kinematics(model, data)
+    qids = np.asarray(controller.qids[12:18], dtype=int)
+    dofs = np.asarray(controller.dofs[12:18], dtype=int)
+    joints = np.asarray(controller.joints[12:18], dtype=int)
+    ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+    limited = np.asarray(model.jnt_limited[joints], dtype=bool)
+    ranges[limited] = np.asarray(model.jnt_range[joints], dtype=np.float64)[limited]
+    chassis_p = np.asarray(data.xpos[controller.chassis], dtype=np.float64)
+    chassis_R = np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3)
+    home_tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+    home_local = chassis_R.T @ (home_tcp - chassis_p)
+    local = easy_start_local_m(
+        frac, home_local,
+        margin_m=EASY_PRESET['start_margin_m'],
+        clearance_m=EASY_PRESET['start_clearance_m'])
+    if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+        raise ValueError('easy start TCP still intersects the crate volume')
+    target = chassis_p + chassis_R @ local
+    q_init = np.asarray(data.qpos[qids], dtype=np.float64)
+    arm_q, err = solve_tcp_hover(
+        model, data.qpos, int(tcp_site), target, qids, dofs, q_init, ranges)
+    if not np.isfinite(arm_q).all() or not np.isfinite(err):
+        return float('inf')
+    data.qpos[qids] = arm_q
+    controller.targets[12:18] = arm_q
+    mujoco.mj_forward(model, data)
+    return float(err)
+
+
 def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
-                             approach_offset_m: float = 1.0, easy: bool = False) -> None:
+                             approach_offset_m: float = 1.0, easy: bool = False,
+                             far_frac: float = 0.0) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
     import numpy as np
@@ -642,7 +696,7 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     qposadr = int(model.jnt_qposadr[joint])
     dofadr = int(model.jnt_dofadr[joint])
     if easy and reset_mode == 1:
-        apply_native_easy_hover(model, data, controller, tcp_site)
+        apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
         tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
         data.qpos[qposadr:qposadr + 3] = tcp
@@ -657,17 +711,6 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
             closed = 0.0
         data.qpos[int(controller.qids[18])] = closed
         controller.targets[18] = closed
-        if easy:
-            from treesim.kiwi_rl.reach_teacher import easy_airdrop_world_m
-            pos = easy_airdrop_world_m(
-                tcp, data.xpos[controller.chassis], data.xmat[controller.chassis])
-            data.qpos[qposadr:qposadr + 3] = pos
-            data.qvel[dofadr:dofadr + 6] = 0.0
-            opened = float(model.jnt_range[jaw_joint, 1])
-            if not np.isfinite(opened):
-                opened = 0.8
-            data.qpos[int(controller.qids[18])] = opened
-            controller.targets[18] = opened
     if reset_mode == 2:
         jaw_joint = int(controller.joints[18])
         opened = float(model.jnt_range[jaw_joint, 1])
@@ -767,7 +810,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     load_checkpoint(info['checkpoint'], {'student': policy}, expected_meta={'camera': camera})
     preview = curriculum_preview_from_checkpoint(info)
     apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'],
-                             easy=bool(preview.get('easy')))
+                             easy=bool(preview.get('easy')),
+                             far_frac=float(preview.get('easy_far_frac') or 0.0))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
     basket_local = np.asarray(CENTER, dtype=np.float64)
@@ -795,7 +839,9 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     basket_distances = []
     command = np.zeros(3, dtype=np.float32)
     stage_label = preview['stage'] or 'hanging'
-    easy_tag = 'easy-airdrop ' if preview.get('easy') else ''
+    easy_tag = (
+        f'easy-carry far_frac={float(preview.get("easy_far_frac") or 0.0):.2f} '
+        if preview.get('easy') else '')
     try:
         for index in range(steps):
             mujoco.mj_camlight(model, data)
@@ -862,6 +908,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                   curriculum_stage=preview['stage'], reset_mode=preview['reset_mode'],
                   allow_locomotion=preview['allow_locomotion'],
                   easy=bool(preview.get('easy')),
+                  easy_far_frac=float(preview.get('easy_far_frac') or 0.0),
                   update=info['completed_updates'], steps=steps, fps=fps,
                   control_dt_s=control_dt, backend=f'cpu-native-mujoco-{os.environ.get("MUJOCO_GL", "egl")}',
                   mean_tcp_fruit_distance_m=float(np.mean(distances)),

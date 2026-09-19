@@ -143,14 +143,27 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertFalse(hanging['easy'])
         easy = curriculum_preview_from_checkpoint({
             'meta': {'curriculum_stage': 'deposit_pixels'},
-            'config': {'easy': True},
+            'config': {'easy': True, 'easy_far_frac': 0.25},
         })
         self.assertTrue(easy['easy'])
         self.assertEqual(easy['reset_mode'], 1)
-        from treesim.kiwi_rl.training_monitor import apply_native_easy_hover, apply_native_skill_reset, _n3_command
+        self.assertEqual(easy['easy_far_frac'], 0.25)
+        from treesim.kiwi_rl.training_monitor import (
+            apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
+        )
         self.assertIn('hover_tcp_world_m', inspect.getsource(apply_native_easy_hover))
+        self.assertIn('easy_start_local_m', inspect.getsource(apply_native_easy_start))
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
-        self.assertIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
+        self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
+        html_easy_video = render_dashboard_html(dict(
+            schema='training-monitor/v1', training_ready=False, run='x', rows=1,
+            latest=dict(step=1), series={}, generated_at='now',
+            videos=[dict(step=10, file='progress-0010.mp4', url='videos/progress-0010.mp4',
+                         label='CPU native curriculum preview; not a harvest demonstration',
+                         easy=True, easy_far_frac=0.0, min_basket_distance_m=0.39)]))
+        self.assertIn('easy-carry', html_easy_video)
+        self.assertNotIn('easy-airdrop', html_easy_video)
         first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
         np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
 

@@ -67,8 +67,11 @@ EASY_PRESET = {
     'teacher_mix': 0.4,
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
-    'hover_clearance_m': 0.12,
-    'drop_offset_m': 0.10,
+    'hover_clearance_m': 0.28,
+    'start_margin_m': 0.12,
+    'start_clearance_m': 0.18,
+    'n_start_poses': 8,
+    'far_horizon_updates': 400,
     'default_shaping_coef': 2.0,
 }
 
@@ -316,6 +319,17 @@ def apply_easy_preset(values: dict) -> dict:
     out = dict(values)
     out.update(EASY_PRESET)
     return out
+
+
+def easy_start_far_frac(update_index, horizon=None):
+    """How far from the crate the easy start may sample. 0=nearest outside."""
+    if horizon is None:
+        horizon = EASY_PRESET['far_horizon_updates']
+    if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 0:
+        raise ValueError('update_index must be a non-negative integer')
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+        raise ValueError('horizon must be a positive integer')
+    return float(min(1.0, update_index / float(horizon)))
 
 
 def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: int | None = None) -> bool:

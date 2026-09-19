@@ -3,7 +3,7 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
-    easy_airdrop_world_m,
+    basket_chassis_aabb_m, easy_start_local_m, tcp_outside_basket,
 )
 
 
@@ -37,26 +37,31 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertAlmostEqual(float(target[2]), 3.0 + local_top + 0.12)
         self.assertGreater(float(target[2] - xpos[2]), local_top)
 
-    def test_easy_airdrop_uses_basket_xy_not_tcp_xy(self):
+    def test_easy_start_is_outside_crate_and_recedes(self):
         from treesim.basket import CENTER, SIZE
-        from treesim.kiwi_rl.curriculum import EASY_PRESET
-        from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m
+        from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m, push_tcp_outside_basket
         xpos = np.array([1.0, 2.0, 3.0])
         xmat = np.eye(3)
-        tcp = hover_tcp_world_m(xpos, xmat, 0.12) + np.array([0.047, -0.02, 0.0])
-        pos = easy_airdrop_world_m(tcp, xpos, xmat)
-        np.testing.assert_allclose(pos[:2], (xpos + xmat @ CENTER)[:2])
-        self.assertAlmostEqual(float(pos[2]), float(tcp[2] - EASY_PRESET['drop_offset_m']))
-        self.assertGreater(float(pos[2] - xpos[2]), float(CENTER[2] + SIZE[2]))
-        xmat90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-        tcp90 = xpos + xmat90 @ hover_tcp_local_m(0.12)
-        pos90 = easy_airdrop_world_m(tcp90, xpos, xmat90)
-        np.testing.assert_allclose(pos90[:2], (xpos + xmat90 @ CENTER)[:2])
-        self.assertAlmostEqual(float(pos90[2]), float(tcp90[2] - 0.10))
+        hover = hover_tcp_world_m(xpos, xmat, 0.28)
+        hover_local = hover_tcp_local_m(0.28)
+        self.assertAlmostEqual(float(hover[0]), 1.0 + float(CENTER[0]))
+        self.assertFalse(tcp_outside_basket(hover_local, margin_m=0.04, above_rim_m=0.0))
+        lo, hi = basket_chassis_aabb_m()
+        np.testing.assert_allclose(hi[2], float(CENTER[2] + SIZE[2]))
+        near = easy_start_local_m(0.0)
+        far = easy_start_local_m(1.0)
+        self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.12) - 1e-9)
+        self.assertGreater(float(far[0]), float(near[0]))
+        self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
+        self.assertTrue(tcp_outside_basket(far, margin_m=0.04, above_rim_m=0.0))
+        inside = np.array([float(CENTER[0]), float(CENTER[1]), float(CENTER[2] + SIZE[2] + 0.28)])
+        pushed = push_tcp_outside_basket(inside, margin_m=0.12)
+        self.assertGreaterEqual(float(pushed[0]), float(hi[0] + 0.12) - 1e-9)
+        self.assertTrue(tcp_outside_basket(pushed, margin_m=0.04, above_rim_m=0.0))
         with self.assertRaises(ValueError):
-            easy_airdrop_world_m(tcp, xpos, xmat, drop_offset_m=0.0)
+            easy_start_local_m(-0.1)
         with self.assertRaises(ValueError):
-            easy_airdrop_world_m(np.array([np.nan, 0.0, 1.0]), xpos, xmat)
+            easy_start_local_m(1.1)
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

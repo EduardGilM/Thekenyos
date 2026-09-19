@@ -112,8 +112,10 @@ class CurriculumTest(unittest.TestCase):
             evaluation_horizon_s(deposit, profile='cheat')
 
     def test_easy_preset_does_not_change_gates_or_weld(self):
-        from treesim.kiwi_rl.curriculum import EASY_PRESET, apply_easy_preset
-        from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m
+        from treesim.kiwi_rl.curriculum import EASY_PRESET, apply_easy_preset, easy_start_far_frac
+        from treesim.kiwi_rl.reach_teacher import (
+            basket_chassis_aabb_m, easy_start_local_m, hover_tcp_local_m, tcp_outside_basket,
+        )
         from treesim.basket import CENTER, SIZE
         deposit = stage_named('deposit_pixels')
         preset = apply_easy_preset({'gate_success_rate': deposit.gate_success_rate,
@@ -121,22 +123,39 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['teacher_mix'], 0.4)
         self.assertEqual(preset['shaping_coef'], 5.0)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
+        self.assertEqual(preset['start_margin_m'], 0.12)
+        self.assertEqual(preset['start_clearance_m'], 0.18)
+        self.assertEqual(preset['n_start_poses'], 8)
+        self.assertEqual(preset['far_horizon_updates'], 400)
         self.assertEqual(preset['gate_success_rate'], 0.90)
         self.assertEqual(preset['gate_episodes'], 200)
         self.assertNotIn('weld', EASY_PRESET)
+        self.assertNotIn('drop_offset_m', EASY_PRESET)
         self.assertEqual(deposit.gate_success_rate, 0.90)
-        local = hover_tcp_local_m(0.12)
-        np.testing.assert_allclose(local, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
-        self.assertGreater(float(local[2]), float(CENTER[2] + SIZE[2]))
-        drop_z = float(local[2] - EASY_PRESET['drop_offset_m'])
-        self.assertGreater(drop_z, float(CENTER[2] + SIZE[2]))
-        self.assertEqual(EASY_PRESET['drop_offset_m'], 0.10)
+        hover = hover_tcp_local_m(0.12)
+        np.testing.assert_allclose(hover, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
+        self.assertGreater(float(hover[2]), float(CENTER[2] + SIZE[2]))
+        self.assertFalse(tcp_outside_basket(hover, margin_m=0.04, above_rim_m=0.0))
+        lo, hi = basket_chassis_aabb_m()
+        np.testing.assert_allclose(hi[2], CENTER[2] + SIZE[2])
+        near = easy_start_local_m(0.0)
+        far = easy_start_local_m(1.0)
+        self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
+        self.assertTrue(tcp_outside_basket(far, margin_m=0.04, above_rim_m=0.0))
+        self.assertGreater(float(near[0]), float(hi[0]))
+        self.assertGreater(float(far[0]), float(near[0]))
+        self.assertGreater(float(np.linalg.norm(far[:2] - CENTER[:2])),
+                           float(np.linalg.norm(near[:2] - CENTER[:2])))
+        self.assertEqual(easy_start_far_frac(0), 0.0)
+        self.assertEqual(easy_start_far_frac(200), 0.5)
+        self.assertEqual(easy_start_far_frac(400), 1.0)
+        self.assertEqual(easy_start_far_frac(800), 1.0)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
-        self.assertIn('def _easy_airdrop', src)
-        self.assertIn('basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center', src)
-        self.assertIn('qpos[world, qadr + 0] = basket_world[0]', src)
-        self.assertIn('qpos[world, qadr + 2] = qpos[world, qadr + 2] - drop_m', src)
+        self.assertIn('def _apply_easy_start', src)
+        self.assertIn('set_easy_progress', src)
+        self.assertNotIn('def _easy_airdrop', src)
+        self.assertNotIn('easy_airdrop', src)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(0.0)
         with self.assertRaises(ValueError):

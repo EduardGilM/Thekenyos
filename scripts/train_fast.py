@@ -10,9 +10,10 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    EASY_PRESET, apply_easy_preset, apply_speedrun_preset, evaluate_skills,
-    evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask, next_stage,
-    promotion_ready, sample_world_skills, stage_named, summarise_stage,
+    EASY_PRESET, apply_easy_preset, apply_speedrun_preset, easy_start_far_frac,
+    evaluate_skills, evaluation_horizon_steps, fruit_block_reason,
+    idle_locomotion_mask, next_stage, promotion_ready, sample_world_skills,
+    stage_named, summarise_stage,
 )
 
 
@@ -458,7 +459,10 @@ def run(args):
                               nconmax=args.nconmax, njmax=args.njmax)
         if easy:
             easy_info = runtime.enable_easy(True, shaping_coef=shaping_coef)
+            runtime.set_easy_progress(0.0, numpy_rng)
             config['hover_error_m'] = easy_info['hover_error_m']
+            config['easy_start_error_m'] = easy_info['easy_start_error_m']
+            config['easy_far_frac'] = 0.0
             config['easy_scope'] = easy_info['scope']
             (args.output / 'config.json').write_text(
                 json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
@@ -500,6 +504,12 @@ def run(args):
         apply_stage(runtime, stage, numpy_rng)
         for iteration in range(args.updates):
             began = time.monotonic()
+            if easy:
+                far_frac = easy_start_far_frac(iteration)
+                start_info = runtime.set_easy_progress(far_frac, numpy_rng)
+                config['easy_far_frac'] = start_info['easy_far_frac']
+            else:
+                start_info = {}
             rows, bootstrap, carry = collect(runtime, policy, gait, args.steps, args.camera_every,
                                              carry=carry, reset_all=False, dim_mask=dim_mask,
                                              teacher_mix=teacher_mix)
@@ -533,6 +543,9 @@ def run(args):
                 teacher_actions=int(carry.get('teacher_actions', 0)),
                 shaping_coef=shaping_coef,
                 hover_error_m=float(runtime.hover_error_m),
+                easy_far_frac=float(start_info.get('easy_far_frac', 0.0)),
+                easy_start_index_mean=float(start_info.get('easy_start_index_mean', 0.0)),
+                easy_start_index_max=int(start_info.get('easy_start_index_max', 0)),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
             if 'basket_distance' in rows[0]:
                 basket = torch.stack([r['basket_distance'] for r in rows])
@@ -657,7 +670,7 @@ def main():
     p.add_argument('--speedrun', action='store_true',
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
     p.add_argument('--easy', action='store_true',
-                   help='Hover-over-basket free-fruit reset, privileged deposit mix, stronger shaping; not a weld')
+                   help='Outside-crate carry start that recedes over training, privileged deposit mix, stronger shaping; not a weld')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
