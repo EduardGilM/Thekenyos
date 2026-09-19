@@ -113,7 +113,7 @@ def main():
         if obj.type == 'POINTCLOUD':
             obj.hide_render = True
     counts = {key: 0 for key in materials}
-    for obj in bpy.data.objects:
+    for obj in list(bpy.data.objects):
         if obj.type == 'MESH':
             semantic = classify(obj)
             assign(obj, materials[semantic], semantic)
@@ -147,13 +147,13 @@ def main():
     camera_data = bpy.data.cameras.new('Canopy camera')
     camera = bpy.data.objects.new('Canopy camera', camera_data)
     bpy.context.collection.objects.link(camera)
-    camera.location = (-1.3, 7.5, 1.18)
-    camera.data.lens = 34
+    camera.location = (-6.9, -8.1, 1.08)
+    camera.data.lens = 30
     camera.data.sensor_width = 36
     camera.data.dof.use_dof = True
     camera.data.dof.focus_distance = 8.0
     camera.data.dof.aperture_fstop = 7.1
-    look_at(camera, (8.5, 7.5, 1.32))
+    look_at(camera, (0.0, 0.0, 1.48))
 
     scene = bpy.context.scene
     scene.camera = camera
