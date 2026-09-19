@@ -286,9 +286,8 @@ class PergolaTest(unittest.TestCase):
 
     def test_canopy_infill_is_seeded_and_spans_gaps(self):
         from treesim.config import FoliageParams
-        from treesim.foliage import place_canopy_leaves
+        from treesim.foliage import place_canopy_leaves, rotate_xyzw
         from treesim.pergola import generate as pergola
-        from treesim.builder import _qrot
         fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
                            canopy_spacing_m=.10)
         skel = pergola(rows=2, columns=2, seed=42)
@@ -301,7 +300,7 @@ class PergolaTest(unittest.TestCase):
         self.assertFalse(np.array_equal([p.attach for p in a], [p.attach for p in c]))
         np.testing.assert_array_equal(before, [s.end for s in skel])
         self.assertEqual(len(a), 2500)
-        centers = np.array([p.attach + _qrot(p.frame, np.array([0., 0., .11]))
+        centers = np.array([p.attach + rotate_xyzw(p.frame, np.array([0., 0., .11]))
                             for p in a])
         counts, _, _ = np.histogram2d(centers[:, 0], centers[:, 1], bins=20,
                                       range=[[-2.5, 2.5], [-2.5, 2.5]])
@@ -310,6 +309,10 @@ class PergolaTest(unittest.TestCase):
         np.testing.assert_allclose(np.linalg.norm([p.frame for p in a], axis=1), 1.)
         self.assertTrue(all(skel[p.parent_seg].supported for p in a))
         self.assertTrue(all(skel[p.parent_seg].order == 2 for p in a))
+        normals = np.array([rotate_xyzw(p.frame, np.array([0., 1., 0.])) for p in a])
+        headings = np.array([rotate_xyzw(p.frame, np.array([0., 0., 1.])) for p in a])
+        self.assertGreater(float(np.mean(np.abs(normals[:, 2]))), 0.85)
+        self.assertLess(float(np.mean(np.abs(headings[:, 2]))), 0.40)
         for spacing in (-.1, .001, float('nan'), float('inf')):
             fp.canopy_spacing_m = spacing
             with self.subTest(spacing=spacing), self.assertRaises(ValueError):
@@ -320,14 +323,13 @@ class PergolaTest(unittest.TestCase):
 
     def test_canopy_infill_follows_sloped_canopy(self):
         from treesim.config import FoliageParams
-        from treesim.foliage import place_canopy_leaves
+        from treesim.foliage import place_canopy_leaves, rotate_xyzw
         from treesim.pergola import generate as pergola
-        from treesim.builder import _qrot
         fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
                            canopy_spacing_m=.2)
         skel = pergola(rows=2, columns=2, canopy_z=lambda x, y: 1.6+.03*x-.02*y)
         for leaf in place_canopy_leaves(skel, fp, seed=42):
-            center = leaf.attach + _qrot(leaf.frame, np.array([0., 0., .11]))
+            center = leaf.attach + rotate_xyzw(leaf.frame, np.array([0., 0., .11]))
             offset = center[2] - (1.6 + .03*center[0] - .02*center[1])
             self.assertGreater(offset, .03)
             self.assertLess(offset, .19)
@@ -405,6 +407,20 @@ class PergolaTest(unittest.TestCase):
         with patch('sys.argv', ['grow_tree.py', '--preset', 'apple', '--hillside']), \
                 patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
             parse_args()
+
+    def test_cordate_twig_leaves_stay_near_horizontal(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_leaves, rotate_xyzw
+        from treesim.pergola import generate as pergola
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           leaf_shape='cordate', leaves_per_terminal=6,
+                           min_order_for_leaves=2)
+        leaves = place_leaves(pergola(rows=2, columns=2, seed=42), fp, seed=42)
+        self.assertGreater(len(leaves), 20)
+        normals = np.array([rotate_xyzw(p.frame, np.array([0., 1., 0.])) for p in leaves])
+        headings = np.array([rotate_xyzw(p.frame, np.array([0., 0., 1.])) for p in leaves])
+        self.assertGreater(float(np.mean(np.abs(normals[:, 2]))), 0.82)
+        self.assertLess(float(np.mean(np.abs(headings[:, 2]))), 0.45)
 
     def test_cordate_leaf_is_broader_near_base_than_elliptic(self):
         from treesim.foliage import leaf_blade_arrays, leaf_blade_style

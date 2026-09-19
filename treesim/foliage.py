@@ -47,7 +47,7 @@ def _rodrigues(v, axis, ang):
 # uses more segments, a basal sinus and a serrated margin (artistic proxy).
 LEAF_BLADE_STYLE = {
     "elliptic": dict(fold=0.55, curl=0.30, droop=0.35, nseg=5),
-    "cordate": dict(fold=0.82, curl=0.16, droop=0.52, nseg=10),
+    "cordate": dict(fold=0.72, curl=0.12, droop=0.28, nseg=10),
 }
 
 
@@ -140,6 +140,57 @@ def _frame_quat(H, L, U):
     return _frame_to_quat(H / np.linalg.norm(H), L / np.linalg.norm(L), U / np.linalg.norm(U))
 
 
+def rotate_xyzw(q, v) -> np.ndarray:
+    """Rotate vec3 ``v`` by xyzw quaternion ``q``."""
+    u = np.array([q[0], q[1], q[2]], dtype=float)
+    w = float(q[3])
+    v = np.asarray(v, dtype=float)
+    return v + 2.0 * np.cross(u, np.cross(u, v) + w * v)
+
+
+def _horizontal_blade_frame(plane_n, prefer_heading, rng, tilt_rad=0.18,
+                            yaw_rad=0.70, roll_rad=0.22) -> np.ndarray:
+    """Blade in the canopy plane: +Z along the midrib, +Y ~ plane normal.
+
+    Yaw/tilt/roll stay small so the roof looks a bit messy without standing
+    the leaves on edge. This is an artistic kiwi-canopy proxy, not a scan.
+    """
+    n = np.asarray(plane_n, dtype=float)
+    n = n / np.linalg.norm(n)
+    h = np.asarray(prefer_heading, dtype=float)
+    h = h - n * np.dot(h, n)
+    if np.linalg.norm(h) < 1e-8:
+        h = np.cross(n, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(h) < 1e-8:
+            h = np.cross(n, np.array([0.0, 1.0, 0.0]))
+    h = h / np.linalg.norm(h)
+    h = _rodrigues(h, n, float(rng.uniform(-yaw_rad, yaw_rad)))
+    tilt_axis = np.cross(n, h)
+    tn = np.linalg.norm(tilt_axis)
+    if tn > 1e-8:
+        h = _rodrigues(h, tilt_axis / tn, float(rng.uniform(-tilt_rad, tilt_rad)))
+        h = h / np.linalg.norm(h)
+    left = np.cross(n, h)
+    left = left / np.linalg.norm(left)
+    left = _rodrigues(left, h, float(rng.uniform(-roll_rad, roll_rad)))
+    up = np.cross(h, left)
+    up = up / np.linalg.norm(up)
+    if np.dot(up, n) < 0.0:
+        left, up = -left, -up
+    return _frame_quat(h, left, up)
+
+
+def _cane_samples(canes, step_m: float = 0.45):
+    pts, dirs, owners = [], [], []
+    for i, cane in enumerate(canes):
+        n = max(2, int(np.ceil(cane.length / step_m)))
+        for t in np.linspace(0.0, 1.0, n):
+            pts.append(cane.start + t * (cane.end - cane.start))
+            dirs.append(cane.direction)
+            owners.append(i)
+    return np.asarray(pts), np.asarray(dirs), np.asarray(owners, dtype=int)
+
+
 def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
                         seed: int = 0) -> list[LeafPlacement]:
     spacing = fp.canopy_spacing_m
@@ -163,21 +214,27 @@ def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
     points = np.array([p for s in canes for p in (s.start, s.end)])
     plane = np.linalg.lstsq(np.column_stack((points[:, :2], np.ones(len(points)))),
                            points[:, 2], rcond=None)[0]
-    z = xy @ plane[:2] + plane[2] + rng.uniform(.04, .18, len(xy))
+    # Sit just above the wires; random lift stays inside the existing roof band.
+    z = xy @ plane[:2] + plane[2] + rng.uniform(.04, .14, len(xy))
+    plane_n = np.array([-plane[0], -plane[1], 1.0])
+    samples, sample_dirs, owners = _cane_samples(canes)
     from scipy.spatial import cKDTree
-    parents = cKDTree(np.array([s.midpoint[:2] for s in canes])).query(xy)[1]
+    _, near = cKDTree(samples[:, :2]).query(xy)
     out = []
-    for center, parent in zip(np.column_stack((xy, z)), parents):
-        yaw = rng.uniform(0., 2 * np.pi)
-        tilt = rng.uniform(-.2, .2)
-        heading = np.array([np.cos(yaw) * np.cos(tilt),
-                            np.sin(yaw) * np.cos(tilt), np.sin(tilt)])
-        left = np.array([-np.sin(yaw), np.cos(yaw), 0.])
-        left = _rodrigues(left, heading, rng.uniform(-.25, .25))
+    half = 0.5 * fp.leaf_length
+    for i, center_xy in enumerate(xy):
+        cane = canes[int(owners[near[i]])]
+        bar = samples[near[i]]
+        toward = np.array([center_xy[0] - bar[0], center_xy[1] - bar[1], 0.0])
+        if np.linalg.norm(toward) < 1e-4:
+            toward = np.cross(plane_n, sample_dirs[near[i]])
+        frame = _horizontal_blade_frame(plane_n, toward, rng)
+        heading = rotate_xyzw(frame, np.array([0.0, 0.0, 1.0]))
+        center = np.array([center_xy[0], center_xy[1], z[i]])
         out.append(LeafPlacement(
-            parent_seg=canes[int(parent)].index,
-            attach=center - .5 * fp.leaf_length * heading,
-            frame=_frame_quat(heading, left, np.cross(heading, left)),
+            parent_seg=cane.index,
+            attach=center - half * heading,
+            frame=frame,
             length=fp.leaf_length, width=fp.leaf_width,
         ))
     return out
@@ -190,6 +247,7 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
     out: list[LeafPlacement] = []
     max_order = max(s.order for s in skel.segments)
     thr = min(fp.min_order_for_leaves, max_order)
+    kiwi = getattr(fp, "leaf_shape", "elliptic") == "cordate"
 
     for seg in skel.segments:
         if seg.order < thr:
@@ -198,11 +256,31 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
         if not (seg.is_terminal or seg.order >= thr):
             continue
         H = seg.direction
-        # build a frame off the twig direction
+        nleaf = fp.leaves_per_terminal if seg.is_terminal else max(1, fp.leaves_per_terminal // 2)
+        if kiwi:
+            plane_n = np.array([0.0, 0.0, 1.0])
+            along = np.array([H[0], H[1], 0.0])
+            if np.linalg.norm(along) < 0.05:
+                along = np.array([1.0, 0.0, 0.0])
+            side = np.cross(plane_n, along)
+            side = side / np.linalg.norm(side)
+            for k in range(nleaf):
+                t = (k + 1) / (nleaf + 1)
+                lateral = side if (k % 2 == 0) else -side
+                base = seg.start + H * (t * seg.length) + lateral * rng.uniform(0.012, 0.038)
+                tilt = 0.28 if not seg.supported else 0.16
+                out.append(LeafPlacement(
+                    parent_seg=seg.index,
+                    attach=base.copy(),
+                    frame=_horizontal_blade_frame(plane_n, lateral, rng,
+                                                  tilt_rad=tilt, yaw_rad=0.85),
+                    length=fp.leaf_length * max(0.4, 1.0 + rng.normal(0, 0.15)),
+                    width=fp.leaf_width * max(0.4, 1.0 + rng.normal(0, 0.15)),
+                ))
+            continue
         ref = np.array([0.0, 0.0, 1.0]) if abs(H[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
         L = np.cross(ref, H); L /= np.linalg.norm(L)
         U = np.cross(H, L)
-        nleaf = fp.leaves_per_terminal if seg.is_terminal else max(1, fp.leaves_per_terminal // 2)
         for k in range(nleaf):
             # distribute along the twig and around it (phyllotaxis ~137.5 deg)
             t = (k + 1) / (nleaf + 1)

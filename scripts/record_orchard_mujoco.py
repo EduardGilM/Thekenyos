@@ -205,8 +205,11 @@ def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0
     look_ahead = 5.8 - 1.8 * s
     x_look = 0.32 * float(spacing)
     eye = np.array([x, y, _aisle_eye_z(floor, x, y)])
-    target = np.array([x_look, y + look_ahead,
-                       _aisle_eye_z(floor, x_look, y + look_ahead) - 0.06])
+    tgt_y = y + look_ahead
+    canopy_t = float(floor.canopy_z(x_look, tgt_y))
+    target_z = min(canopy_t - 0.22, eye[2] + 0.22)
+    target_z = max(target_z, eye[2] - 0.04)
+    target = np.array([x_look, tgt_y, target_z])
     return mjv_from_eye_target(eye, target)
 
 
