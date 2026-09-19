@@ -102,7 +102,7 @@ def run(args):
         jaw_cap_Nm=1.0,
         force_limit_scope='per_jaw_and_nonpad_group',
         optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
-        cti_version=2 if args.cti else 0,
+        cti_version=3 if args.cti else 0,
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     resumed=resume_history(args.output,args.resume_from,config) if args.resume_from else None
     if resumed and resumed['latest']['elapsed_seconds']>=args.train_seconds:
@@ -164,6 +164,10 @@ def run(args):
             log.log({f'evaluation/{k}':v for k,v in baseline.items()},step=0)
         collector=HarvestCollector(runtime,stall_seconds=args.stall_seconds,
             max_episode_seconds=args.max_episode_seconds,guidance=1.,role=role,teacher_policy=teacher)
+        cti_queue=None
+        if cti is not None:
+            from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
+            cti_queue=PPODecisionQueue(worlds=args.cti_worlds)
         if role=='student':
             from PIL import Image
             rgb=runtime.pixels()[0,:3].permute(1,2,0).cpu().numpy()
@@ -185,11 +189,11 @@ def run(args):
         best=evaluation_score(best_eval)
         best_checkpoint=str(args.output/f"checkpoint-{best_eval['update']:06d}.pt")
         best_result={k:v for k,v in best_eval.items() if k!='update'}
-        phase='cti-v2' if args.cti else role
+        phase='cti-v3' if args.cti else role
         if restored:
             torch.set_rng_state(restored['rng']['torch'])
             torch.cuda.set_rng_state_all(restored['rng']['cuda'])
-            event=dict(event='resume',phase=phase,version=2 if args.cti else 0,at=time.time(),
+            event=dict(event='resume',phase=phase,version=3 if args.cti else 0,at=time.time(),
                 elapsed_seconds=offset,update=index,source_checkpoint=str(args.resume_from),
                 episodes_reset=True,remaining_seconds=args.train_seconds-offset)
             with (args.output/'phase-events.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')
@@ -198,7 +202,8 @@ def run(args):
         paused=False
         while time.monotonic()-started < args.train_seconds:
             tick=time.monotonic()
-            rows,bootstrap,episodes=collector.collect(policy,gait,args.steps)
+            rows,bootstrap,episodes=collector.collect(policy,gait,args.steps,
+                cti_queue=cti_queue,policy_version=index)
             teacher_coef=args.teacher_distill_weight if teacher is not None else 0.
             metrics=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=collector.progress.gamma,
                            teacher_coef=teacher_coef)
@@ -212,28 +217,31 @@ def run(args):
             # Counterfactual targets use a separate loss after factual PPO.
             # Target 10% amortized wall time; one in-progress round may overshoot.
             elapsed=time.monotonic()-started
-            if (cti is not None and time.monotonic()-last_cti>=args.cti_every_seconds
+            if (cti is not None and len(cti_queue) and time.monotonic()-last_cti>=args.cti_every_seconds
                     and cti_seconds <= .10*max(elapsed,1.)
                     and (cti_rounds==0 or args.train_seconds-elapsed>60)):
                 cti_started=time.monotonic()
                 with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-                    examples,cti_metrics=cti.run(policy)
+                    batch=cti_queue.pop(index)
+                    examples,cti_metrics=(cti.run(policy,batch) if batch is not None else
+                        ([],dict(version=3,source='ppo',queue_empty=True)))
                     records=cti_metrics.pop('branch_records',[])
                     if records:
                         with (args.output/'cti-branches.jsonl').open('a') as f:
                             f.write(json.dumps(dict(update=index+1,elapsed_seconds=time.monotonic()-started,
-                                                   version=2,records=records))+'\n')
+                                                   version=3,records=records))+'\n')
                     # A short factual sequence checks drift outside the selected branches.
                     cti_metrics.update(update_cti(policy,optimizer,examples,coef=args.cti_coef,
                                                   anchor_rows=rows[:4]))
                 cti_seconds+=time.monotonic()-cti_started
                 cti_transitions+=cti_metrics.get('transitions',0)
                 cti_selected+=cti_metrics.get('selected_worlds',0)
-                cti_rounds+=1;last_cti=time.monotonic()
+                cti_rounds+=int(batch is not None);last_cti=time.monotonic()
                 metrics.update({f'cti/{k}':v for k,v in cti_metrics.items()})
                 del examples
             if cti is not None:
-                metrics.update({'cti/version':2,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
+                metrics.update({f'cti/{k}':v for k,v in cti_queue.metrics().items()})
+                metrics.update({'cti/version':3,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
                                 'cti/total_selected_worlds':cti_selected,'cti/rounds':cti_rounds})
             metrics['optimizer_epochs']=epochs
             metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
@@ -339,7 +347,7 @@ def main():
     p.add_argument('--teacher-distill-weight',type=float,default=1.)
     p.add_argument('--cti',action='store_true',help='Selective counterfactual action repair for teacher training')
     p.add_argument('--cti-worlds',type=int,default=16)
-    p.add_argument('--cti-every-seconds',type=float,default=120.)
+    p.add_argument('--cti-every-seconds',type=float,default=0.)
     p.add_argument('--cti-coef',type=float,default=.1)
     p.add_argument('--wandb-mode',choices=('disabled','online','offline'),default='online')
     a=p.parse_args()
@@ -349,7 +357,7 @@ def main():
             0<a.arm_speed_rad_s<=2.5 and 1<=a.teacher_min_eval_episodes<=256 and
             (a.role!='teacher' or a.teacher_min_eval_episodes<=a.eval_worlds) and
             0<=a.teacher_distill_weight<=10 and 1<=a.cti_worlds<=64 and
-            a.cti_every_seconds>=1 and 0<a.cti_coef<=1 and (not a.cti or a.role=='teacher')):
+            a.cti_every_seconds>=0 and 0<a.cti_coef<=1 and (not a.cti or (a.role=='teacher' and a.cti_worlds<=a.worlds))):
         p.error('Invalid training size or duration')
     if a.resume_from and (a.initialize_from or (a.wandb_mode=='online' and not a.wandb_run_id)):
         p.error('Resume requires an explicit W&B run ID online and cannot initialize fresh weights')

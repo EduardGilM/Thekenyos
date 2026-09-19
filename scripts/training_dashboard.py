@@ -70,7 +70,7 @@ events=tail_jsonl('phase-events.jsonl',200)
 branches=tail_jsonl('cti-branches.jsonl',3)
 phase=active.get('phase')
 if not phase and events: phase=events[-1].get('phase')
-if not phase and rows: phase='cti-v2' if rows[-1].get('cti/version') == 2 else 'ppo'
+if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3) else 'ppo'
 status=active.get('status') if active.get('status') in ('paused','running') else None
 print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
@@ -138,8 +138,8 @@ def _phase(snapshot):
                 return event['phase']
     rows = snapshot.get('rows')
     if isinstance(rows, list) and rows and isinstance(rows[-1], dict):
-        if rows[-1].get('cti/version') == 2:
-            return 'cti-v2'
+        if rows[-1].get('cti/version') in (2,3):
+            return 'cti-v'+str(rows[-1]['cti/version'])
     return 'ppo'
 
 
@@ -205,7 +205,7 @@ class Dashboard:
                                                    else (rows[-1].get('elapsed_seconds') if rows else None)))
                 if failure:
                     self.state['error'] = failure.get('error') if isinstance(failure, dict) else str(failure)
-                if remote.get('active_status') == 'paused' and remote.get('process_alive') and not failure:
+                if remote.get('active_status') == 'paused' and not failure and not report:
                     self.state['status'] = 'paused'
             if checkpoint and not self.no_render and checkpoint != self.last_render_checkpoint and \
                     time.monotonic() - self.last_render_at >= RENDER_INTERVAL:

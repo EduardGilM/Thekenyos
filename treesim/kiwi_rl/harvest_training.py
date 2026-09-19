@@ -99,16 +99,22 @@ class HarvestCollector:
         self.memory = torch.zeros(runtime.worlds,64,device=runtime.device_name)
         self.teacher_memory = (torch.zeros_like(self.memory) if teacher_policy is not None else None)
         self.reset_mask = torch.ones(runtime.worlds,dtype=torch.bool,device=runtime.device_name)
+        self.episode_ids = torch.zeros(runtime.worlds,dtype=torch.long,device=runtime.device_name)
         self.progress = EpisodeProgress(signals(runtime),
             stall_steps=round(stall_seconds/runtime.control_dt),
             max_steps=round(max_episode_seconds/runtime.control_dt), guidance=guidance)
         self.tick = 0
         self.rgbd = None
 
-    def collect(self, policy, gait, steps, *, deterministic=False, store=True):
+    def collect(self, policy, gait, steps, *, deterministic=False, store=True,
+                cti_queue=None, policy_version=0):
         from .ppo import tanh_logprob
         rt = self.runtime
+        if cti_queue is not None and steps != cti_queue.segment_steps:
+            raise ValueError(f'CTI factual segments require exactly {cti_queue.segment_steps} PPO steps')
         rows, episodes = [], []
+        cti_batch = None
+        cti_active = torch.ones(rt.worlds,dtype=torch.bool,device=rt.device_name)
         from .fast_teacher import privileged_observation
         with torch.no_grad():
             initial_memory = self.memory.clone()
@@ -118,6 +124,8 @@ class HarvestCollector:
                 if self.role == 'student' and (self.rgbd is None or self.tick % 2 == 0):
                     self.rgbd = rt.pixels().clone()
                 self.memory *= (~self.reset_mask)[:,None]
+                if cti_queue is not None and cti_batch is None:
+                    cti_batch = cti_queue.begin(rt,self,policy,policy_version)
                 if self.role == 'teacher':
                     policy_input = privileged
                 else:
@@ -130,11 +138,21 @@ class HarvestCollector:
                     teacher_mean,_,_,self.teacher_memory = self.teacher_policy(
                         privileged,obs,self.teacher_memory)
                     teacher_action = teacher_mean.tanh()
-                rt.set_gait_actions(gait(obs))
-                _,_,done,_ = rt.step(raw.tanh())
+                gait_action = gait(obs)
+                rt.set_gait_actions(gait_action)
+                next_obs,_,done,_ = rt.step(raw.tanh())
                 now = signals(rt)
                 reward,terminated,truncated,stalled = self.progress.step(now,done)
                 ending = terminated | truncated
+                if cti_batch is not None:
+                    cti_queue.record(cti_batch,obs=obs,raw_action=raw,action=raw.tanh(),
+                        noise=(raw-mean)/logstd.exp(),
+                        gait_action=gait_action,next_obs=next_obs,runtime=rt,signals=now,
+                        reward=reward,task_reward=self.progress.task_reward,
+                        shaping_reward=self.progress.shaping_reward,terminated=terminated,
+                        truncated=truncated,stalled=stalled,episode_ids=self.episode_ids,
+                        active_mask=cti_active)
+                    cti_active[ending] = False
                 timeout_value = torch.zeros_like(value)
                 if bool(truncated.any()):
                     final_obs = rt.observe()
@@ -169,6 +187,7 @@ class HarvestCollector:
                             detached=bool(detached),physical_failure=bool(failure),stalled=bool(stall),
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
                     rt.reset(ending)
+                    self.episode_ids[ending] += 1
                     self.memory[ending] = 0
                     if self.teacher_memory is not None:
                         self.teacher_memory[ending] = 0
@@ -184,6 +203,8 @@ class HarvestCollector:
             final_input = (privileged_observation(rt,final_obs) if self.role == 'teacher'
                            else (rt.pixels() if self.tick % 2 == 0 else self.rgbd))
             _,_,bootstrap,_ = policy(final_input,final_obs,self.memory)
+        if cti_batch is not None:
+            cti_queue.finish(cti_batch)
         if rows:
             rows[0]['initial_memory'] = initial_memory
         rt.check()

@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from .counterfactual import capture, restore
+from .counterfactual import capture, restore, restore_worlds
 from .harvest_training import EpisodeProgress, signals, HARVEST_GAMMA
 from .fast_teacher import privileged_observation
 
@@ -43,6 +43,7 @@ def _choose_winners(outcomes, root, *, minimum_gain=.1, approach_gain=.015):
             'insufficient_score_gain': result['score'] - baseline['score'] < minimum_gain,
             'nonfinite_score': ~torch.isfinite(result['score']) | ~torch.isfinite(baseline['score']),
             'unmatched_numerical_baseline': baseline['numerical'],
+            'factual_replay_mismatch': baseline.get('replay_invalid', torch.zeros_like(result['success'])),
             'inactive': ~result['triggered'],
         }
         eligible = torch.ones_like(result['success'])
@@ -95,13 +96,13 @@ class SelectiveCTI:
                 (previous_holding & ~now['holding']) |
                 (progress.stale >= max(1, progress.stall_steps - 20)))
 
-    def _act(self, policy, memory, *, explore=False, intervention=None):
+    def _act(self, policy, memory, *, explore=False, intervention=None, noise=None):
         rt = self.runtime
         obs = rt.observe().detach().clone()
         priv = privileged_observation(rt, obs).detach().clone()
         memory_in = memory.detach().clone()
         mean, logstd, _, next_memory = policy(priv, obs, memory)
-        raw = mean + logstd.exp() * torch.randn_like(mean) if explore else mean
+        raw = mean + logstd.exp() * (torch.randn_like(mean) if noise is None else noise) if explore else mean
         action = raw.tanh()
         if intervention is not None:
             kind, alternative = intervention
@@ -125,16 +126,27 @@ class SelectiveCTI:
                    'basket_distance', 'hold_fraction', 'steps')}
         result.update({key: torch.zeros_like(trigger) for key in
                        ('holding', 'detached', 'success', 'failed', 'stalled', 'truncated',
-                        'horizon', 'numerical', 'lost_fruit', 'retained')})
+                        'horizon', 'numerical', 'lost_fruit', 'retained', 'replay_invalid')})
         result['triggered'] = trigger.clone()
+        result['replay_qpos_error'] = torch.zeros_like(initial['distance'])
+        result['replay_qvel_error'] = torch.zeros_like(initial['distance'])
+        result['replay_steps'] = torch.zeros_like(initial['distance'])
         window, segment = deque(maxlen=self.retention_steps), []
         transitions = 0
         for tick in range(self.horizon_steps):
             if not bool(active.any()):
                 break
+            factual = getattr(self, 'factual', ())
+            # Match the PPO noise during its recorded prefix; changing the jaw
+            # must not also silently resample all six arm commands.
+            noise = {'noise': factual[tick]['noise']} if tick < len(factual) else {}
             obs, priv, memory_in, action, memory = self._act(
                 policy, memory, explore=True,
-                intervention=intervention if tick < self.perturb_steps else None)
+                intervention=intervention if tick < self.perturb_steps else None, **noise)
+            recorded = factual[tick] if intervention is None and tick < len(factual) else None
+            if recorded is not None:
+                action = recorded['action'].clone()
+                rt.set_gait_actions(recorded['gait'])
             if tick < self.perturb_steps:
                 segment.append(dict(privileged=priv.clone(), r84=obs.clone(),
                                     memory=memory_in.clone(), action=action.detach().clone(),
@@ -151,7 +163,22 @@ class SelectiveCTI:
                 result['numerical_error'] = str(error)
                 break
             now = signals(rt)
+            if recorded is not None:
+                import warp as wp
+                qerr=(wp.to_torch(rt.data.qpos)-recorded['qpos']).abs().amax(dim=1)
+                verr=(wp.to_torch(rt.data.qvel)-recorded['qvel']).abs().amax(dim=1)
+                terr=(wp.to_torch(rt.control.targets)-recorded['targets']).abs().amax(dim=1)
+                checked=active & recorded['active']
+                mismatch=(qerr>1e-4) | (verr>1e-3) | (terr>1e-6)
+                for key in ('holding','detached','success','failed'):
+                    mismatch |= now[key] != recorded['signals'][key]
+                result['replay_invalid'] |= checked & mismatch
+                result['replay_qpos_error'] = torch.maximum(result['replay_qpos_error'], torch.where(checked,qerr,0.))
+                result['replay_qvel_error'] = torch.maximum(result['replay_qvel_error'], torch.where(checked,verr,0.))
+                result['replay_steps'] += checked.float()
             _, terminated, truncated, stalled = progress.step(now, done)
+            if recorded is not None:
+                result['replay_invalid'] |= active & ((terminated | truncated) != recorded['ending'])
             result['task_return'][active] += HARVEST_GAMMA ** tick * progress.task_reward[active]
             result['lost_fruit'] |= active & ~now['success'] & now['detached'] & ~now['holding']
             window.append({key: value.clone() for key, value in now.items()})
@@ -209,7 +236,7 @@ class SelectiveCTI:
         initial = signals(self.runtime)
         outcomes, transitions = [], 0
         for candidate in candidates:
-            outcome, _, count = self._branch(policy, root, trigger_mask, candidate)
+            outcome, _, count = self._branch(policy, root, trigger_mask, candidate, 71009+self.rounds)
             outcomes.append(outcome)
             transitions += count
         provisional, reasons = _choose_winners(outcomes, initial, minimum_gain=self.minimum_gain,
@@ -253,79 +280,50 @@ class SelectiveCTI:
             row['selected_candidate'] = int(confirmed[row['world']].item())
         return examples, dict(transitions=transitions, candidates=len(candidates),
                               selected_worlds=int((confirmed >= 0).sum().item()),
+                              replay_rejected_worlds=int(outcomes[0].get('replay_invalid', torch.zeros_like(trigger_mask)).sum().item()),
+                              replay_checked_steps=int(outcomes[0].get('replay_steps', torch.zeros_like(trigger_mask)).sum().item()),
                               provisional_worlds=int((provisional >= 0).sum().item()),
                               branch_records=records)
 
-    def run(self, policy):
-        """Search before a pilot event and restore its endpoint, including RNG."""
+    def run(self, policy, batch):
+        """Search only a recorded PPO batch using its frozen collection policy."""
+        if batch is None:
+            raise ValueError('CTI requires an actual PPO decision batch')
         rt = self.runtime
         started = time.perf_counter()
         self.rounds += 1
-        device = rt.device_name
-        devices = [torch.device(device).index or 0] if torch.device(device).type == 'cuda' else []
-        metrics = dict(version=2, transitions=0, candidate_branches=0, selected_worlds=0,
-                       pilot_events=0, seconds=0., branch_records=[])
-        examples = []
+        devices = [torch.device(rt.device_name).index or 0] if torch.device(rt.device_name).type == 'cuda' else []
         with torch.random.fork_rng(devices=devices), torch.no_grad():
-            rt.reset()
-            memory = torch.zeros(rt.worlds, 64, device=device)
-            progress = EpisodeProgress(signals(rt),
-                stall_steps=max(1, round(self.stall_seconds / rt.control_dt)),
-                max_steps=max(1, round(self.max_episode_seconds / rt.control_dt)), guidance=0.)
-            task_return = torch.zeros(rt.worlds, device=device)
-            roots = deque(maxlen=6)
-            previous_holding = signals(rt)['holding']
-            endpoint = None
+            frozen = deepcopy(policy).eval()
+            frozen.load_state_dict(batch.policy_state)
+            app = restore_worlds(rt, batch.snapshot)
+            # The queue captures pre-action GRU/progress from the factual collector.
+            app['progress'].guidance = 0.
+            root = capture(rt, application_state=dict(memory=app['memory'],
+                progress=app['progress'], task_return=torch.zeros(rt.worlds,device=rt.device_name)))
+            self.factual = batch.factual
+            trigger = torch.ones(rt.worlds,dtype=torch.bool,device=rt.device_name)
+            generator = torch.Generator(device=rt.device_name).manual_seed(1307+self.rounds)
+            alternative = (torch.randn((rt.worlds,7),generator=generator,device=rt.device_name)*.5).clamp(-1,1)
+            candidates = [None, ('close_jaw',None), ('hold_arm_close_jaw',None),
+                          ('coherent_alternative',alternative)]
             try:
-                for tick in range(progress.max_steps):
-                    if tick % self.root_spacing == 0:
-                        roots.append((tick, self._snapshot(memory, progress, task_return)))
-                    _, _, _, action, memory = self._act(policy, memory, explore=True)
-                    _, _, done, _ = rt.step(action)
-                    rt.check()
-                    now = signals(rt)
-                    _, terminated, truncated, _ = progress.step(now, done)
-                    task_return += HARVEST_GAMMA ** (progress.age - 1).float() * progress.task_reward
-                    metrics['transitions'] += rt.worlds
-                    event = self._event_mask(rt, progress, now, previous_holding)
-                    exploratory = self.rounds % 4 == 0 and tick == 40 and not bool(event.any())
-                    if exploratory:
-                        event[(self.rounds // 4 - 1) % rt.worlds] = True
-                    if bool(event.any()) and roots:
-                        endpoint = self._snapshot(memory, progress, task_return)
-                        root_tick, root = roots[0]
-                        metrics.update(pilot_events=int(event.sum().item()), pilot_ticks=tick + 1,
-                                       root_count=len(roots), root_lookback_ticks=tick + 1 - root_tick,
-                                       exploratory_roots=int(exploratory))
-                        generator = torch.Generator(device=device).manual_seed(1307 + self.rounds)
-                        alternative = (torch.randn((rt.worlds, 7), generator=generator, device=device) * .5).clamp(-1., 1.)
-                        candidates = [None, ('close_jaw', None), ('hold_arm_close_jaw', None),
-                                      ('coherent_alternative', alternative)]
-                        examples, branch = self._episode(policy, root, event,
-                            root.application_state['task_return'], candidates)
-                        metrics['branch_records'] = branch.pop('branch_records')
-                        metrics.update({f'branch_{key}': value for key, value in branch.items()})
-                        metrics['candidate_branches'] = len(candidates)
-                        metrics['selected_worlds'] = branch['selected_worlds']
-                        break
-                    ending = terminated | truncated
-                    if bool(ending.any()):
-                        rt.reset(ending.to(dtype=torch.uint8))
-                        progress.reset(ending, signals(rt))
-                        memory[ending] = 0
-                        task_return[ending] = 0
-                        roots.clear()
-                    previous_holding = now['holding'].clone()
-                if endpoint is None:
-                    endpoint = self._snapshot(memory, progress, task_return)
+                examples, branch = self._episode(frozen,root,trigger,None,candidates)
             finally:
-                if endpoint is not None:
-                    self._restore_app(endpoint)
-        metrics['seconds'] = time.perf_counter() - started
-        metrics['transitions'] += int(metrics.get('branch_transitions', 0))
-        metrics['successful_repairs'] = (int(torch.stack([
-            row['success_mask'] & row['mask'] for row in examples]).any(dim=0).sum().item()) if examples else 0)
-        metrics['partial_repairs'] = metrics['selected_worlds'] - metrics['successful_repairs']
+                self.factual = ()
+            for record in branch['branch_records']:
+                record.update(source='ppo',source_policy_version=batch.policy_version,
+                              **batch.sources[record['world']])
+        selected=branch['selected_worlds']
+        successful=(int(torch.stack([r['success_mask'] & r['mask'] for r in examples]).any(dim=0).sum()) if examples else 0)
+        metrics=dict(version=3,source='ppo',seconds=time.perf_counter()-started,
+                     transitions=branch['transitions'],candidate_branches=len(candidates),
+                     pilot_events=rt.worlds,roots_searched=rt.worlds,
+                     alternatives_compared=rt.worlds*(len(candidates)-1),
+                     selected_worlds=selected,successful_repairs=successful,
+                     partial_repairs=selected-successful,source_policy_version=batch.policy_version,
+                     branch_records=branch.pop('branch_records'))
+        metrics.update({f'branch_{key}':value for key,value in branch.items()})
         return examples, metrics
 
 

@@ -214,7 +214,11 @@ CTI requires replay acceptance and meaningful physical outcome comparisons, not
 a successful full harvest first. Early action-branch experiments may develop
 executor competence; keep their data separate from factual PPO. Process-local
 snapshots alone are not evidence of CTI policy training or benefit.
-CTI v2 uses retained short-horizon progress as an explicit curriculum heuristic.
+CTI v3 roots must come from the actual PPO collector, with factual action replay
+and source episode/timestep/policy identifiers. Never substitute independently
+generated pilot trajectories. Reject targets when cross-runtime factual replay
+fails; preserve bounded queueing and frozen collection-policy continuations.
+Retained short-horizon progress remains an explicit curriculum heuristic.
 Keep matched-noise confirmation, real physical rejection, factual PPO separation,
 and policy plus optimizer rollback on auxiliary KL violations. Run
 `tests.test_selective_cti` with `CTI_GPU_TEST=1` and the scene/gait variables for

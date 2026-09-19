@@ -43,6 +43,18 @@ class SelectiveChoiceTest(unittest.TestCase):
             self.assertEqual(winner.tolist(), [-1])
             self.assertTrue(reasons[1][0])
 
+    def test_invalid_factual_replay_rejects_even_a_successful_candidate(self):
+        baseline=outcome(replay_invalid=True)
+        candidate=outcome(holding=True,score=20.,success=True)
+        winner,reasons=_choose_winners([baseline,candidate],state())
+        self.assertEqual(winner.item(),-1)
+        self.assertIn('factual_replay_mismatch',reasons[1][0])
+
+    def test_run_requires_actual_ppo_batch(self):
+        rt=SimpleNamespace(worlds=1,control_dt=.02)
+        with self.assertRaisesRegex(ValueError,'actual PPO'):
+            SelectiveCTI(rt,None).run(None,None)
+
     def test_failure_or_lost_fruit_cannot_win(self):
         for changes in ({'failed': True}, {'numerical': True}, {'lost_fruit': True}):
             candidate = outcome(holding=True, score=5., **changes)
@@ -291,6 +303,19 @@ class CTISegmentTest(unittest.TestCase):
         self.assertTrue(metrics['branch_records'][1]['numerical'])
         json.dumps(metrics['branch_records'], allow_nan=False)
 
+    def test_recorded_noise_preserves_unmodified_arm_actions(self):
+        rt=SimpleNamespace(worlds=1,device_name='cpu',control_dt=.02,
+            observe=lambda:torch.zeros(1,84),set_gait_actions=lambda a:None)
+        cti=SelectiveCTI(rt,lambda obs:torch.zeros(1,12))
+        policy=_TinyTeacher()
+        noise=torch.full((1,7),.23)
+        with patch('treesim.kiwi_rl.selective_cti.privileged_observation',return_value=torch.zeros(1,32)):
+            baseline=cti._act(policy,torch.zeros(1,64),explore=True,noise=noise)[3]
+            candidate=cti._act(policy,torch.zeros(1,64),explore=True,noise=noise,
+                intervention=('close_jaw',None))[3]
+        torch.testing.assert_close(candidate[:,:6],baseline[:,:6],atol=0,rtol=0)
+        self.assertEqual(candidate[0,6].item(),1.)
+
     def test_skill_actions_close_jaw_and_hold_targets(self):
         rt = SimpleNamespace(worlds=1, device_name='cpu', control_dt=.02,
                              observe=lambda: torch.zeros(1, 84), set_gait_actions=lambda a: None)
@@ -320,17 +345,32 @@ class CTIGpuIntegrationTest(unittest.TestCase):
         wp.init()
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
+            source = FastRuntime(os.environ['FAST_SCENE'], worlds=4, device='cuda:0')
             runtime = FastRuntime(os.environ['FAST_SCENE'], worlds=2, device='cuda:0')
             gait = load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
             policy = build_privileged_policy().cuda().eval()
-            cti = SelectiveCTI(runtime, gait, stall_seconds=.1, max_episode_seconds=.2,
-                               perturb_steps=2, horizon_seconds=.12, retention_seconds=.04)
-            examples, metrics = cti.run(policy)
-            self.assertGreater(metrics['transitions'], 0)
-            json.dumps(metrics['branch_records'], allow_nan=False)
+            from treesim.kiwi_rl.harvest_training import HarvestCollector
+            from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
+            collector=HarvestCollector(source,role='teacher')
+            queue=PPODecisionQueue(worlds=2)
+            collector.collect(policy,gait,64,cti_queue=queue,policy_version=7)
+            batch=queue.pop(7)
+            cti=SelectiveCTI(runtime,gait)
+            examples,metrics=cti.run(policy,batch)
+            self.assertEqual(metrics['source'],'ppo')
+            self.assertEqual(metrics['source_policy_version'],7)
+            self.assertGreater(metrics['branch_replay_checked_steps'],0)
+            self.assertEqual(metrics['branch_replay_rejected_worlds'],0)
+            self.assertTrue(all(r['source']=='ppo' for r in metrics['branch_records']))
+            json.dumps(metrics['branch_records'],allow_nan=False)
             if examples:
-                result = update_cti(policy, torch.optim.Adam(policy.parameters(), lr=1e-4), examples)
+                result=update_cti(policy,torch.optim.Adam(policy.parameters(),lr=1e-4),examples)
                 self.assertTrue(result['updated'] or result['rejected_update'])
+            # A fabricated reference trajectory must never produce teaching targets.
+            batch.factual[0]['qpos'] += 1.
+            bad_examples,bad_metrics=cti.run(policy,batch)
+            self.assertEqual(bad_examples,[])
+            self.assertEqual(bad_metrics['branch_replay_rejected_worlds'],2)
 
 
 if __name__ == '__main__':

@@ -242,3 +242,162 @@ def restore(runtime, snapshot, *, rng_generators=None):
     _rng_restore(snapshot.rng_state)
     _restore_generators(snapshot.rng_state['generators'], rng_generators)
     return deepcopy(snapshot.application_state)
+
+
+@dataclass
+class WorldSnapshot:
+    """Selected teacher-world continuation state, held on the source device.
+
+    Global packed collision caches are not portable between world counts. They
+    are rebuilt by MJWarp forward() before the next physics step consumes them.
+    This is a continuation point, not a copy of raw contact diagnostics.
+    """
+    arrays: dict
+    application_state: object
+    source_world_ids: tuple
+    physics_profile: tuple
+    model_sha256: str
+
+
+# Explicit runtime ownership: never identify a world axis just because its
+# length happens to equal runtime.worlds (e.g. seven worlds and seven joints).
+_CONTROL_WORLD = ('targets', 'commands', 'previous', 'jaw_cap', 'effort', 'observations')
+_CONTROL_SHARED = ('qids', 'dofs', 'actuators', 'obs_order', 'home', 'kp', 'kd', 'limits', 'knee_table')
+_TASK_WORLD = ('_hand_hits', '_basket_hits', '_ground_hits', '_finger_hits', '_jaw_hits',
+               'detached', 'hand_contact', 'basket_contact', 'ground_contact',
+               'bilateral_contact', 'stable_grasp', 'ever_grasped', 'grasp_time',
+               'stem_force', 'hand_load', 'finger_load', 'jaw_load', 'palm_load',
+               'damage_proxy', 'settle_time', 'success', 'failed')
+_TASK_SHARED = ('fruit_geom', 'fruit_body', 'equality_index', 'kind')
+_RUNTIME_WORLD = ('_previous_distance', '_distance', '_reward', '_terminated',
+                  '_flags', '_all_mask', '_actions')
+_RUNTIME_SHARED = ('_initial_targets', '_initial_qpos', '_initial_qvel',
+                   '_action_lower', '_action_upper')
+
+
+def _world_tensor(array):
+    import torch
+    if isinstance(array, torch.Tensor):
+        return array
+    if isinstance(array, np.ndarray):
+        return torch.from_numpy(array)
+    import warp as wp
+    return wp.to_torch(array)
+
+
+def _world_arrays(runtime):
+    """Use MJWarp's declared symbolic dimensions, not runtime shape guesses."""
+    from dataclasses import fields, is_dataclass
+    arrays = {}
+    data = runtime.data
+    if not is_dataclass(data) or not is_dataclass(data.efc):
+        raise ValueError('World transfer requires MJWarp declared Data/Constraint schemas')
+    for prefix, owner in (('data', data), ('data.efc', data.efc)):
+        declared = {field.name: field for field in fields(owner)}
+        for name, value in vars(owner).items():
+            if _array(value) and name not in declared:
+                raise ValueError(f'Undeclared backend array: {prefix}.{name}')
+        for name, field in declared.items():
+            dimensions = getattr(field.type, 'shape', ())
+            if dimensions and dimensions[0] == 'nworld':
+                value = getattr(owner, name)
+                tensor = _world_tensor(value)
+                if tensor.numel() == 0:
+                    continue  # An explicitly disabled backend feature.
+                if tensor.shape[0] != runtime.worlds:
+                    raise ValueError(f'Invalid declared world axis: {prefix}.{name}')
+                arrays[f'{prefix}.{name}'] = tensor
+    for prefix, owner, selected, shared, aliases in (
+        ('control', runtime.control, _CONTROL_WORLD, _CONTROL_SHARED, ()),
+        ('task', runtime.task, _TASK_WORLD, _TASK_SHARED, ('eq_active', '_efc_type', '_efc_id')),
+        ('runtime', runtime, _RUNTIME_WORLD, _RUNTIME_SHARED, ())):
+        known = set(selected + shared + aliases)
+        for name, value in vars(owner).items():
+            if _array(value) and name not in known:
+                raise ValueError(f'Unclassified runtime array: {prefix}.{name}')
+        for name in selected:
+            tensor = _world_tensor(getattr(owner, name))
+            if not tensor.ndim or tensor.shape[0] != runtime.worlds:
+                raise ValueError(f'Invalid declared world axis: {prefix}.{name}')
+            arrays[f'{prefix}.{name}'] = tensor
+    return arrays
+
+
+def _world_profile(runtime):
+    if getattr(runtime, 'rig', None) is not None:
+        raise ValueError('World transfer currently supports the camera-free teacher runtime')
+    if not runtime.manifest.get('model_sha256'):
+        raise ValueError('World transfer requires a model hash')
+    # Sleeping can consume previous global contact caches before rebuilding them.
+    # The approved fast teacher profile does not enable it.
+    import mujoco
+    if runtime.model.opt.enableflags & int(mujoco.mjtEnableBit.mjENBL_SLEEP):
+        raise ValueError('World transfer does not support sleeping bodies')
+    if not runtime.gpu_model.opt.run_collision_detection:
+        raise ValueError('World transfer requires collision-cache regeneration')
+    profile = tuple((name, value) for name, value in _physics_profile(runtime) if name != 'worlds')
+    capacities = tuple((f'data.{name}', str(getattr(runtime.data, name))) for name in
+                       ('njmax', 'nvmax', 'nvmax_pad', 'njmax_pad', 'njmax_nnz'))
+    return profile + capacities
+
+
+def _world_ids(world_ids, worlds):
+    import torch
+    ids = torch.as_tensor(world_ids)
+    if ids.ndim != 1 or ids.dtype not in (torch.int32, torch.int64) or not 1 <= ids.numel() <= 64:
+        raise ValueError('World ids must be a nonempty integer vector with at most 64 entries')
+    values = tuple(ids.cpu().tolist())
+    if len(set(values)) != len(values) or any(index < 0 or index >= worlds for index in values):
+        raise ValueError('World ids must be unique and within the runtime')
+    return values
+
+
+def capture_worlds(runtime, world_ids, *, application_state=None):
+    """Gather <=64 selected worlds without copying the factual batch to host.
+
+    Call only between complete FastRuntime control intervals on the shared
+    Torch/Warp stream. application_state must already be sliced to these worlds
+    by its owner (GRU memory, EpisodeProgress, reset mask, collector tick).
+    No global RNG is read or modified; branch noise belongs to the caller.
+    Static model/controller parameters must remain unchanged during collection.
+    """
+    import torch
+    ids = _world_ids(world_ids, runtime.worlds)
+    profile = _world_profile(runtime)
+    arrays = _world_arrays(runtime)
+    indices = torch.tensor(ids, dtype=torch.long, device=next(iter(arrays.values())).device)
+    return WorldSnapshot(
+        arrays={path: value.index_select(0, indices).detach().clone() for path, value in arrays.items()},
+        application_state=deepcopy(application_state), source_world_ids=ids,
+        physics_profile=profile, model_sha256=runtime.manifest['model_sha256'])
+
+
+def restore_worlds(runtime, snapshot, world_ids=None):
+    """Restore selected worlds in place; preserve every other target world.
+
+    Model, solver, controller, and buffer layouts must match. Raw global contact
+    diagnostics are stale until the next step; do not call task.record() before
+    that step. Current task signals, observations and warm starts are restored.
+    """
+    import torch
+    if not isinstance(snapshot, WorldSnapshot):
+        raise TypeError('snapshot must be a WorldSnapshot')
+    ids = _world_ids(range(len(snapshot.source_world_ids)) if world_ids is None else world_ids,
+                     runtime.worlds)
+    if len(ids) != len(snapshot.source_world_ids):
+        raise ValueError('Source and destination world counts must match')
+    if snapshot.model_sha256 != runtime.manifest.get('model_sha256') or snapshot.physics_profile != _world_profile(runtime):
+        raise ValueError('World transfer model or physics profile mismatch')
+    arrays = _world_arrays(runtime)
+    if arrays.keys() != snapshot.arrays.keys():
+        raise ValueError('World transfer buffer schema mismatch')
+    # Validate everything before the first write, including per-world capacity.
+    for path, target in arrays.items():
+        saved = snapshot.arrays[path]
+        if target.shape[1:] != saved.shape[1:] or target.dtype != saved.dtype or target.device != saved.device:
+            raise ValueError(f'World transfer buffer layout mismatch: {path}')
+    indices = torch.tensor(ids, dtype=torch.long, device=next(iter(arrays.values())).device)
+    with torch.no_grad():
+        for path, target in arrays.items():
+            target.index_copy_(0, indices, snapshot.arrays[path])
+    return deepcopy(snapshot.application_state)

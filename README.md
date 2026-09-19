@@ -842,12 +842,24 @@ Student distillation uses a frozen learned teacher on states visited by the
 sensor-only student. It requires successful evaluation evidence for the exact
 teacher checkpoint; an unverified scripted controller is not a substitute.
 
-Selective counterfactual training v2 is available for the privileged teacher with
-`--cti --cti-worlds 16 --cti-every-seconds 120`. A separate runtime rewinds
-before trouble or stalled progress and tests coherent two-second interventions:
-policy actions, jaw closure, holding arm targets while closing, and a seeded
-alternative arm command with closure. Four-second branches use matched snapshots
-and noise, followed by a second matched-noise confirmation for potential winners.
+Selective counterfactual training v3 uses actual PPO rollout decision points.
+`--cti --cti-worlds 16 --cti-every-seconds 0` continuously collects one selected
+16-world root batch per PPO buffer, mixing nearest-fruit and rotating worlds.
+The bounded queue retains up to eight batches and expires old policy versions.
+Each root records source world/episode/tick, controller and physics state, GRU
+memory, task progress, RNG metadata, frozen policy weights and actual actions.
+Contact/failure/stall events in the recorded segment raise its search priority.
+No independent CTI pilot episodes are generated.
+
+A separate small runtime executes the selected PPO states. It replays recorded
+actions and gait commands for the factual prefix (64 steps / 1.28 seconds in the
+main profile), then continues with that root's frozen policy. Every factual
+step checks joint state, controller targets, physical task flags and episode
+termination; mismatched roots cannot teach. Coherent two-second alternatives
+include jaw closure, holding arm targets with closure, and seeded arm alternatives.
+Four-second searches use matched continuation noise and a second confirmation.
+Source identities, replay failures, queue counts and applied updates are logged.
+This is bounded sampling from each PPO buffer, not branching every transition.
 
 Scores combine discounted task reward with a bounded progress estimate retained
 through the final half-second. Partial improvements require continuation after
