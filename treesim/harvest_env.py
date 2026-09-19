@@ -23,9 +23,15 @@ from .basket import CENTER, SIZE
 class SpotHarvestEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array'], 'render_fps': 50}
 
-    def __init__(self, relic, *, task=None, render_mode=None, physics_hz=1000, device=None):
+    def __init__(self, relic, *, task=None, render_mode=None, physics_hz=1000, device=None,
+                 fixed_base=True, fruit_count=1, foliage_density=None):
         self.relic = Path(relic).resolve()
         self.device = device
+        if not isinstance(fixed_base, bool) or not isinstance(fruit_count, int) or not 1 <= fruit_count <= 128:
+            raise ValueError('Use a boolean fixed_base and an integer fruit_count in [1, 128]')
+        if foliage_density is not None and (not np.isfinite(foliage_density) or not 0 <= foliage_density <= 1):
+            raise ValueError('Foliage density must be finite in [0, 1]')
+        self.fixed_base, self.fruit_count, self.foliage_density = fixed_base, fruit_count, foliage_density
         if render_mode not in (None, 'rgb_array'):
             raise ValueError('Use render_mode=None or rgb_array')
         if physics_hz not in (1000, 2000):
@@ -51,10 +57,12 @@ class SpotHarvestEnv(gym.Env):
         if self.device is not None: cfg.device = self.device
         cfg.seed = int(self.np_random.integers(0, 2**30))
         cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
-        cfg.fruit.enabled, cfg.fruit.max_count = True, 1
+        cfg.fruit.enabled, cfg.fruit.max_count = True, self.fruit_count
         cfg.fruit.colors = ((.39,.27,.12),(.48,.34,.17))
+        if self.foliage_density is not None:
+            cfg.foliage.set_density(self.foliage_density)
         cfg.robot.enabled, cfg.robot.kind = True, 'spot'
-        cfg.robot.fixed_base, cfg.robot.basket = True, True
+        cfg.robot.fixed_base, cfg.robot.basket = self.fixed_base, True
         cfg.robot.payload_mass, cfg.robot.yaw = 0., 0.
         cfg.robot.relic_path = str(self.relic)
         skeleton = generate(cfg.lsystem, seed=cfg.seed)

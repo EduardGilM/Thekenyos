@@ -152,6 +152,35 @@ IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
 than identifying fruit contact from `contact.flex` alone. Numerical overflow,
 nonfinite states and element inversion must remain latched across substeps.
 
+The isolated full-scene exporter has explicit options for floating-base and
+multi-fruit scene generation. Legacy fixed-base defaults remain unchanged.
+Preserve the initial-body-frame comparison and asset hashes. New assembled
+scenes use the supported native/GPU midphase path; do not change the legacy CPU
+contact-adapter bypass as part of this separate path.
+
+RELIC R84 values in `spot.py` are raw velocities and absolute arm targets:
+do not add Isaac-style scaling or subtract arm-home targets without evidence.
+MuJoCo spatial velocity is angular-first and COM-referenced differently from
+Newton. The native/device control tests compare the body COM velocity against
+an independent Jacobian and verify that optimizer changes reach motor commands.
+
+MJWarp `get_depth` produces clipped display-normalized values, not metric
+measurements. Use the raw planar-depth buffer and explicit range validity.
+Render-buffer camera indices refer to the active-camera list, not global model
+camera IDs. Preserve the non-square, inactive-camera, metric-plane and immutable
+frame tests. GPU scene/vision bring-up does not clear physical training gates.
+
+## Hackathon precision (user direction)
+
+Prioritize a working training demonstration over material calibration or fine
+mesh resolution. The current isolated profile uses coarse deformable fruit,
+static canopy supports, a one-segment collidable stalk, and a 2 mm sampled
+hand/fruit overlap screen. Keep the
+strict contact result visible, and keep failures for nonfinite state, overflow,
+inversion, retention and release. Do not reopen finer calibration as a blocker
+for this approved profile. Verify learned progress with the teacher disabled;
+one-fruit reaching is not a complete harvest or generalization result.
+
 ## Continuous visual leaf roof
 
 The reproducible local capture and generation details are in README.md under

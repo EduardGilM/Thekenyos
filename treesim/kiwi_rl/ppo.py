@@ -78,6 +78,116 @@ def compute_gae(rewards, values, terminated, truncated, gamma, lam,
     return adv.astype(np.float32)
 
 
+def compute_gae_torch(rewards, values, next_values, terminated, truncated, gamma, lam):
+    torch = _torch()
+    if rewards.ndim != 2 or not rewards.shape[0] or any(x.shape != rewards.shape for x in (values, next_values, terminated, truncated)):
+        raise ValueError('GAE tensors must share nonempty [time, env] shape')
+    if terminated.dtype != torch.bool or truncated.dtype != torch.bool:
+        raise ValueError('GAE boundary masks must be boolean')
+    if not np.isfinite([gamma, lam]).all() or not 0 <= gamma <= 1 or not 0 <= lam <= 1:
+        raise ValueError('Invalid GAE discounts')
+    if not all(torch.isfinite(x).all() for x in (rewards, values, next_values)):
+        raise ValueError('Nonfinite GAE tensors')
+    with torch.no_grad():
+        advantages = torch.zeros_like(values)
+        carry = torch.zeros_like(values[0])
+        for t in reversed(range(len(rewards))):
+            delta = rewards[t] + gamma * (~terminated[t]) * next_values[t] - values[t]
+            carry = delta + gamma * lam * (~(terminated[t] | truncated[t])) * carry
+            advantages[t] = carry
+    return advantages
+
+
+def sample_hybrid(output, head, *, deterministic=False, generator=None):
+    torch = _torch()
+    if head not in ('n', 'm'):
+        raise ValueError('Unknown policy head')
+    mu, logstd, logits = output[f'{head}_mu'], output[f'{head}_logstd'].clamp(-5., 1.), output[f'{head}_events']
+    if mu.ndim != 2 or logits.ndim != 2 or mu.shape[0] != logits.shape[0] or not len(mu):
+        raise ValueError('Expected nonempty batched hybrid outputs')
+    if not all(torch.isfinite(value).all() for value in (mu, logstd, logits)):
+        raise RuntimeError('Nonfinite policy distribution')
+    with torch.no_grad():
+        raw = mu if deterministic else mu + logstd.exp() * torch.randn(mu.shape, dtype=mu.dtype, device=mu.device, generator=generator)
+        event = logits.argmax(-1) if deterministic else torch.multinomial(logits.softmax(-1), 1, generator=generator).squeeze(-1)
+        logp = tanh_logprob(raw, mu, logstd) + logits.log_softmax(-1).gather(-1, event[:, None]).squeeze(-1)
+    return dict(action=raw.detach().tanh(), raw=raw.detach(), event=event.detach(), log_prob=logp.detach())
+
+
+def unroll_policy(model, observations, initial_memory, resets, burn_in=0):
+    from contextlib import nullcontext
+    torch = _torch()
+    mutable = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d, torch.nn.SyncBatchNorm,
+               torch.nn.Dropout, torch.nn.Dropout2d, torch.nn.Dropout3d)
+    if any(isinstance(module, mutable) and module.training for module in model.modules()):
+        raise ValueError('Use evaluation mode for batch-normalized or dropout policies during recurrent PPO')
+    if resets.ndim != 2 or resets.dtype != torch.bool or not 0 <= burn_in < len(resets):
+        raise ValueError('Invalid recurrent sequence boundaries')
+    if not observations or any(value.shape[:2] != resets.shape for value in observations.values()):
+        raise ValueError('Observations must share [time, env] sequence dimensions')
+    memory = initial_memory.detach()
+    outputs = []
+    for t in range(len(resets)):
+        with torch.no_grad() if t < burn_in else nullcontext():
+            output = model(**{name: value[t] for name, value in observations.items()}, memory=memory, reset=resets[t])
+        memory = output['memory']
+        if t >= burn_in:
+            outputs.append(output)
+    return {name: torch.stack([output[name] for output in outputs]) for name in outputs[0]}
+
+
+def hybrid_actor_loss(output, head, samples, *, clip=.2, entropy_coef=.001):
+    torch = _torch()
+    mask = samples['active']
+    if mask.dtype != torch.bool or mask.shape != output[f'{head}_mu'].shape[:-1]:
+        raise ValueError('Actor mask must match sequence dimensions')
+    if not np.isfinite([clip, entropy_coef]).all() or not 0 < clip < 1 or entropy_coef < 0:
+        raise ValueError('Invalid PPO coefficients')
+    count = int(mask.sum().item())
+    if not count:
+        return dict(loss=output[f'{head}_mu'].new_zeros(()), samples=0, kl=0., entropy=0.)
+    mu, logits = output[f'{head}_mu'][mask], output[f'{head}_events'][mask]
+    std = output[f'{head}_logstd']
+    std = std[:, None, :].expand(*mask.shape, std.shape[-1])[mask]
+    raw, event = samples['raw'][mask].detach(), samples['event'][mask].detach()
+    new_logp = tanh_logprob(raw, mu, std) + logits.log_softmax(-1).gather(-1, event[:, None]).squeeze(-1)
+    logratio = new_logp - samples['log_prob'][mask].detach()
+    ratio = logratio.exp()
+    advantage = samples['advantage'][mask].detach()
+    if count > 1:
+        advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
+    surrogate = torch.minimum(ratio * advantage, ratio.clamp(1. - clip, 1. + clip) * advantage)
+    draw = mu + std.exp() * torch.randn_like(mu)
+    entropy = -tanh_logprob(draw, mu, std) - (logits.softmax(-1) * logits.log_softmax(-1)).sum(-1)
+    loss = -surrogate.mean() - entropy_coef * entropy.mean()
+    if not torch.isfinite(loss):
+        raise RuntimeError('Nonfinite recurrent PPO loss')
+    return dict(loss=loss, samples=count, kl=float(((ratio - 1.) - logratio).mean().detach().clamp_min(0.)),
+                entropy=float(entropy.mean().detach()))
+
+
+def recurrent_actor_step(model, optimizer, batch, *, clip=.2, entropy_coef=.001, target_kl=.02, max_grad_norm=.5):
+    torch = _torch()
+    if batch.get('kind') != 'factual_on_policy':
+        raise ValueError('Counterfactual or off-policy branches are not PPO samples')
+    if not np.isfinite([target_kl, max_grad_norm]).all() or target_kl <= 0 or max_grad_norm <= 0:
+        raise ValueError('Invalid optimizer safeguards')
+    burn_in = batch.get('burn_in', 0)
+    optimizer.zero_grad(set_to_none=True)
+    outputs = unroll_policy(model, batch['observations'], batch['initial_memory'], batch['resets'], burn_in)
+    losses = {head: hybrid_actor_loss(outputs, head, {key: value[burn_in:] for key, value in batch[head].items()},
+                                    clip=clip, entropy_coef=entropy_coef) for head in ('n', 'm')}
+    kl = max(loss['kl'] for loss in losses.values())
+    samples = sum(loss['samples'] for loss in losses.values())
+    if not samples or kl > target_kl:
+        return dict(updated=False, samples=samples, kl=kl, reason='no active actions' if not samples else 'KL limit')
+    loss = losses['n']['loss'] + losses['m']['loss']
+    loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, error_if_nonfinite=True)
+    optimizer.step()
+    return dict(updated=True, samples=samples, kl=kl, loss=float(loss.detach()), grad_norm=float(norm))
+
+
 class SequenceBuffer:
     """One rollout: per-step dicts + reset flags for recurrent PPO."""
 
