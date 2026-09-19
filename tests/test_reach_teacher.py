@@ -3,6 +3,7 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
+    easy_airdrop_world_m,
 )
 
 
@@ -35,6 +36,27 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertAlmostEqual(float(target[0]), 1.0 + float(CENTER[0]))
         self.assertAlmostEqual(float(target[2]), 3.0 + local_top + 0.12)
         self.assertGreater(float(target[2] - xpos[2]), local_top)
+
+    def test_easy_airdrop_uses_basket_xy_not_tcp_xy(self):
+        from treesim.basket import CENTER, SIZE
+        from treesim.kiwi_rl.curriculum import EASY_PRESET
+        from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m
+        xpos = np.array([1.0, 2.0, 3.0])
+        xmat = np.eye(3)
+        tcp = hover_tcp_world_m(xpos, xmat, 0.12) + np.array([0.047, -0.02, 0.0])
+        pos = easy_airdrop_world_m(tcp, xpos, xmat)
+        np.testing.assert_allclose(pos[:2], (xpos + xmat @ CENTER)[:2])
+        self.assertAlmostEqual(float(pos[2]), float(tcp[2] - EASY_PRESET['drop_offset_m']))
+        self.assertGreater(float(pos[2] - xpos[2]), float(CENTER[2] + SIZE[2]))
+        xmat90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        tcp90 = xpos + xmat90 @ hover_tcp_local_m(0.12)
+        pos90 = easy_airdrop_world_m(tcp90, xpos, xmat90)
+        np.testing.assert_allclose(pos90[:2], (xpos + xmat90 @ CENTER)[:2])
+        self.assertAlmostEqual(float(pos90[2]), float(tcp90[2] - 0.10))
+        with self.assertRaises(ValueError):
+            easy_airdrop_world_m(tcp, xpos, xmat, drop_offset_m=0.0)
+        with self.assertRaises(ValueError):
+            easy_airdrop_world_m(np.array([np.nan, 0.0, 1.0]), xpos, xmat)
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

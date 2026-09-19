@@ -32,6 +32,35 @@ def hover_tcp_world_m(chassis_xpos, chassis_xmat, clearance_m=0.12):
     return xpos + xmat @ hover_tcp_local_m(clearance_m)
 
 
+def easy_airdrop_world_m(tcp_world, chassis_xpos, chassis_xmat, *,
+                         drop_offset_m=None, basket_center=None):
+    """World spawn of a free fruit over the basket opening, below TCP Z.
+
+    XY is the chassis-frame basket centre in the world, not the TCP. That
+    removes hover-IK horizontal error so gravity can start the drop through
+    the opening. Z is the actual TCP height minus ``drop_offset_m``, which
+    stays above the liner; this is not a weld and not a liner teleport.
+    """
+    from treesim.basket import CENTER
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    tcp = np.asarray(tcp_world, dtype=np.float64).reshape(3)
+    xpos = np.asarray(chassis_xpos, dtype=np.float64).reshape(3)
+    xmat = np.asarray(chassis_xmat, dtype=np.float64).reshape(3, 3)
+    drop = float(EASY_PRESET['drop_offset_m'] if drop_offset_m is None else drop_offset_m)
+    if not np.isfinite(drop) or drop <= 0:
+        raise ValueError('easy drop_offset_m must be finite and positive')
+    if not np.isfinite(tcp).all() or not np.isfinite(xpos).all() or not np.isfinite(xmat).all():
+        raise ValueError('airdrop pose inputs must be finite')
+    center = np.asarray(CENTER if basket_center is None else basket_center, dtype=np.float64).reshape(3)
+    if not np.isfinite(center).all():
+        raise ValueError('basket centre must be finite')
+    basket_world = xpos + xmat @ center
+    pos = np.array([basket_world[0], basket_world[1], tcp[2] - drop], dtype=np.float64)
+    if not np.isfinite(pos).all():
+        raise ValueError('airdrop world position must be finite')
+    return pos
+
+
 def solve_tcp_hover(model, qpos, site_id, target_world, joint_qposadr, joint_dofadr,
                     q_init, ranges, *, damping=.05, max_step=.1, steps=80, tol_m=0.02):
     """CPU DLS that moves one site toward a world point. Fruit stays a free body."""

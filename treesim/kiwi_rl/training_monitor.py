@@ -658,11 +658,10 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         data.qpos[int(controller.qids[18])] = closed
         controller.targets[18] = closed
         if easy:
-            from treesim.kiwi_rl.curriculum import EASY_PRESET
-            drop = float(EASY_PRESET['drop_offset_m'])
-            if not np.isfinite(drop) or drop <= 0:
-                raise ValueError('easy drop_offset_m must be finite and positive')
-            data.qpos[qposadr + 2] = float(data.qpos[qposadr + 2]) - drop
+            from treesim.kiwi_rl.reach_teacher import easy_airdrop_world_m
+            pos = easy_airdrop_world_m(
+                tcp, data.xpos[controller.chassis], data.xmat[controller.chassis])
+            data.qpos[qposadr:qposadr + 3] = pos
             data.qvel[dofadr:dofadr + 6] = 0.0
             opened = float(model.jnt_range[jaw_joint, 1])
             if not np.isfinite(opened):

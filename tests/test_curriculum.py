@@ -131,6 +131,12 @@ class CurriculumTest(unittest.TestCase):
         drop_z = float(local[2] - EASY_PRESET['drop_offset_m'])
         self.assertGreater(drop_z, float(CENTER[2] + SIZE[2]))
         self.assertEqual(EASY_PRESET['drop_offset_m'], 0.10)
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('def _easy_airdrop', src)
+        self.assertIn('basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center', src)
+        self.assertIn('qpos[world, qadr + 0] = basket_world[0]', src)
+        self.assertIn('qpos[world, qadr + 2] = qpos[world, qadr + 2] - drop_m', src)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(0.0)
         with self.assertRaises(ValueError):

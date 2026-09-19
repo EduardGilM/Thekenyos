@@ -310,13 +310,21 @@ def _easy_airdrop(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int
                   qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
                   targets: wp.array2d(dtype=float), fruit_qposadr: wp.array(dtype=int),
                   fruit_dofadr: wp.array(dtype=int), jaw_qposadr: int, jaw_open: float,
-                  drop_m: float):
-    """Open the jaw and lower a free fruit below TCP. Not a liner teleport."""
+                  drop_m: float, xpos: wp.array2d(dtype=wp.vec3),
+                  xmat: wp.array2d(dtype=wp.mat33), chassis: int, basket_center: wp.vec3):
+    """Open the jaw and drop a free fruit over basket XY, below TCP Z.
+
+    Not a liner teleport: Z stays TCP_z minus drop_offset; only XY is the
+    chassis-frame basket centre so hover IK error does not spawn beside the rim.
+    """
     world = wp.tid()
     if mask[world] == 0 or reset_mode[world] != 1:
         return
     qadr = fruit_qposadr[0]
     dadr = fruit_dofadr[0]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    qpos[world, qadr + 0] = basket_world[0]
+    qpos[world, qadr + 1] = basket_world[1]
     qpos[world, qadr + 2] = qpos[world, qadr + 2] - drop_m
     for i in range(6):
         qvel[world, dadr + i] = 0.0
@@ -746,7 +754,8 @@ class FastRuntime:
                 wp.launch(_easy_airdrop, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
                     self._fruit_qposadrs, self._fruit_dofadrs, self._jaw_qposadr, self._jaw_open,
-                    float(EASY_PRESET['drop_offset_m'])], device=self.device)
+                    float(EASY_PRESET['drop_offset_m']), self.data.xpos, self.data.xmat,
+                    self.chassis, self._basket_center], device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
             self._measure_reward(mask_wp)
