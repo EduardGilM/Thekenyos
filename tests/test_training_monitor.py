@@ -1,3 +1,4 @@
+import inspect
 import json
 import tempfile
 import unittest
@@ -110,6 +111,15 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertEqual(payload['curriculum_index'], 1)
             self.assertIn('001 · deposit_pixels', html)
             self.assertNotIn('sin etapa', html)
+            html_easy = render_dashboard_html(dict(
+                schema='training-monitor/v1', training_ready=False, run=str(run), rows=1,
+                latest=dict(step=1, harvest_successes=0, basket_distance_mean_m=0.41,
+                            ground_contact_worlds=12, reward_mean=-0.2),
+                series={}, generated_at='now', videos=[],
+                curriculum_label='001 · deposit_pixels'))
+            self.assertIn('basket_distance_mean_m', html_easy)
+            self.assertIn('ground_contact_worlds', html_easy)
+            self.assertIn('harvest_successes', html_easy)
 
     def test_curriculum_preview_matches_stage_reset(self):
         deposit = curriculum_preview_from_checkpoint({
@@ -130,7 +140,16 @@ class TrainingMonitorTests(unittest.TestCase):
         hanging = curriculum_preview_from_checkpoint({'meta': {}, 'config': {}})
         self.assertEqual(hanging['reset_mode'], 0)
         self.assertFalse(hanging['allow_locomotion'])
-        from treesim.kiwi_rl.training_monitor import _n3_command
+        self.assertFalse(hanging['easy'])
+        easy = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'deposit_pixels'},
+            'config': {'easy': True},
+        })
+        self.assertTrue(easy['easy'])
+        self.assertEqual(easy['reset_mode'], 1)
+        from treesim.kiwi_rl.training_monitor import apply_native_easy_hover, apply_native_skill_reset, _n3_command
+        self.assertIn('hover_tcp_world_m', inspect.getsource(apply_native_easy_hover))
+        self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
         np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
 

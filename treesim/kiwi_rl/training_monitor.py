@@ -24,14 +24,18 @@ SCHEMA = 'training-monitor/v1'
 VIDEO_SCHEMA = 'progress-video/v1'
 PRIORITY_CHARTS = (
     'loss', 'kl', 'entropy', 'entropy_per_dim', 'entropy_gaussian', 'logstd_mean', 'grad_norm', 'reward_mean', 'reward_std',
+    'harvest_successes', 'evaluation/success_rate', 'evaluation/harvest_fraction',
+    'basket_distance_mean_m', 'basket_distance_closest_m', 'basket_xy_mean_m',
+    'evaluation/mean_closest_basket_distance_m', 'evaluation/final_basket_distance_m',
+    'ground_contact_worlds', 'fallen_worlds', 'failed_worlds',
     'distance_mean_closest_m', 'distance_final_m', 'distance_closest_m',
     'evaluation/mean_closest_distance_m', 'evaluation/final_distance_m',
     'evaluation/closest_distance_m', 'evaluation/harvest_successes',
-    'evaluation/success_rate', 'evaluation/harvest_fraction', 'evaluation/detach_rate', 'evaluation/grasp_rate',
-    'harvest_successes', 'grasp_events', 'detach_events', 'harvested_mean',
+    'evaluation/detach_rate', 'evaluation/grasp_rate',
+    'grasp_events', 'detach_events', 'harvested_mean',
     'recovered_worlds', 'overflow_worlds', 'evaluation/recovered_worlds', 'evaluation/overflow_worlds',
     'evaluation/terminal_transitions', 'terminal_transitions',
-    'curriculum_index', 'guidance_weight',
+    'curriculum_index', 'guidance_weight', 'teacher_mix', 'shaping_coef',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
 )
@@ -190,7 +194,12 @@ def latest_progress_video(videos: Sequence[Mapping[str, Any]]) -> dict[str, Any]
 
 def _video_figure(video: Mapping[str, Any]) -> str:
     distance = video.get('min_tcp_fruit_distance_m')
+    basket = video.get('min_basket_distance_m')
     extra = f" · min TCP-fruta {float(distance):.3f} m" if is_chartable(distance) else ''
+    if is_chartable(basket):
+        extra += f' · min cesta {float(basket):.3f} m'
+    if video.get('easy'):
+        extra += ' · easy-hover'
     return (
         f'<figure><figcaption>update {html.escape(str(video.get("step")))}'
         f'{html.escape(extra)} · {html.escape(str(video.get("label", "")))}</figcaption>'
@@ -201,17 +210,23 @@ def _video_figure(video: Mapping[str, Any]) -> str:
 _DASHBOARD_SCRIPT = r'''
 <script>
 const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_dim", "reward_mean",
-  "evaluation/success_rate", "evaluation/harvest_fraction", "evaluation/mean_closest_distance_m",
+  "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
+  "basket_distance_mean_m", "evaluation/mean_closest_basket_distance_m",
+  "ground_contact_worlds", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
   "torch_peak_allocated_gb"];
 const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
+  "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
+  "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
+  "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
+  "ground_contact_worlds", "fallen_worlds", "failed_worlds",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
   "evaluation/mean_closest_distance_m", "evaluation/final_distance_m",
   "evaluation/closest_distance_m", "evaluation/harvest_successes",
-  "evaluation/success_rate", "evaluation/harvest_fraction", "evaluation/detach_rate", "evaluation/grasp_rate",
-  "harvest_successes", "grasp_events", "detach_events", "harvested_mean",
+  "evaluation/detach_rate", "evaluation/grasp_rate",
+  "grasp_events", "detach_events", "harvested_mean",
   "evaluation/terminal_transitions", "terminal_transitions",
-  "curriculum_index", "guidance_weight",
+  "curriculum_index", "guidance_weight", "teacher_mix", "shaping_coef",
   "training_transitions_per_second", "rollout_transitions_per_second",
   "torch_peak_allocated_gb", "rollout_seconds", "update_seconds"];
 const SKIP = new Set(["step", "update", "minibatches", "optimized_transitions", "transitions"]);
@@ -281,8 +296,12 @@ function renderCharts(series) {
   return names.map(name => svgChart(series[name].steps, series[name].values, name)).join("\n");
 }
 function renderVideo(video) {
-  const extra = chartable(video.min_tcp_fruit_distance_m)
+  let extra = chartable(video.min_tcp_fruit_distance_m)
     ? ` · min TCP-fruta ${Number(video.min_tcp_fruit_distance_m).toFixed(3)} m` : "";
+  if (chartable(video.min_basket_distance_m)) {
+    extra += ` · min cesta ${Number(video.min_basket_distance_m).toFixed(3)} m`;
+  }
+  if (video.easy) extra += " · easy-hover";
   return `<figure><figcaption>update ${esc(video.step)}${esc(extra)} · ${esc(video.label || "")}</figcaption>
     <video controls preload="metadata" src="${esc(video.url)}"></video></figure>`;
 }
@@ -324,8 +343,9 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
             f'<div class="card"><div class="k">curriculum_stage</div>'
             f'<div class="v">{stage}</div></div>')
     for key in ('step', 'curriculum_index', 'loss', 'entropy', 'entropy_per_dim', 'reward_mean',
-                'evaluation/success_rate', 'evaluation/harvest_fraction',
-                'evaluation/mean_closest_distance_m',
+                'harvest_successes', 'evaluation/success_rate', 'evaluation/harvest_fraction',
+                'basket_distance_mean_m', 'evaluation/mean_closest_basket_distance_m',
+                'ground_contact_worlds', 'evaluation/mean_closest_distance_m',
                 'evaluation/harvest_successes', 'training_transitions_per_second',
                 'torch_peak_allocated_gb'):
         if key in latest and is_chartable(latest[key]):
@@ -536,11 +556,12 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     meta = dict(info.get('meta') or {})
     config = dict(info.get('config') or {})
     name = meta.get('curriculum_stage') or config.get('stage')
+    easy = bool(config.get('easy', False))
     if not name:
-        return dict(stage=None, reset_mode=0, allow_locomotion=False)
+        return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy)
     stage = stage_named(str(name))
     return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
-                allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal)
+                allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -572,8 +593,37 @@ def _arm_limits(model, controller):
     return lower, upper
 
 
+def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
+                            clearance_m: float | None = None) -> float:
+    """Move the native arm to the privileged basket-hover TCP. Fruit is not written."""
+    import mujoco
+    import numpy as np
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    from treesim.kiwi_rl.reach_teacher import hover_tcp_world_m, solve_tcp_hover
+    if clearance_m is None:
+        clearance_m = float(EASY_PRESET['hover_clearance_m'])
+    mujoco.mj_kinematics(model, data)
+    qids = np.asarray(controller.qids[12:18], dtype=int)
+    dofs = np.asarray(controller.dofs[12:18], dtype=int)
+    joints = np.asarray(controller.joints[12:18], dtype=int)
+    ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+    limited = np.asarray(model.jnt_limited[joints], dtype=bool)
+    ranges[limited] = np.asarray(model.jnt_range[joints], dtype=np.float64)[limited]
+    q_init = np.asarray(data.qpos[qids], dtype=np.float64)
+    target = hover_tcp_world_m(
+        data.xpos[controller.chassis], data.xmat[controller.chassis], clearance_m)
+    arm_q, err = solve_tcp_hover(
+        model, data.qpos, int(tcp_site), target, qids, dofs, q_init, ranges)
+    if not np.isfinite(arm_q).all() or not np.isfinite(err):
+        return float('inf')
+    data.qpos[qids] = arm_q
+    controller.targets[12:18] = arm_q
+    mujoco.mj_forward(model, data)
+    return float(err)
+
+
 def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
-                             approach_offset_m: float = 1.0) -> None:
+                             approach_offset_m: float = 1.0, easy: bool = False) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
     import numpy as np
@@ -591,6 +641,8 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         raise ValueError('Fruit body must keep an independent free joint')
     qposadr = int(model.jnt_qposadr[joint])
     dofadr = int(model.jnt_dofadr[joint])
+    if easy and reset_mode == 1:
+        apply_native_easy_hover(model, data, controller, tcp_site)
     if reset_mode == 1:
         tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
         data.qpos[qposadr:qposadr + 3] = tcp
@@ -691,6 +743,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     from treesim.kiwi_rl.control import NativeSpotControl, load_gait_artifact
     from treesim.kiwi_rl.spot_cameras import require_mujoco_gripper_cameras
     from treesim.kiwi_rl.ppo import load_checkpoint
+    from treesim.basket import CENTER
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
     from train_fast import build_policy
 
@@ -702,9 +755,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     policy = build_policy().to('cpu').eval()
     load_checkpoint(info['checkpoint'], {'student': policy}, expected_meta={'camera': camera})
     preview = curriculum_preview_from_checkpoint(info)
-    apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'])
+    apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'],
+                             easy=bool(preview.get('easy')))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
+    basket_local = np.asarray(CENTER, dtype=np.float64)
     lower, upper = _arm_limits(model, controller)
     max_delta = 2.5 * control_dt
     substeps = round(control_dt / float(model.opt.timestep))
@@ -726,8 +781,10 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     memory = torch.zeros(1, 64)
     rgbd = None
     distances = []
+    basket_distances = []
     command = np.zeros(3, dtype=np.float32)
     stage_label = preview['stage'] or 'hanging'
+    easy_tag = 'easy-hover ' if preview.get('easy') else ''
     try:
         for index in range(steps):
             mujoco.mj_camlight(model, data)
@@ -758,6 +815,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             mujoco.mj_camlight(model, data)
             distance = float(np.linalg.norm(data.site_xpos[tcp_site] - data.xipos[fruit_body]))
             distances.append(distance)
+            basket_world = np.asarray(data.xpos[chassis], dtype=np.float64) + (
+                np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
+            basket_distance = float(np.linalg.norm(
+                np.asarray(data.xpos[fruit_body], dtype=np.float64) - basket_world))
+            basket_distances.append(basket_distance)
             viewer.lookat[:] = data.xpos[chassis] + [0., 0., .35]
             viewer.distance, viewer.azimuth, viewer.elevation = 3., 135., -20.
             scene_renderer.update_scene(data, camera=viewer)
@@ -766,7 +828,9 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             draw = ImageDraw.Draw(image)
             update = info['completed_updates']
             draw.text((8, 8), f'CPU preview  {stage_label}  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
-            draw.text((8, 22), f'TCP-fruit {distance:.3f} m  gripper RGB overlay  curriculum preview not harvest proof', fill=(244, 211, 94))
+            draw.text((8, 22), (
+                f'TCP-fruit {distance:.3f} m  basket {basket_distance:.3f} m  {easy_tag}'
+                'gripper RGB overlay  curriculum preview not harvest proof'), fill=(244, 211, 94))
             try:
                 encoder.stdin.write(np.asarray(image).tobytes())
             except BrokenPipeError as exc:
@@ -786,11 +850,15 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                   gait_checkpoint=str(info['gait_checkpoint']), camera=camera,
                   curriculum_stage=preview['stage'], reset_mode=preview['reset_mode'],
                   allow_locomotion=preview['allow_locomotion'],
+                  easy=bool(preview.get('easy')),
                   update=info['completed_updates'], steps=steps, fps=fps,
                   control_dt_s=control_dt, backend=f'cpu-native-mujoco-{os.environ.get("MUJOCO_GL", "egl")}',
                   mean_tcp_fruit_distance_m=float(np.mean(distances)),
                   min_tcp_fruit_distance_m=float(np.min(distances)),
                   final_tcp_fruit_distance_m=float(distances[-1]),
+                  mean_basket_distance_m=float(np.mean(basket_distances)),
+                  min_basket_distance_m=float(np.min(basket_distances)),
+                  final_basket_distance_m=float(basket_distances[-1]),
                   output=str(output))
     output.with_suffix('.json').write_text(json.dumps(result, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     return result

@@ -118,6 +118,12 @@ class FastTrainerCLITest(unittest.TestCase):
         import inspect
         import train_fast
         self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
+        collect_src = inspect.getsource(train_fast.collect)
+        self.assertIn("row['ground_contact']", collect_src)
+        self.assertIn("row['fallen']", collect_src)
+        run_src = inspect.getsource(train_fast.run)
+        self.assertIn('ground_contact_worlds', run_src)
+        self.assertIn('basket_distance_mean_m', run_src)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):

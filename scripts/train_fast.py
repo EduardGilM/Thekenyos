@@ -168,6 +168,12 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['basket_distance'] = info['basket_distance_m'].clone()
             if 'basket_xy_m' in info:
                 row['basket_xy'] = info['basket_xy_m'].clone()
+            if 'fallen' in info:
+                row['fallen'] = info['fallen'].clone()
+            if 'failed' in info:
+                row['failed'] = info['failed'].clone()
+            if 'ground_contact' in info:
+                row['ground_contact'] = info['ground_contact'].clone()
             rows.append(row)
             if index == 0:
                 rows[0]['memory0'] = memory0
@@ -532,6 +538,15 @@ def run(args):
                 metrics['basket_distance_closest_m'] = float(basket.min(dim=0).values.mean())
             if 'basket_xy' in rows[0]:
                 metrics['basket_xy_mean_m'] = float(torch.stack([r['basket_xy'] for r in rows]).mean())
+            if 'fallen' in rows[0]:
+                metrics['fallen_worlds'] = int(
+                    (torch.stack([r['fallen'] for r in rows]).max(dim=0).values > 0).sum())
+            if 'failed' in rows[0]:
+                metrics['failed_worlds'] = int(
+                    (torch.stack([r['failed'] for r in rows]).max(dim=0).values > 0).sum())
+            if 'ground_contact' in rows[0]:
+                metrics['ground_contact_worlds'] = int(
+                    (torch.stack([r['ground_contact'] for r in rows]).max(dim=0).values > 0).sum())
             del rows, bootstrap
             promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
