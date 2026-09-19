@@ -40,10 +40,23 @@ class FastPPOTest(unittest.TestCase):
         from train_fast import evaluate
         rows = [dict(distance=torch.tensor(values), terminated=torch.tensor([False, False]),
                      success=torch.tensor([0, 0])) for values in ([.4, .8], [.1, .5])]
-        with patch('train_fast.collect', return_value=(rows, None)):
+        with patch('train_fast.collect', return_value=(rows, None, {})):
             result = evaluate(None, None, None, 2, 2)
         self.assertAlmostEqual(result['evaluation/closest_distance_m'], .1)
         self.assertAlmostEqual(result['evaluation/mean_closest_distance_m'], .3)
+
+
+class FastTrainerCLITest(unittest.TestCase):
+    def test_single_cli_defaults_to_deposit_pixels(self):
+        import inspect
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        import train_fast
+        source = inspect.getsource(train_fast)
+        self.assertEqual(source.count('\ndef main('), 1)
+        self.assertEqual(source.count('\ndef run('), 1)
+        self.assertIn("default='deposit_pixels'", source)
+        self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
+
 
 if __name__ == '__main__':
     unittest.main()
