@@ -10,6 +10,8 @@ from typing import Iterable
 
 import numpy as np
 
+from .spot_cameras import GRIPPER_FRAMES
+
 
 ACTION_DIM = 7  # six arm joints plus jaw
 OBS_VERSION = "physical-rollout/v1"
@@ -81,13 +83,15 @@ class BatchedPhysicalRollout:
     """Concrete collector around an existing batched runtime."""
 
     def __init__(self, runtime, reward: RuntimeReachReward | None = None,
-                 camera="hand_camera"):
+                 camera="hand_color_sensor"):
         required = ("control", "advance", "capture", "worlds", "dt")
         if any(not hasattr(runtime, name) for name in required):
             raise TypeError("runtime must be a BatchedDeformableRuntime")
         self.runtime = runtime
         self.reward = reward
         self.camera = str(camera)
+        if self.camera not in GRIPPER_FRAMES:
+            raise ValueError(f'camera must be a nominal gripper sensor, not {self.camera!r}')
         self.last_action = None
         self._limits = self._arm_target_limits()
 

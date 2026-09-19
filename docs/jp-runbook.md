@@ -58,4 +58,5 @@ Promote per §8 gates (two consecutive passing evals, 200 episodes/skill,
 - True 16+4 VecEnv needs Spot `num_envs>1` builder support (currently
   single-env with interleaved aux episodes).
 - Angle-conditioned stem break law (Fang curve) before detach stages.
-- Body-camera extrinsic calibration (provisional mounts in sensors.py).
+- Body fisheye extrinsics are not in the pinned RELIC URDF; training uses the
+  nominal gripper RGB/ToF frames from that URDF.

@@ -307,7 +307,8 @@ def main():
     parser.add_argument('--algorithm', choices=('ppo', 'imitation'), default='ppo')
     parser.add_argument('--allow-algorithm-change', action='store_true')
     parser.add_argument('--imitation-epochs', type=int, default=32)
-    parser.add_argument('--camera', choices=('hand_camera', 'body_camera'), default='body_camera')
+    parser.add_argument('--camera', choices=('hand_color_sensor', 'hand_depth_sensor'),
+                        default='hand_color_sensor')
     args = parser.parse_args()
     if not 1 <= args.imitation_epochs <= 1000:
         parser.error('Imitation epochs must be within 1 to 1000')

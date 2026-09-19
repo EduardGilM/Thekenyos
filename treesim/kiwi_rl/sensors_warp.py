@@ -16,7 +16,7 @@ def _metric_depth(raw: wp.array2d(dtype=float), offsets: wp.array(dtype=int), ca
 
 
 class WarpRGBDRig:
-    def __init__(self, native_model, data, cameras=('hand_camera', 'body_camera'),
+    def __init__(self, native_model, data, cameras=('hand_color_sensor', 'hand_depth_sensor'),
                  resolution=(128, 128), minimum_m=.05, maximum_m=4.):
         import mujoco_warp as mw
         self.worlds, self.device = data.qpos.shape[0], data.qpos.device

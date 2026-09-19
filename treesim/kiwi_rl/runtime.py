@@ -5,6 +5,7 @@ from .control_warp import WarpSpotControl
 from .physics import DeformableMonitor, FlexContactObserver
 from .scene import load_scene_artifact
 from .sensors_warp import WarpRGBDRig
+from .spot_cameras import require_mujoco_gripper_cameras
 
 
 class BatchedDeformableRuntime:
@@ -14,6 +15,7 @@ class BatchedDeformableRuntime:
         if not isinstance(worlds, int) or not 1 <= worlds <= 64 or not isinstance(block_steps, int) or not 1 <= block_steps <= 100:
             raise ValueError('Invalid batching configuration')
         self.model, self.initial, self.manifest = load_scene_artifact(directory)
+        self.camera_names = require_mujoco_gripper_cameras(self.model, self.manifest['robot'])
         self.dt = float(self.model.opt.timestep)
         self.gait_stride = round(.02 / self.dt)
         if abs(self.gait_stride * self.dt - .02) > 1e-9 or self.gait_stride % block_steps:
@@ -50,7 +52,8 @@ class BatchedDeformableRuntime:
             self.rig = None
             self.reset()
             if resolution is not None:
-                self.rig = WarpRGBDRig(self.model, self.data, resolution=resolution)
+                self.rig = WarpRGBDRig(self.model, self.data, cameras=self.camera_names,
+                                       resolution=resolution)
 
     def refresh(self):
         import mujoco_warp as mw

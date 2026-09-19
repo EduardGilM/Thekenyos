@@ -723,6 +723,11 @@ python scripts/export_training_scene.py --relic /path/to/relic \
   --output /path/to/new-base-scene --fruit-count 1
 ```
 
+Base export attaches the nominal gripper RGB and ToF frames from the pinned
+RELIC URDF (`hand_color_sensor`, `hand_depth_sensor`). Existing scenes that
+still contain the invented `hand_camera` / 0.55 m `body_camera` mast must be
+regenerated before training.
+
 Assemble and check with the isolated deformable environment:
 
 ```bash
@@ -786,9 +791,14 @@ then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
 restores optimizer and RNG state and starts a fresh episode in a new output
 directory. Mid-contact replay is not implemented. The final `report.json`
 contains deterministic sensor-only evaluation and `policy-camera.png` shows
-the actual policy input. Updated virtual camera mounts include a body-mounted
-0.55 m camera mast to keep the basket out of view; no hardware calibration is
-implied. The legacy `train_kiwi.py` remains a separate scaffold.
+the actual policy input. Training cameras are the **nominal Spot gripper RGB
+and ToF frames** from the pinned RELIC URDF (`hand_color_sensor`,
+`hand_depth_sensor` on `arm_link_wr1`). Boston Dynamics optical axes are
+converted to MuJoCo (look along −Z, +Y up). Vertical FOV is the published
+maximum, 46.4° colour and 44° depth; this is factory-nominal geometry, not
+per-unit calibration. The invented 0.55 m body mast is not exported. Body
+fisheye extrinsics are not in that URDF and are not invented to keep the
+basket out of view. The legacy `train_kiwi.py` remains a separate scaffold.
 
 Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
 one physical teacher rollout with 100 supervised passes. On the one-segment
@@ -803,8 +813,9 @@ records both checkpoint and evaluated scene hashes when transferring weights.
 The GPU RGB-D rig reads metric planar depth directly. The renderer's public
 `get_depth` utility is display-normalized and clipped, so it must not be used as
 metric sensor depth. Tests cover a plane beyond one metre, inactive camera-ID
-mapping, range masks, and frame-buffer ownership. Camera mounts and range
-parameters remain virtual engineering assumptions, not hardware calibration.
+mapping, range masks, and frame-buffer ownership. Gripper camera mounts come
+from the pinned RELIC URDF; range limits remain an engineering clip, not a
+hardware calibration.
 
 MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
 miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by
