@@ -31,31 +31,6 @@ def hover_tcp_world_m(chassis_xpos, chassis_xmat, clearance_m=0.12):
     return xpos + xmat @ hover_tcp_local_m(clearance_m)
 
 
-def easy_airdrop_world_m(chassis_xpos, chassis_xmat, *, above_rim_m=None):
-    """World spawn of a free fruit over the basket opening, above the rim.
-
-    Independent of TCP so the arm can start outside the crate and not occupy
-    the hole. XY is the chassis-frame basket centre; Z is the rim plus
-    ``airdrop_above_rim_m``. Still above the liner: not a weld and not a
-    liner teleport.
-    """
-    from treesim.basket import CENTER, SIZE
-    from treesim.kiwi_rl.curriculum import EASY_PRESET
-    xpos = np.asarray(chassis_xpos, dtype=np.float64).reshape(3)
-    xmat = np.asarray(chassis_xmat, dtype=np.float64).reshape(3, 3)
-    above = float(EASY_PRESET['airdrop_above_rim_m'] if above_rim_m is None else above_rim_m)
-    if not np.isfinite(above) or not 0 < above <= 0.3:
-        raise ValueError('airdrop_above_rim_m must be finite in (0, 0.3] m')
-    if not np.isfinite(xpos).all() or not np.isfinite(xmat).all():
-        raise ValueError('airdrop pose inputs must be finite')
-    local = np.asarray(CENTER, dtype=np.float64) + np.array(
-        [0.0, 0.0, float(SIZE[2]) + above], dtype=np.float64)
-    pos = xpos + xmat @ local
-    if not np.isfinite(pos).all():
-        raise ValueError('airdrop world position must be finite')
-    return pos
-
-
 def basket_chassis_aabb_m():
     """Axis-aligned crate bounds in the chassis frame, floor to open rim.
 
@@ -113,12 +88,13 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
     return point
 
 
-def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.12, clearance_m=0.18):
-    """Chassis-frame TCP start: frac 0 = just outside the crate, 1 = toward home.
+def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.40, clearance_m=0.28):
+    """Chassis-frame TCP start: frac 0 = clear of the crate, 1 = toward home.
 
-    The near pose sits on the robot side of the front wall, above the rim, so
-    the arm is not spawned inside the basket. Fruit is not placed here; the
-    caller puts a free body at the solved TCP with the jaw closed.
+    The near pose is on the robot side of the front wall with enough margin that
+    the wrist is not spawned through the liner. A 12 cm margin still clips.
+    Fruit is not placed here; the caller puts a free body at the solved TCP
+    with the jaw closed.
     """
     from treesim.basket import CENTER, SIZE
     frac = float(frac)
@@ -126,8 +102,8 @@ def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.12, clearance_m=
     clearance = float(clearance_m)
     if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
         raise ValueError('start frac must be finite in [0, 1]')
-    if not np.isfinite(margin) or not 0.05 <= margin <= 0.4:
-        raise ValueError('start margin must be finite in [0.05, 0.4] m')
+    if not np.isfinite(margin) or not 0.05 <= margin <= 0.5:
+        raise ValueError('start margin must be finite in [0.05, 0.5] m')
     if not np.isfinite(clearance) or not 0.05 <= clearance <= 0.5:
         raise ValueError('start clearance must be finite in [0.05, 0.5] m')
     lo, hi = basket_chassis_aabb_m()
