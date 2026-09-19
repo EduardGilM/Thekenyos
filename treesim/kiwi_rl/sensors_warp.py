@@ -47,6 +47,9 @@ class WarpRGBDRig:
         if not np.isfinite(timestamp_s) or timestamp_s < 0 or (self.timestamp_s is not None and timestamp_s < self.timestamp_s):
             raise ValueError('Sensor timestamps must be finite and monotonic')
         with wp.ScopedDevice(self.device):
+            # MJWarp rendering does not update the dynamic spatial index itself.
+            # Refit after motion/reset so moved fingers and fruit occlude correctly.
+            mw.refit_bvh(model, data, self.context)
             mw.render(model, data, self.context)
             for i in range(len(self.cameras)):
                 mw.get_rgb(self.context, i, self.rgb[i])

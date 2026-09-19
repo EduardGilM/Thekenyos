@@ -6,6 +6,35 @@ import numpy as np
 
 @unittest.skipUnless(importlib.util.find_spec('mujoco_warp') and importlib.util.find_spec('torch'), 'CUDA sensing stack required')
 class RGBDTest(unittest.TestCase):
+    def test_moving_occluder_enters_and_leaves_view(self):
+        import mujoco
+        import mujoco_warp as mw
+        import warp as wp
+        from treesim.kiwi_rl.sensors_warp import WarpRGBDRig
+        wp.init()
+        model = mujoco.MjModel.from_xml_string('''<mujoco><option gravity="0 0 0"/>
+        <worldbody><geom type="plane" size="10 10 .1"/>
+        <camera name="hand_camera" pos="0 0 2"/>
+        <body pos="3 0 1"><freejoint/><geom type="box" size=".4 .4 .1" mass="1" group="2"/>
+        </body></worldbody></mujoco>''')
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model,data)
+        with wp.ScopedDevice('cuda:0'):
+            gm=mw.put_model(model)
+            gd=mw.put_data(model,data,nworld=2,nconmax=64,njmax=256)
+            mw.forward(gm,gd)
+            rig=WarpRGBDRig(model,gd,cameras=('hand_camera',),resolution=(32,24))
+            rig.capture(gm,gd,0.)
+            np.testing.assert_allclose(rig.depth[0].numpy()[:,12,16],2.,atol=2e-5)
+            qpos=gd.qpos.numpy();qpos[0,0]=0.
+            gd.qpos.assign(qpos);mw.forward(gm,gd)
+            rig.capture(gm,gd,.02)
+            np.testing.assert_allclose(rig.depth[0].numpy()[:,12,16],[.9,2.],atol=2e-5)
+            qpos[0,0]=3.
+            gd.qpos.assign(qpos);mw.forward(gm,gd)
+            rig.capture(gm,gd,.04)
+            np.testing.assert_allclose(rig.depth[0].numpy()[:,12,16],2.,atol=2e-5)
+
     def test_wrist_visual_geometry_occludes_sensor_without_mutating_model(self):
         import mujoco
         import mujoco_warp as mw

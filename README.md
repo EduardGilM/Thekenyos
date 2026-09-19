@@ -796,6 +796,24 @@ error report. Nonfinite state, capacity overflow and solver-limit failures still
 stop training. Checkpoints record this runtime solver override; older video replays
 retain their original 20-iteration setting.
 
+Camera audit after the retry found a dynamic-rendering bug: the GPU sensor did
+not refit its scene BVH after motion, so moved fingers or fruit could be missed.
+`WarpRGBDRig.capture` now refits before each render. The moving-occluder regression
+fails on the old implementation and passes with the fix. Earlier RGB-D training
+runs therefore do not validate realistic moving occlusion. At replay frame 23
+(0.92 s), the native view has 77% moving-finger coverage; the old GPU view incorrectly
+sees the fruit through it. The corrected GPU view restores the occlusion. This
+does not validate the imported finger mesh against physical camera footage.
+
+The fast harvesting launcher trains the sensor-only reaching architecture directly
+with PPO. Privileged simulator state supplies rewards and evaluation, not teacher
+actions or distillation targets. It is not the teacher-to-student pipeline in the
+Devin Megaplan (`~/.devin/plans/plan-79cd63f6dc176fcc.md`, work package H includes
+counterfactual replay). Teacher/student and intent components elsewhere in this
+repository are not evidence that the fast launcher uses them. Establish a verified
+harvesting executor and complete snapshot replay before evaluating counterfactual
+decision targets under a matched simulation budget.
+
 On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
 about 157,000 policy transitions/s including PPO updates (three-update screen,
 64 steps per rollout, 200 Hz physics, 25 Hz 64x64 RGBD). All collected samples
