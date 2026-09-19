@@ -62,7 +62,7 @@ def main():
             metadata = dict(checkpoint=str(a.checkpoint), scene=str(a.scene), frames=len(states), fps=25,
                             simulated_seconds=(i+1)*.02, terminated=bool(done.any()),
                             success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
-                            numerical=numerical, 
+                            numerical=numerical,
                             arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
                             training_horizon_seconds=1.28)
             np.savez_compressed(a.output/'states.npz', qpos=np.array(states))
