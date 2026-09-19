@@ -37,6 +37,9 @@ class TrainingLog:
         self.config = dict(config or {})
         for key in ('approximations', 'exptseed', 'worlds', 'rates'):
             self.config.setdefault(key, None)
+        if output.suffix != '.jsonl':
+            (self.output / 'config.json').write_text(
+                json.dumps(self.config, indent=2, default=str) + '\n', encoding='utf-8')
         if wandb_mode != 'disabled':
             try:
                 module = wandb_module if wandb_module is not None else __import__('wandb')

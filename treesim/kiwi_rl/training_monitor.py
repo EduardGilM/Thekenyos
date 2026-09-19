@@ -89,7 +89,9 @@ def due_checkpoints(run_dir: str | Path, every: int) -> list[Path]:
             update = int(path.stem.split('-')[1])
         except (IndexError, ValueError):
             continue
-        if update % every == 0:
+        if update == 0:
+            continue
+        if update == 1 or update % every == 0:
             due.append((update, path))
     return [path for _, path in sorted(due)]
 
@@ -253,9 +255,19 @@ function svgChart(steps, values, title) {
     <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="#f4d35e"/>
   </svg>`;
 }
-function renderCards(latest) {
-  const stage = latest.curriculum_stage
-    ? `<div class="card"><div class="k">curriculum_stage</div><div class="v">${esc(latest.curriculum_stage)}</div></div>`
+function stageLabel(payload) {
+  if (payload.curriculum_label) return payload.curriculum_label;
+  const latest = payload.latest || {};
+  if (latest.curriculum_stage && chartable(latest.curriculum_index)) {
+    return String(latest.curriculum_index).padStart(3, "0") + " · " + latest.curriculum_stage;
+  }
+  return latest.curriculum_stage || "esperando etapa";
+}
+function renderCards(payload) {
+  const latest = payload.latest || {};
+  const label = stageLabel(payload);
+  const stage = label && label !== "esperando etapa"
+    ? `<div class="card"><div class="k">curriculum_stage</div><div class="v">${esc(label)}</div></div>`
     : "";
   const cards = CARD_KEYS.filter(key => chartable(latest[key])).map(key =>
     `<div class="card"><div class="k">${esc(key)}</div><div class="v">${esc(fmt(latest[key]))}</div></div>`);
@@ -276,10 +288,10 @@ function renderVideo(video) {
 let currentVideo = null;
 async function tick() {
   const payload = await fetch("metrics.json?t=" + Date.now(), {cache: "no-store"}).then(r => r.json());
-  const stage = (payload.latest && payload.latest.curriculum_stage) || "sin etapa";
+  const stage = stageLabel(payload);
   document.getElementById("sub").textContent =
     `${payload.run} · etapa ${stage} · ${payload.rows} filas · actualizado ${payload.generated_at}`;
-  document.getElementById("cards").innerHTML = renderCards(payload.latest || {});
+  document.getElementById("cards").innerHTML = renderCards(payload);
   document.getElementById("charts").innerHTML = renderCharts(payload.series || {});
   const videos = payload.videos || [];
   const video = videos.length ? videos[videos.length - 1] : null;
@@ -305,10 +317,11 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     series = payload.get('series') or {}
     videos = list(payload.get('videos') or [])
     cards = []
-    if latest.get('curriculum_stage'):
+    stage = html.escape(str(payload.get('curriculum_label') or latest.get('curriculum_stage') or 'esperando etapa'))
+    if stage and stage != 'esperando etapa':
         cards.append(
             f'<div class="card"><div class="k">curriculum_stage</div>'
-            f'<div class="v">{html.escape(str(latest["curriculum_stage"]))}</div></div>')
+            f'<div class="v">{stage}</div></div>')
     for key in ('step', 'curriculum_index', 'loss', 'entropy', 'reward_mean',
                 'evaluation/success_rate', 'evaluation/mean_closest_distance_m',
                 'evaluation/harvest_successes', 'training_transitions_per_second',
@@ -326,7 +339,6 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     generated = html.escape(str(payload.get('generated_at', '')))
     run = html.escape(str(payload.get('run', '')))
     rows = int(payload.get('rows', 0))
-    stage = html.escape(str(latest.get('curriculum_stage') or 'sin etapa'))
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -368,14 +380,62 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
 """
 
 
+def _run_config(run_dir: str | Path) -> dict[str, Any]:
+    run_dir = Path(run_dir)
+    config_path = run_dir / 'config.json'
+    if config_path.exists():
+        payload = json.loads(config_path.read_text(encoding='utf-8'))
+        return payload if isinstance(payload, dict) else {}
+    sidecars = sorted(run_dir.glob('checkpoint-*.pt.json'))
+    if not sidecars:
+        return {}
+    meta = json.loads(sidecars[-1].read_text(encoding='utf-8'))
+    config = dict(meta.get('config') or {})
+    if meta.get('curriculum_stage') and 'curriculum' not in config:
+        config['stage'] = meta['curriculum_stage']
+    return config
+
+
+def curriculum_status(run_dir: str | Path, latest: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Stage label for the dashboard. Index 1 is 001 · deposit_pixels."""
+    latest = dict(latest or {})
+    name = latest.get('curriculum_stage')
+    index = latest.get('curriculum_index')
+    if not name:
+        config = _run_config(run_dir)
+        curriculum = config.get('curriculum') if isinstance(config.get('curriculum'), dict) else {}
+        name = curriculum.get('name') or config.get('stage')
+        index = curriculum.get('index') if index is None else index
+    if not name:
+        return dict(curriculum_stage=None, curriculum_index=None, curriculum_label='esperando etapa')
+    try:
+        from treesim.kiwi_rl.curriculum import stage_named
+        stage = stage_named(str(name))
+        name = stage.name
+        if index is None:
+            index = stage.index
+    except ValueError:
+        pass
+    if isinstance(index, bool) or not isinstance(index, int):
+        index = None
+    label = f'{index:03d} · {name}' if index is not None else str(name)
+    return dict(curriculum_stage=str(name), curriculum_index=index, curriculum_label=label)
+
+
 def dashboard_payload(rows: Sequence[Mapping[str, Any]], *, run: str | Path,
                       videos: Iterable[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     series = series_from_rows(rows)
+    latest = _latest_row(rows)
+    status = curriculum_status(run, latest)
+    if status['curriculum_stage'] and 'curriculum_stage' not in latest:
+        latest = dict(latest, curriculum_stage=status['curriculum_stage'],
+                      curriculum_index=status['curriculum_index'])
     return dict(schema=SCHEMA, training_ready=False,
-                run=str(run), rows=len(rows), latest=_latest_row(rows),
+                run=str(run), rows=len(rows), latest=latest,
                 series=series, videos=list(videos or ()),
                 generated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                caveat='Curriculum metrics and CPU previews, not field harvest')
+                caveat='Curriculum metrics and CPU previews, not field harvest',
+                **status)
 
 
 def write_dashboard(rows: Sequence[Mapping[str, Any]], monitor_dir: str | Path,

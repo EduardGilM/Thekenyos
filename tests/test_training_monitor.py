@@ -41,6 +41,7 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertIn('metrics.json', html)
             self.assertIn('Último vídeo de progreso', html)
             self.assertIn('deposit_pixels', html)
+            self.assertIn('001 · deposit_pixels', html)
 
     def test_compose_overlay_keeps_scene_and_nearest_gripper_patch(self):
         scene = np.zeros((180, 320, 3), dtype=np.uint8)
@@ -52,13 +53,13 @@ class TrainingMonitorTests(unittest.TestCase):
         np.testing.assert_array_equal(frame[40, 40], (10, 20, 30))
         np.testing.assert_array_equal(frame[4 + 16, 320 - 4 - 16], (200, 40, 10))
 
-    def test_due_checkpoints_include_zero_and_skip_when_disabled(self):
+    def test_due_checkpoints_start_at_first_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for update in (0, 4, 5, 10):
+            for update in (0, 1, 4, 5, 10):
                 (root / f'checkpoint-{update:04d}.pt').write_bytes(b'x')
             self.assertEqual([path.name for path in due_checkpoints(root, 5)],
-                             ['checkpoint-0000.pt', 'checkpoint-0005.pt', 'checkpoint-0010.pt'])
+                             ['checkpoint-0001.pt', 'checkpoint-0005.pt', 'checkpoint-0010.pt'])
             self.assertEqual(due_checkpoints(root, 0), [])
 
     def test_live_dashboard_copies_hub_and_lists_videos(self):
@@ -93,6 +94,21 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertNotIn('http-equiv="refresh"', html_two)
             self.assertIn('training_ready', html_two)
 
+    def test_dashboard_shows_stage_001_before_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / 'run'
+            run.mkdir()
+            (run / 'config.json').write_text(json.dumps({
+                'stage': 'deposit_pixels',
+                'curriculum': {'name': 'deposit_pixels', 'index': 1},
+            }), encoding='utf-8')
+            payload = write_dashboard([], Path(tmp) / 'monitor', run=run)
+            html = (Path(tmp) / 'monitor' / 'index.html').read_text(encoding='utf-8')
+            self.assertEqual(payload['curriculum_label'], '001 · deposit_pixels')
+            self.assertEqual(payload['curriculum_index'], 1)
+            self.assertIn('001 · deposit_pixels', html)
+            self.assertNotIn('sin etapa', html)
+
     def test_curriculum_preview_matches_stage_reset(self):
         deposit = curriculum_preview_from_checkpoint({
             'meta': {'curriculum_stage': 'deposit_pixels'}, 'config': {},
@@ -109,7 +125,6 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertEqual(hanging['reset_mode'], 0)
         self.assertFalse(hanging['allow_locomotion'])
         from treesim.kiwi_rl.training_monitor import _n3_command
-        import numpy as np
         first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
         np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
 
