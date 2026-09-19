@@ -199,7 +199,7 @@ def _video_figure(video: Mapping[str, Any]) -> str:
     if is_chartable(basket):
         extra += f' · min cesta {float(basket):.3f} m'
     if video.get('easy'):
-        extra += ' · easy-hover'
+        extra += ' · easy-airdrop'
     return (
         f'<figure><figcaption>update {html.escape(str(video.get("step")))}'
         f'{html.escape(extra)} · {html.escape(str(video.get("label", "")))}</figcaption>'
@@ -301,7 +301,7 @@ function renderVideo(video) {
   if (chartable(video.min_basket_distance_m)) {
     extra += ` · min cesta ${Number(video.min_basket_distance_m).toFixed(3)} m`;
   }
-  if (video.easy) extra += " · easy-hover";
+  if (video.easy) extra += " · easy-airdrop";
   return `<figure><figcaption>update ${esc(video.step)}${esc(extra)} · ${esc(video.label || "")}</figcaption>
     <video controls preload="metadata" src="${esc(video.url)}"></video></figure>`;
 }
@@ -657,6 +657,18 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
             closed = 0.0
         data.qpos[int(controller.qids[18])] = closed
         controller.targets[18] = closed
+        if easy:
+            from treesim.kiwi_rl.curriculum import EASY_PRESET
+            drop = float(EASY_PRESET['drop_offset_m'])
+            if not np.isfinite(drop) or drop <= 0:
+                raise ValueError('easy drop_offset_m must be finite and positive')
+            data.qpos[qposadr + 2] = float(data.qpos[qposadr + 2]) - drop
+            data.qvel[dofadr:dofadr + 6] = 0.0
+            opened = float(model.jnt_range[jaw_joint, 1])
+            if not np.isfinite(opened):
+                opened = 0.8
+            data.qpos[int(controller.qids[18])] = opened
+            controller.targets[18] = opened
     if reset_mode == 2:
         jaw_joint = int(controller.joints[18])
         opened = float(model.jnt_range[jaw_joint, 1])
@@ -784,7 +796,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     basket_distances = []
     command = np.zeros(3, dtype=np.float32)
     stage_label = preview['stage'] or 'hanging'
-    easy_tag = 'easy-hover ' if preview.get('easy') else ''
+    easy_tag = 'easy-airdrop ' if preview.get('easy') else ''
     try:
         for index in range(steps):
             mujoco.mj_camlight(model, data)

@@ -150,6 +150,7 @@ class TrainingMonitorTests(unittest.TestCase):
         from treesim.kiwi_rl.training_monitor import apply_native_easy_hover, apply_native_skill_reset, _n3_command
         self.assertIn('hover_tcp_world_m', inspect.getsource(apply_native_easy_hover))
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('drop_offset_m', inspect.getsource(apply_native_skill_reset))
         first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
         np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
 
