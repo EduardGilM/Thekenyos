@@ -30,9 +30,8 @@ from treesim.orchard_terrain import (
 )
 from treesim.pergola import generate, place_fruit
 
-# Afternoon key light. Classic-GL shadow maps on thousands of leaf cards
-# alias into a grid, so this preview does not enable a shadow map. Row
-# shade is baked into the grass/soil albedo instead.
+# Afternoon key light. Classic-GL leaf shadow maps alias into a grid; the
+# under-tree pool is baked into the ground albedo instead.
 _SUN_DIR = np.array([0.26, 0.42, -1.0], dtype=float)
 _SUN_DIR /= float(np.linalg.norm(_SUN_DIR))
 
@@ -110,7 +109,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     sun_pos = np.array([0.0, 0.0, float(floor.canopy_z(0.0, 0.0))]) - 28.0 * sun_dir
     soil_geoms = [
         f'    <geom name="earth_mass" type="box" size="{half + 0.8:.3f} {half + 0.8:.3f} {bulk:.3f}" '
-        f'pos="0 0 {min_z - bulk - 0.08:.4f}" material="orchard" contype="0" conaffinity="0"/>',
+        f'pos="0 0 {min_z - bulk - 0.15:.4f}" material="earth_cut" contype="0" conaffinity="0"/>',
         f'    <geom name="earth_x_pos" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
         f'contype="0" conaffinity="0"/>',
@@ -140,7 +139,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     <texture type="2d" name="orchard" file="orchard_ground.png"/>
     <texture type="2d" name="earth_cut" file="earth_cut.png"/>
     <material name="orchard" texture="orchard" texrepeat="1 1" texuniform="false"
-              emission="0.55" reflectance="0.0" specular="0.02" shininess="0.04"
+              emission="0.28" reflectance="0.0" specular="0.02" shininess="0.04"
               roughness="0.95" metallic="0.0" rgba="1 1 1 1"/>
     <material name="earth_cut" texture="earth_cut" texrepeat="8 8" texuniform="true"
               reflectance="0.0" specular="0.03" shininess="0.05"
@@ -224,16 +223,16 @@ def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0
     t = frame / max(n_frames - 1, 1)
     s = t * t * (3.0 - 2.0 * t)
     x = 0.0
-    y0 = -float(half_span_m) + 8.5
-    y1 = -0.35 * float(spacing)
+    y0 = -0.40 * float(half_span_m)
+    y1 = -0.20 * float(spacing)
     y = (1.0 - s) * y0 + s * y1
     look_ahead = 5.8 - 1.8 * s
     x_look = 0.32 * float(spacing)
     eye = np.array([x, y, _aisle_eye_z(floor, x, y)])
     tgt_y = y + look_ahead
     canopy_t = float(floor.canopy_z(x_look, tgt_y))
-    target_z = min(canopy_t - 0.22, eye[2] - 0.08)
-    target_z = max(target_z, eye[2] - 0.18)
+    target_z = min(canopy_t - 0.22, eye[2] - 0.04)
+    target_z = max(target_z, eye[2] - 0.10)
     target = np.array([x_look, tgt_y, target_z])
     return mjv_from_eye_target(eye, target)
 
@@ -334,7 +333,8 @@ def main():
 
     model = mujoco.MjModel.from_xml_string(
         xml, assets={
-            "orchard_ground.png": floor.texture_png_bytes(),
+            "orchard_ground.png": floor.texture_png_bytes(
+                skeleton, sun_dir=_SUN_DIR, seed=args.seed),
             "earth_cut.png": earth_cut_png_bytes(args.seed),
         })
     apply_hfield(model, floor)
@@ -356,7 +356,7 @@ def main():
         f"drawtext=text='{args.pergola_rows} x {args.pergola_columns} posts at "
         f"{spacing:.1f} m   ~{ha:.2f} ha   fruit {len(fruit)}   leaves {len(leaf_geoms)}':"
         f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
-        f"drawtext=text='scripted aisle entry  -  tiled grass/soil albedo  -  no shadow map  "
+        f"drawtext=text='scripted aisle entry  -  tiled grass/soil  -  baked tree dapple  "
         f"landform {args.landform_m:.1f} m  -  GL {gl_backend}  -  not Spot gait':"
         f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
     )

@@ -78,8 +78,9 @@ class OrchardTerrainTest(unittest.TestCase):
         self.assertIn('castshadow="false"', xml)
         self.assertNotIn('castshadow="true"', xml)
         self.assertIn('orchard_ground.png', xml)
-        self.assertIn('emission="0.55"', xml)
-        self.assertIn('material="orchard"', xml)
+        self.assertIn('emission="0.28"', xml)
+        self.assertIn('name="earth_mass"', xml)
+        self.assertIn('material="earth_cut"', xml)
         self.assertNotIn('mesh="orchard_grass"', xml)
         png = earth_cut_png_bytes(0)
         self.assertGreater(len(png), 64)
@@ -99,6 +100,19 @@ class OrchardTerrainTest(unittest.TestCase):
         aim_sun(model, look, 10.0)
         np.testing.assert_allclose(model.light_dir[0], _SUN_DIR)
         np.testing.assert_allclose(model.light_pos[0], look - 10.0 * _SUN_DIR)
+
+    def test_tree_dapple_darkens_under_the_canopy(self):
+        from treesim.orchard_terrain import shade_under_canopy
+        floor = _pinned()
+        skel = generate(height=1.6, seed=0, rows=2, columns=2, spacing=5.0,
+                        ground_z=floor.ground_z, canopy_z=floor.canopy_z)
+        shaded = shade_under_canopy(floor.colors_rgb, floor, skel, seed=0)
+        n = shaded.shape[0]
+        mid, edge = n // 2, 4
+        self.assertLess(float(shaded[mid, mid].mean()),
+                        0.85 * float(floor.colors_rgb[mid, mid].mean()))
+        self.assertGreater(float(shaded[edge, edge].mean()),
+                           0.90 * float(floor.colors_rgb[edge, edge].mean()))
 
     def test_slope_plane_and_canopy(self):
         floor = _pinned(slope_deg=2.0, rut_depth_m=0.0, noise_m=0.0)
@@ -235,7 +249,7 @@ class OrchardTerrainTest(unittest.TestCase):
 
         start_eye = free_camera_eye(*camera_pose(0, 100, Floor(), 32.0, 5.0))
         end_eye = free_camera_eye(*camera_pose(99, 100, Floor(), 32.0, 5.0))
-        self.assertLess(start_eye[1], -20.0)
+        self.assertLess(start_eye[1], -10.0)
         self.assertGreater(end_eye[1], start_eye[1])
         for frame in range(100):
             lookat, distance, azimuth, elevation = camera_pose(

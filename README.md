@@ -127,12 +127,12 @@ Dense infill stays inside the 100,000-leaf cap by cropping the post grid; do
 not enable ``.15`` m spacing on the default 45×40 commercial field. The
 recording enters from the south margin along a grass aisle and stays under the
 leaf roof so the camera does not dive through the canopy; a visual earth bulk
-sits under the heightfield so the hillside is not a floating card. The visible
-floor is a heightfield whose albedo bakes repeating 0.35 m grass and soil tiles
-into the world map (procedural 256 px tiles, not a photo). Classic-GL shadow maps
-on the leaf roof alias into a grid, so this preview turns shadow maps off; row
-shade is baked into that albedo instead. pip MuJoCo 3.8.1 is still classic GL, not a
-Filament path tracer.
+sits under the heightfield so the hillside is not a floating card. The walking
+surface is one heightfield; the loam bulk is the hillside cut, not a second
+lawn. Albedo bakes 0.35 m grass/soil tiles plus an irregular under-tree dapple
+(dark canopy body and sun flecks, offset along the sun XY). Classic-GL shadow
+maps on the leaf roof alias into a grid, so they stay off; this dapple is not a
+realtime leaf shadow. pip MuJoCo 3.8.1 is still classic GL, not Filament.
 
 The full 45×40 structural grid without the leaf roof is still available with
 ``--flat --canopy-spacing 0 --pergola-rows 45 --pergola-columns 40``.

@@ -224,9 +224,6 @@ def _appearance_rgb(x: np.ndarray, y: np.ndarray, xx: np.ndarray, yy: np.ndarray
     tiled = (grass[..., None] * sample_world_tile(grass_tile_rgb(), xx, yy)
              + (1.0 - grass)[..., None] * sample_world_tile(soil_tile_rgb(), xx, yy))
     rgb = 0.18 * rgb + 0.82 * tiled
-    # Soft under-row darkening. This is baked albedo, not a shadow-map grid.
-    dap = 0.70 + 0.30 * grass + 0.08 * (2.0 * patch - 1.0)
-    rgb = rgb * np.clip(dap, 0.48, 1.05)[..., None]
     return np.clip(rgb, 0.0, 1.0)
 
 
@@ -330,17 +327,63 @@ class OrchardFloor:
         )
         return out
 
-    def texture_png_bytes(self) -> bytes:
+    def texture_png_bytes(self, skeleton=None, sun_dir=None, seed: int = 0) -> bytes:
         """RGB PNG of the grass/soil map, origin at the south-west corner."""
         from io import BytesIO
         from PIL import Image
         rgb = np.asarray(self.colors_rgb, dtype=np.float64)
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError("colors_rgb must be an (nrow, ncol, 3) map")
+        if skeleton:
+            rgb = shade_under_canopy(rgb, self, skeleton, sun_dir=sun_dir, seed=seed)
         pixels = np.clip(np.flipud(rgb) * 255.0, 0, 255).astype(np.uint8)
         buf = BytesIO()
         Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
         return buf.getvalue()
+
+
+def shade_under_canopy(rgb: np.ndarray, floor: OrchardFloor, skeleton,
+                       sun_dir=None, seed: int = 0) -> np.ndarray:
+    """Bake irregular under-tree shade into a world-mapped albedo.
+
+    Classic-GL shadow maps on thousands of leaf cards alias into a grid, so
+    this is a procedural dapple (dark canopy body plus sun flecks), not a
+    realtime shadow map. Shifted a little along the sun XY so the pool sits
+    slightly off the posts.
+    """
+    rgb = np.asarray(rgb, dtype=np.float64)
+    pts = []
+    for seg in skeleton:
+        if int(getattr(seg, "order", 0)) < 1:
+            continue
+        mid = 0.5 * (np.asarray(seg.start, dtype=float) + np.asarray(seg.end, dtype=float))
+        pts.append(mid[:2])
+    if len(pts) < 2:
+        return rgb
+    pts = np.asarray(pts, dtype=float)
+    lo, hi = pts.min(0) - 1.15, pts.max(0) + 1.15
+    sun = np.array([0.26, 0.42], dtype=float) if sun_dir is None else np.asarray(sun_dir, dtype=float)[:2]
+    nxy = float(np.linalg.norm(sun)) or 1.0
+    shift = 0.70 * sun / nxy
+    half = float(floor.half_extent_m)
+    nr, nc = rgb.shape[:2]
+    xt = np.linspace(-half, half, nc)
+    yt = np.linspace(-half, half, nr)
+    xx, yy = np.meshgrid(xt, yt)
+    xs, ys = xx - shift[0], yy - shift[1]
+    wx = np.clip(np.minimum(xs - lo[0], hi[0] - xs) / 1.2, 0.0, 1.0)
+    wy = np.clip(np.minimum(ys - lo[1], hi[1] - ys) / 1.2, 0.0, 1.0)
+    cover = wx * wy
+    rng = np.random.default_rng((int(seed) * 7919 + 3) & 0x7FFFFFFF)
+    body = _value_noise(rng, xt, yt, half, wavelength_m=1.55)
+    fleck = _value_noise(rng, xt, yt, half, wavelength_m=0.42)
+    speck = _value_noise(rng, xt, yt, half, wavelength_m=0.16)
+    holes = np.clip((fleck * speck - 0.38) / 0.28, 0.0, 1.0) ** 1.35
+    dark = 0.28 + 0.20 * body
+    bright = 0.78 + 0.16 * fleck
+    under = dark * (1.0 - holes) + bright * holes
+    factor = (1.0 - cover) + cover * under
+    return np.clip(rgb * factor[..., None], 0.0, 1.0)
 
 
 def earth_cut_png_bytes(seed: int = 0) -> bytes:
