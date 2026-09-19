@@ -23,7 +23,7 @@ not approval of the basket geometry or loaded workspace.
 | Component | Current implementation |
 |---|---|
 | Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, tied canes, compliant tips and hanging fruit |
-| Orchard floor | Optional seeded heightfield: grassed pasillos, bare surcos, slope, noise and friction; posts and Spot sit on the sampled surface |
+| Terrain | Optional procedural noise heightfield by default; explicit `--terrain-kind orchard` retains grassed aisles, furrows, slope and terrain-aligned posts/Spot |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -85,10 +85,10 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
-Plant the same bay on the orchard floor:
+Select the retained grassed orchard-floor generator explicitly:
 
 ```bash
-python scripts/grow_tree.py --preset pergola --foliage --terrain --seed 42 \
+python scripts/grow_tree.py --preset pergola --foliage --terrain --terrain-kind orchard --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
@@ -98,9 +98,9 @@ XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
 `--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
 enabled by default for this preset, while `--foliage-density 0` disables it.
 Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
-the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` to
-plant the grid on a kiwi orchard floor (grassed aisles, bare planting strips,
-sampled slope and noise). The native compression bench writes its own generated
+the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` for
+the procedural noise floor, or `--terrain --terrain-kind orchard` for the
+retained orchard floor (grassed aisles, planting strips, slope and noise). The native compression bench writes its own generated
 MuJoCo XML to its output directory.
 
 On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
@@ -117,7 +117,7 @@ grid; a larger NVIDIA GPU can keep the commercial default:
 
 ```bash
 python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
-  --preset pergola --terrain --foliage --seed 42 --frames 600 \
+  --preset pergola --terrain --terrain-kind orchard --foliage --seed 42 --frames 600 \
   --pergola-rows 5 --pergola-columns 4
 ```
 
@@ -128,6 +128,251 @@ unsupported 2.3 m cantilevers that sagged into the robot's workspace. Fruit
 stems are drawn between the actual force attachment sites and disappear on
 rupture; fruit remains an independent physical body.
 
+### Uneven kiwi terrain for future RL episodes
+
+`--terrain` uses a **physical collision heightfield**, not just a visual mesh.
+For the kiwi pergola, three octaves of **smooth value noise** (quintic
+interpolation, decreasing octave amplitudes) generate continuous rolling ground.
+There are no post-centred masks, flat pads or artificial mounds. Posts remain
+embedded below the surface, rather than reshaping the ground around them; the
+canopy stays at its world-space height. Kiwi terrain gets a **fresh random seed
+each launch**, even with a fixed canopy `--seed`. Flat ground remains the default,
+and the apple terrain retains its flat trunk area and original seed behaviour.
+The noise generator takes priority for `--terrain`; select `--terrain-kind
+orchard` (Python: `cfg.physics.terrain_kind = "orchard"`) only for the retained
+slope/furrow generator. Noise amplitude/wavelength/extent controls do not tune
+that alternative; it uses the `orchard_*` parameters. Both modes support an
+explicit `terrain_seed`; orchard mode otherwise inherits the scene seed.
+
+The CPU examples crop the newer plantation geometry to **3 × 3 posts**, retaining
+supported canes and compliant tips. This fits a 12 m terrain patch and supports
+40 fruit without instantiating the default commercial field.
+
+```bash
+python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+  --terrain --terrain-amplitude .24 \
+  --terrain-wavelength 1.8 --terrain-extent 6 \
+  --device cpu --substeps 40 --viewer gl --headless --frames 360 \
+  --camera-orbit 20 --snapshot output/kiwi-uneven-terrain.png \
+  --video output/kiwi-uneven-terrain.mp4 --metrics output/kiwi-uneven-terrain.json
+```
+
+Use `.venv/bin/python` instead of `python` with the local virtual environment.
+Remove `--headless` for an interactive window; remove recording options and use
+`--viewer null` for display-free physics. CPU rendering still needs working
+OpenGL. The MP4 records every second physics frame at 30 fps, matching the
+60 Hz simulation clock. `--snapshot` saves the last frame. The orbit is a
+scripted camera motion, not robot motion or learned behaviour.
+
+Terrain controls (engineering assumptions, **not measured orchard soil**):
+
+- `--terrain-amplitude`: nonnegative height range in metres above a 4 mm offset;
+  default 0.05 m. The 0.24 m preview deliberately makes relief easier to see;
+  start with 0.03–0.05 m for robot experiments. Traversability is not validated.
+- `--terrain-wavelength`: positive dominant bump spacing in metres; default 1.8.
+  Three noise scales share a finite-resolution grid, so very small wavelengths
+  cannot create arbitrarily fine geometry.
+- `--terrain-extent`: ground half-extent in metres; 6 gives a 12 × 12 m patch.
+  If omitted (`terrain_extent=None` in Python), it fits the plantation with a
+  0.5 m post margin and a minimum half-extent of 14 m. An explicit value must
+  cover the posts plus that margin. Outside the patch, ground is flat; constrain
+  training episodes to the patch (the edge may have a step).
+- `--terrain-seed`: specify a nonnegative integer (for example,
+  `--terrain-seed 7`) to reproduce exactly the same ground. **Omit it for new
+  random kiwi ground on every launch**, independently of the canopy and fruit.
+  The chosen seed is printed at startup and saved in metrics. Rebuild at episode
+  reset with a new seed or amplitude for curriculum/domain randomization.
+  Batched worlds share one terrain; independent per-world terrain generation
+  and terrain-aware RL integration are not implemented here. The existing
+  fixed-base harvesting interface is documented separately below.
+
+Programmatic use: set `cfg.physics.terrain = True`, `terrain_seed`,
+`terrain_amplitude`, `terrain_wavelength`, and `terrain_extent` before calling
+`builder.generate_and_build(cfg)`. For deterministic programmatic builds,
+`terrain_seed=None` still inherits `cfg.seed`; sample a new `terrain_seed` at
+each episode reset for independent ground. The demo launcher handles that
+sampling automatically. `tree.terrain_height(x, y)` provides a
+bilinear height estimate for spawn/planning; actual contact follows the
+heightfield triangles. Robot spawning and policy observations are not adapted
+here—avoid spawning feet inside bumps when integrating a legged RL task.
+Metrics save the scene and terrain seeds and terrain dimensions.
+Kiwi terrain uses a 2 ms, critically damped MuJoCo contact reference with higher
+contact priority than fruit (`ke=250000`, `kd=1000` in Newton's numerical
+mapping). These are rigid-ground solver settings, not measured soil or fruit
+stiffness. The old 20 ms blended response let a sustained 20 N pull drive a
+small kiwi through the heightfield. Use the demonstrated 40 substeps at 60 Hz;
+larger timesteps and GPU execution still need separate validation.
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/check_kiwi_physics.py --device cpu --terrain
+```
+
+CPU scene stepping retains main's native MuJoCo contact adapter and collision
+coverage fixes. GPU scene stepping uses MuJoCo-Warp. The isolated fast-impact
+unit test additionally exercises MuJoCo-Warp on CPU. These are different
+backends; passing the CPU checks does not establish GPU equivalence.
+
+The terrain check verifies attachment at rest, physical pull detachment, falling,
+settling on the elevated ground and measured contact force. The suite also
+checks high-speed forced impacts against the collision heightfield.
+These checks do not establish rough-terrain Spot locomotion or harvesting success.
+
+#### Three reproducible terrain examples
+
+Use terrain seeds **101**, **202**, and **303** to compare three different
+surfaces. All three use canopy/fruit seed **42**, a 3 × 3 post layout, the same
+camera path, a 12 × 12 m patch, 0.24 m height range, 1.8 m dominant wavelength,
+and 40 kiwis. These commands use the integrated supported-cane geometry;
+pre-integration render files must be regenerated to match it.
+Only the terrain seed changes. Each video covers 3 simulated seconds
+(180 physics frames, encoded as 90 frames at 30 fps); the PNG is the final view.
+
+Run from the repository root with the pinned environment installed:
+
+```bash
+for terrain_seed in 101 202 303; do
+  .venv/bin/python scripts/grow_tree.py \
+    --preset pergola --foliage --seed 42 \
+    --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+    --terrain --terrain-seed "$terrain_seed" \
+    --terrain-amplitude .24 --terrain-wavelength 1.8 --terrain-extent 6 \
+    --device cpu --substeps 40 --viewer gl --headless --frames 180 \
+    --camera-orbit 20 --progress-every 60 \
+    --snapshot "output/kiwi-terrain-${terrain_seed}.png" \
+    --video "output/kiwi-terrain-${terrain_seed}.mp4" \
+    --metrics "output/kiwi-terrain-${terrain_seed}.json" || break
+done
+```
+
+Use `python` instead of `.venv/bin/python` if the conda environment is active.
+The loop is sequential to avoid competing render jobs on a small CPU machine.
+It overwrites the corresponding generated files when rerun.
+
+| Terrain seed | Snapshot | Video | Metrics |
+|---|---|---|---|
+| 101 | [PNG](output/kiwi-terrain-101.png) | [MP4](output/kiwi-terrain-101.mp4) | [JSON](output/kiwi-terrain-101.json) |
+| 202 | [PNG](output/kiwi-terrain-202.png) | [MP4](output/kiwi-terrain-202.mp4) | [JSON](output/kiwi-terrain-202.json) |
+| 303 | [PNG](output/kiwi-terrain-303.png) | [MP4](output/kiwi-terrain-303.mp4) | [JSON](output/kiwi-terrain-303.json) |
+
+These are local generated artifacts, intentionally excluded from Git. The
+links work after generating them; a fresh clone or GitHub's README view will
+not contain the files. This is a scripted camera preview, not robot navigation.
+
+For interactive viewing of one example:
+
+```bash
+.venv/bin/python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+  --terrain --terrain-seed 202 --terrain-amplitude .24 \
+  --terrain-wavelength 1.8 --terrain-extent 6 \
+  --device cpu --substeps 40 --viewer gl
+```
+
+For display-free simulation, use `--viewer null --frames 60` instead of GL,
+and omit `--snapshot`, `--video`, `--headless`, and `--camera-orbit`.
+To obtain a different random terrain each launch, omit `--terrain-seed`.
+
+#### How generation works (agent handoff)
+
+The implementation is `treesim/builder.py::_add_terrain`; the public scene
+entry point is `builder.generate_and_build(cfg)`. For the kiwi path:
+
+1. The terrain seed initializes a local NumPy random generator, separate from
+   canopy and fruit sampling. Random lattice values are normally distributed.
+2. Three periodic noise layers use target wavelengths `w`, `w/2`, `w/4` and
+   weights `1.0`, `0.35`, `0.12`. Integer lattice dimensions make the exact
+   wavelength approximate. Quintic interpolation, `6t^5 - 15t^4 + 10t^3`,
+   smooths transitions between lattice values.
+3. The combined field is normalized to `[0, 1]`, then mapped to world heights
+   `0.004 + terrain_amplitude * noise` in metres. Amplitude is the full height
+   range, not a standard deviation and not a plus/minus offset.
+4. Grid spacing targets 0.08 m, with 48–384 cells per axis; extreme extents or
+   tiny wavelengths are resolution-limited. The 12 m examples have 150 cells
+   per axis (151 × 151 height samples, including the repeated boundary).
+5. The same Newton heightfield supplies rendering and collision geometry.
+   Posts are fixed below the surface; there is **no terrain deformation around
+   posts**. This models rigid ground, not deformable soil.
+
+Preserve the seed **and** terrain settings, scene geometry, environment count,
+code revision and pinned dependency versions to reproduce an experiment.
+Metrics record `summary.scene_seed` and `summary.terrain` (seed, amplitude,
+wavelength, half-extent, noise algorithm and octave count). Record the code
+revision separately with `git rev-parse HEAD`, and note any uncommitted edits.
+
+#### Programmatic episode generation for other agents
+
+This lightweight example builds three fresh CPU episodes with eight kiwis and
+no foliage or rendering. It samples a reproducible **sequence** of terrain
+seeds from a master seed, suitable for matched-seed comparisons. It does not
+implement an RL environment, policy, observation space, action space or reward.
+
+```python
+import numpy as np
+
+from treesim import builder
+from treesim.config import TreeConfig
+from treesim.metrics import Metrics
+from treesim.sim import Sim
+
+terrain_rng = np.random.default_rng(2026)
+for episode in range(3):
+    cfg = TreeConfig.compliant("pergola")
+    cfg.device = "cpu"
+    cfg.seed = 42
+    cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+    cfg.physics.terrain = True
+    cfg.physics.terrain_kind = "noise"
+    cfg.physics.terrain_seed = int(terrain_rng.integers(0, 2**31))
+    cfg.physics.terrain_amplitude = 0.05
+    cfg.physics.terrain_wavelength = 1.8
+    cfg.physics.terrain_extent = 6.0
+    cfg.fruit.enabled = True
+    cfg.fruit.max_count = 8
+    cfg.fruit.joint = "free"
+    cfg.fruit.colors = ((0.39, 0.27, 0.12), (0.48, 0.34, 0.17))
+
+    tree = builder.generate_and_build(cfg)
+    sim = Sim(tree, fps=60, substeps=40, collisions=True)
+    metrics = Metrics(f"output/terrain-episode-{episode:03d}.json")
+    for frame in range(10):
+        sim.step()
+        metrics.frame()
+    metrics.save(sim)
+    print(episode, cfg.physics.terrain_seed, tree.terrain_height(0.0, 0.0))
+```
+
+Agent integration rules:
+
+- **CLI versus Python:** the kiwi launcher chooses a random terrain seed when
+  omitted. In direct Python builds, `terrain_seed=None` inherits `cfg.seed`;
+  it does not sample a new seed. Set an explicit sampled seed per episode.
+- **Reset:** rebuild the model and `Sim` for a new terrain, as above. Changing
+  `cfg.physics.terrain_seed` after construction does not replace the existing
+  heightfield. Recreate controllers, state and any CUDA graph tied to that model;
+  this is not an in-place vectorized reset implementation.
+- **Spawn and clearance:** use `tree.terrain_height(x, y)` for an approximate
+  bilinear height query; collision uses triangles. Check all foot/wheel contact
+  positions, robot orientation, canopy clearance and post clearance before
+  starting an episode. Existing robot spawns do not automatically follow terrain.
+- **Batching:** worlds currently share one periodic heightfield; changing
+  `num_envs` changes the display tiling and may change the generated field.
+  Use separate single-environment builds for different terrain seeds today.
+  The retained native CPU contact adapter supports one world only; do not use
+  `--num-envs` greater than 1 for CPU kiwi physics.
+- **Curriculum:** start around 0.03–0.05 m amplitude, then increase deliberately.
+  The 0.24 m renders exaggerate relief for inspection; they are not validated
+  traversability targets. Keep evaluation seeds fixed and separate from training
+  seeds, and stay away from the finite patch boundary.
+- **Validation:** run the suite and terrain pull/drop check above after changes.
+  Inspect renders as well as metrics. No detachments at rest is only a stability
+  check; it is not harvesting success. GPU stepping, terrain-aware Spot control
+  and end-to-end RL training still require their own validation.
+- **Artifacts:** save unique output names and seeds per episode. Keep generated
+  images, videos, metrics and external robot assets out of Git. Do not change
+  the pinned physics dependencies to make a run pass.
+
 ### Spot with a loaded basket
 
 ```bash
@@ -136,15 +381,16 @@ python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --metrics output/spot-basket.json
 ```
 
-Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add `--terrain` to walk
-the same scripted oval on the orchard floor; sampled slope, rut, noise and
+Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add
+`--terrain --terrain-kind orchard` to walk the same scripted oval on the
+retained orchard floor; sampled slope, rut, noise and
 friction are written into the metrics JSON. The pretrained gait was not trained
 on this surface. The arm holds its ready pose; random arm poses and payload-aware
 locomotion retraining are not complete. For a numerical run, replace the video
 options with `--no-render`.
 
 ```bash
-python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain \
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain --terrain-kind orchard \
   --frames 600 --video output/spot-orchard.mp4 --metrics output/spot-orchard.json
 ```
 
@@ -245,7 +491,7 @@ known source inconsistencies and missing measurements.
   collision path allowed a fruit to escape a stationary basket. Planar Spot
   lower-leg collision hulls receive 1 mm thickness for native compatibility;
   the original body inertia is retained.
-- **Orchard floor:** `--terrain` on a pergola scene samples an assumed domain-
+- **Orchard floor:** `--terrain --terrain-kind orchard` samples an assumed domain-
   randomization heightfield (2 m vine rows, grassed pasillos, ~0.64 m bare
   surcos, slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and 20–60 cm wide,
   friction 0.6–1.3). It is an assumed compact layout, not a measured

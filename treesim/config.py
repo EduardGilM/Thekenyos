@@ -225,7 +225,9 @@ class PhysicsParams:
     # so ~3 cm is a defensible mid proxy for a driveable grassed alley.
     terrain_amplitude: float = 0.03    # max bump height [m] (orchard alley ~1-3 cm)
     terrain_wavelength: float = 1.8    # dominant bump size [m]
-    terrain_extent: float = 14.0       # half-extent of the field [m]
+    terrain_extent: float | None = None       # half-extent of the field [m]
+    terrain_seed: int | None = None
+    terrain_kind: str = "noise"
     # Kiwi orchard floor (pergola + terrain=True). Apple --terrain keeps the
     # value-noise field above. Ranges are assumed domain-randomization bounds,
     # not a measured orchard-floor survey. Wet soil and liner friction remain
