@@ -177,7 +177,9 @@ class TrainingMonitorTests(unittest.TestCase):
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
         self.assertIn('hover_tcp_world_m', inspect.getsource(apply_native_easy_hover))
-        self.assertIn('random_easy_start_local_m', inspect.getsource(apply_native_easy_start))
+        self.assertIn('easy_over_opening_local_m', inspect.getsource(apply_native_easy_start))
+        self.assertIn('tcp_over_opening_above_rim', inspect.getsource(apply_native_easy_start))
+        self.assertIn('start_over_opening', inspect.getsource(apply_native_easy_start))
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))

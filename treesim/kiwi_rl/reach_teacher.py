@@ -8,8 +8,9 @@ import numpy as np
 def hover_tcp_local_m(clearance_m=0.12):
     """Chassis-frame TCP *drop* target above the open basket rim.
 
-    Used by the privileged teacher, not as the episode start. Start poses use
-    ``easy_start_local_m`` so the arm is spawned outside the crate.
+    Used by the privileged teacher, not as the episode start. Student starts
+    use ``easy_over_opening_local_m`` when ``start_over_opening`` is set;
+    otherwise ``easy_start_local_m`` stays outside the crate.
     """
     from treesim.basket import CENTER, SIZE
     clearance = float(clearance_m)
@@ -110,6 +111,76 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
     if point[2] < hi[2]:
         point[2] = hi[2]
     return point
+
+
+def tcp_over_opening_above_rim(local, *, radius_m=None, min_clearance_m=None):
+    """True if a chassis-frame TCP is over the opening and above the rim.
+
+    Rejects poses inside the liner and poses beside the crate. This is the
+    over-opening student-start gate; it does not weld or write fruit.
+    """
+    from treesim.basket import CENTER, SIZE
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    point = np.asarray(local, dtype=np.float64).reshape(3)
+    radius = float(EASY_PRESET['open_xy_m'] if radius_m is None else radius_m)
+    clearance = float(EASY_PRESET['start_clearance_m'] if min_clearance_m is None else min_clearance_m)
+    if not np.isfinite(point).all() or not np.isfinite(radius) or not np.isfinite(clearance):
+        raise ValueError('over-opening TCP checks must be finite')
+    if not 0.0 < radius <= 0.5 or not 0.0 <= clearance <= 0.5:
+        raise ValueError('over-opening radius/clearance must be in (0, 0.5] / [0, 0.5] m')
+    rim = float(CENTER[2] + SIZE[2])
+    dx = float(point[0] - CENTER[0])
+    dy = float(point[1] - CENTER[1])
+    if dx * dx + dy * dy >= radius * radius:
+        return False
+    return float(point[2]) >= rim + clearance - 1e-9
+
+
+def easy_over_opening_local_m(rng=None, *, clearance_m=None, radius_m=None, inset_x_m=None):
+    """Chassis-frame TCP over the basket opening, above the rim.
+
+    Samples a disk on the robot side of the hole so the wrist stays out of
+    the liner. Does not shove the TCP outside the crate. Fruit stays free;
+    the caller still places it in the pad pocket.
+    """
+    from treesim.basket import CENTER, SIZE
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    clearance = float(EASY_PRESET['start_clearance_m'] if clearance_m is None else clearance_m)
+    radius = float(EASY_PRESET['start_open_radius_m'] if radius_m is None else radius_m)
+    inset = float(EASY_PRESET['start_inset_x_m'] if inset_x_m is None else inset_x_m)
+    z_span = float(EASY_PRESET['start_z_span_m'])
+    open_xy = float(EASY_PRESET['open_xy_m'])
+    if not np.isfinite([clearance, radius, inset, z_span, open_xy]).all():
+        raise ValueError('over-opening start spans must be finite')
+    if not 0.05 <= clearance <= 0.5:
+        raise ValueError('start clearance must be finite in [0.05, 0.5] m')
+    if not 0.0 < radius <= 0.15 or radius > open_xy + 1e-12:
+        raise ValueError('start_open_radius_m must be in (0, 0.15] m and <= open_xy_m')
+    if not 0.0 <= inset <= 0.12:
+        raise ValueError('start_inset_x_m must be finite in [0, 0.12] m')
+    if not 0.0 <= z_span <= 0.2:
+        raise ValueError('start_z_span_m must be finite in [0, 0.2] m')
+    if inset + radius > open_xy + 1e-12:
+        raise ValueError('inset plus sample radius must stay inside the opening')
+    rim = float(CENTER[2] + SIZE[2])
+    ax = float(CENTER[0]) + inset
+    ay = float(CENTER[1])
+    if rng is None:
+        local = np.array([ax, ay, rim + clearance], dtype=np.float64)
+    else:
+        if not hasattr(rng, 'uniform'):
+            raise TypeError('rng must be a NumPy Generator')
+        u = float(rng.random())
+        sample_r = radius * float(np.sqrt(max(0.0, u)))
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        local = np.array([
+            ax + sample_r * float(np.cos(theta)),
+            ay + sample_r * float(np.sin(theta)),
+            rim + clearance + float(rng.uniform(0.0, z_span)),
+        ], dtype=np.float64)
+    if not tcp_over_opening_above_rim(local, radius_m=open_xy, min_clearance_m=clearance):
+        raise ValueError('over-opening start TCP is not over the hole above the rim')
+    return local
 
 
 def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer_m=0.0):

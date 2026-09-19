@@ -776,10 +776,11 @@ class FastRuntime:
         self._layout_dy.assign(_arr('layout_dy_m', np.float32, 0.0))
 
     def _solve_easy_poses(self, initial_qpos):
-        """CPU IK: high drop pose for the teacher, random outside-crate starts."""
+        """CPU IK: high drop pose, then over-opening or outside-crate starts."""
         from .reach_teacher import (
-            easy_start_local_m, hover_tcp_world_m, random_easy_start_local_m,
-            solve_tcp_hover, tcp_outside_basket,
+            easy_over_opening_local_m, easy_start_local_m, hover_tcp_world_m,
+            random_easy_start_local_m, solve_tcp_hover, tcp_outside_basket,
+            tcp_over_opening_above_rim,
         )
         contract = self.control.contract
         qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
@@ -805,27 +806,33 @@ class FastRuntime:
             drop_q, drop_err = q_home.astype(np.float32), 1.0
         n = int(EASY_PRESET['n_start_poses'])
         accept = float(EASY_PRESET['ik_accept_err_m'])
+        over_opening = bool(EASY_PRESET.get('start_over_opening'))
         start_qs = []
         start_errs = []
-        q_init = q_home.copy()
-        near = easy_start_local_m(
-            0.0, home_local,
-            margin_m=EASY_PRESET['start_margin_m'],
-            clearance_m=EASY_PRESET['start_clearance_m'])
+        q_init = drop_q.astype(np.float64) if over_opening else q_home.copy()
         rng = np.random.default_rng(7)
         attempts = 0
         max_attempts = n * 8
         while len(start_qs) < n and attempts < max_attempts:
             attempts += 1
-            if not start_qs:
-                local = near
+            if over_opening:
+                local = easy_over_opening_local_m(None if not start_qs else rng)
+                if not tcp_over_opening_above_rim(local):
+                    continue
+            elif not start_qs:
+                local = easy_start_local_m(
+                    0.0, home_local,
+                    margin_m=EASY_PRESET['start_margin_m'],
+                    clearance_m=EASY_PRESET['start_clearance_m'])
+                if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+                    continue
             else:
                 local = random_easy_start_local_m(
                     rng, home_local,
                     margin_m=EASY_PRESET['start_margin_m'],
                     clearance_m=EASY_PRESET['start_clearance_m'])
-            if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
-                continue
+                if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+                    continue
             target = chassis_p + chassis_R @ local
             arm_q, err = solve_tcp_hover(
                 self.model, qpos, self.tcp_site, target, qids, dofs, q_init, ranges)
@@ -835,7 +842,8 @@ class FastRuntime:
             start_errs.append(float(err))
             q_init = arm_q.astype(np.float64)
         if not start_qs:
-            raise ValueError('easy start IK found no physics-safe outside-crate pose')
+            kind = 'over-opening' if over_opening else 'outside-crate'
+            raise ValueError(f'easy start IK found no physics-safe {kind} pose')
         while len(start_qs) < n:
             start_qs.append(start_qs[0])
             start_errs.append(start_errs[0])
@@ -854,10 +862,11 @@ class FastRuntime:
         return drop_q.astype(np.float32), float(drop_err), np.stack(start_qs), np.asarray(start_errs)
 
     def set_easy_progress(self, far_frac, rng):
-        """Sample a random outside-crate start and a jaw hold close-fraction.
+        """Sample a catalog start pose and a jaw hold close-fraction.
 
         ``far_frac`` is kept for logs/clips; starts are drawn from the whole
-        IK catalog so the student sees many carry distances. Fruit stays free.
+        IK catalog. Over-opening starts only vary the lower/release, not a
+        full carry. Fruit stays free.
         """
         frac = float(far_frac)
         if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
@@ -880,10 +889,11 @@ class FastRuntime:
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
-        Does not weld fruit, spawn the arm inside the crate, or write fruit
-        into the liner. The script overwrites only the jaw increment. Eval
-        still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
-        fractions are a rigid contact sweep, not a calibrated tissue-safe force.
+        Does not weld fruit, spawn the arm inside the liner, or write fruit
+        into the liner. Over-opening starts sit above the rim. The script
+        overwrites only the jaw increment. Eval still sets guidance_weight=0
+        and must keep teacher_mix at 0. Jaw close fractions are a rigid
+        contact sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))

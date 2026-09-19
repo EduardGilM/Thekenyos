@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 import numpy as np
@@ -117,9 +118,10 @@ class CurriculumTest(unittest.TestCase):
             apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
         )
         from treesim.kiwi_rl.reach_teacher import (
-            basket_chassis_aabb_m, easy_start_local_m, easy_start_side_y_m, hold_close_fracs,
-            hover_tcp_local_m, jaw_hold_q, random_easy_start_local_m, select_hold_close,
-            tcp_outside_basket,
+            basket_chassis_aabb_m, easy_over_opening_local_m, easy_start_local_m,
+            easy_start_side_y_m, hold_close_fracs, hover_tcp_local_m, jaw_hold_q,
+            random_easy_start_local_m, select_hold_close, tcp_outside_basket,
+            tcp_over_opening_above_rim,
         )
         from treesim.basket import CENTER, SIZE
         deposit = stage_named('deposit_pixels')
@@ -129,13 +131,17 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['teacher_horizon_updates'], 60)
         self.assertEqual(preset['shaping_coef'], 5.0)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
+        self.assertTrue(preset['start_over_opening'])
+        self.assertEqual(preset['start_open_radius_m'], 0.08)
+        self.assertEqual(preset['start_inset_x_m'], 0.06)
         self.assertEqual(preset['start_margin_m'], 0.32)
         self.assertEqual(preset['start_x_span_m'], 0.08)
-        self.assertEqual(preset['start_clearance_m'], 0.10)
+        self.assertEqual(preset['start_clearance_m'], 0.16)
         self.assertEqual(preset['shaping_length_m'], 0.60)
         self.assertEqual(preset['default_shaping_length_m'], 0.25)
         self.assertEqual(preset['start_side_y_m'], 0.10)
         self.assertEqual(preset['start_y_span_m'], 0.04)
+        self.assertEqual(preset['start_z_span_m'], 0.04)
         self.assertEqual(preset['deposit_reward'], 100.0)
         self.assertEqual(HOLD_SWEEP_MARGIN_M, 0.40)
         self.assertEqual(HOLD_SWEEP_CLEARANCE_M, 0.28)
@@ -154,10 +160,22 @@ class CurriculumTest(unittest.TestCase):
         np.testing.assert_allclose(hover, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
         self.assertGreater(float(hover[2]), float(CENTER[2] + SIZE[2]))
         self.assertFalse(tcp_outside_basket(hover, margin_m=0.04, above_rim_m=0.0))
+        self.assertTrue(tcp_over_opening_above_rim(hover_tcp_local_m(0.28)))
+        self.assertFalse(tcp_over_opening_above_rim(hover, min_clearance_m=0.16))
+        over = easy_over_opening_local_m()
+        self.assertTrue(tcp_over_opening_above_rim(over))
+        self.assertFalse(tcp_outside_basket(over, margin_m=0.04, above_rim_m=0.0))
+        self.assertAlmostEqual(float(over[0]), float(CENTER[0] + 0.06))
+        self.assertAlmostEqual(float(over[1]), float(CENTER[1]))
+        self.assertAlmostEqual(float(over[2]), float(CENTER[2] + SIZE[2] + 0.16))
+        self.assertLess(float(np.linalg.norm(over[:2] - CENTER[:2])), 0.15)
+        liner = np.array([float(CENTER[0]), float(CENTER[1]), float(CENTER[2] + 0.05)])
+        self.assertFalse(tcp_over_opening_above_rim(liner, min_clearance_m=0.0))
         lo, hi = basket_chassis_aabb_m()
         np.testing.assert_allclose(hi[2], CENTER[2] + SIZE[2])
         near = easy_start_local_m(0.0)
         far = easy_start_local_m(1.0)
+        self.assertFalse(tcp_over_opening_above_rim(near))
         self.assertAlmostEqual(easy_start_side_y_m(), 0.10)
         self.assertAlmostEqual(easy_start_side_y_m(side_y_m=0.0), 0.0)
         self.assertAlmostEqual(float(near[1]), float(CENTER[1] + 0.10))
@@ -200,12 +218,24 @@ class CurriculumTest(unittest.TestCase):
         self.assertGreater(max(xs) - min(xs), 0.02)
         for pose in sampled:
             self.assertTrue(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
+            self.assertFalse(tcp_over_opening_above_rim(pose))
             self.assertGreaterEqual(float(pose[0]), float(hi[0] + 0.32) - 1e-9)
             self.assertLessEqual(float(pose[0]), float(hi[0] + 0.32 + 0.08) + 1e-9)
-            self.assertGreaterEqual(float(pose[2]), float(hi[2] + 0.10) - 1e-9)
-            self.assertLessEqual(float(pose[2]), float(hi[2] + 0.10 + 0.08) + 1e-9)
+            self.assertGreaterEqual(float(pose[2]), float(hi[2] + 0.16) - 1e-9)
+            self.assertLessEqual(float(pose[2]), float(hi[2] + 0.16 + 0.04) + 1e-9)
             self.assertGreaterEqual(abs(float(pose[1]) - float(CENTER[1])), 0.10 - 1e-9)
             self.assertLessEqual(abs(float(pose[1]) - float(CENTER[1])), 0.10 + 0.04 + 1e-9)
+        over_samples = [easy_over_opening_local_m(rng) for _ in range(8)]
+        for pose in over_samples:
+            self.assertTrue(tcp_over_opening_above_rim(pose))
+            self.assertFalse(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
+            self.assertLess(float(np.linalg.norm(pose[:2] - CENTER[:2])), 0.15)
+            self.assertGreaterEqual(float(pose[2]), float(hi[2] + 0.16) - 1e-9)
+            self.assertLessEqual(float(pose[2]), float(hi[2] + 0.16 + 0.04) + 1e-9)
+        with self.assertRaises(ValueError):
+            easy_over_opening_local_m(clearance_m=0.0)
+        with self.assertRaises(ValueError):
+            easy_over_opening_local_m(radius_m=0.20)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
@@ -220,6 +250,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('self._shaping_length', src)
         self.assertIn('self._deposit_w', src)
         self.assertIn('side_y_m=0.0', src)
+        self.assertIn('start_over_opening', src)
+        self.assertIn('easy_over_opening_local_m', src)
+        self.assertIn('tcp_over_opening_above_rim', src)
         self.assertIn('self._easy_pin', src)
         self.assertIn('qpos[world, jaw_qposadr] = hold', src)
         self.assertIn('def _run_hold_sweep', src)
@@ -234,6 +267,9 @@ class CurriculumTest(unittest.TestCase):
         teacher_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'reach_teacher.py').read_text(encoding='utf-8')
         self.assertIn('def sweep_jaw_hold', teacher_src)
         self.assertIn('def easy_start_side_y_m', teacher_src)
+        self.assertIn('def easy_over_opening_local_m', teacher_src)
+        self.assertIn('def tcp_over_opening_above_rim', teacher_src)
+        self.assertNotIn('push_tcp_outside_basket', inspect.getsource(easy_over_opening_local_m))
         self.assertIn('def scripted_jaw_target', teacher_src)
         self.assertIn('def fruit_in_release_zone', teacher_src)
         self.assertIn('def adapt_scripted_hold_q', teacher_src)

@@ -488,6 +488,9 @@ def run(args):
             config['hold_close_frac'] = easy_info.get('hold_close_frac')
             config['shaping_length_m'] = easy_info.get('shaping_length_m')
             config['deposit_reward'] = easy_info.get('deposit_reward')
+            config['start_over_opening'] = EASY_PRESET['start_over_opening']
+            config['start_open_radius_m'] = EASY_PRESET['start_open_radius_m']
+            config['start_inset_x_m'] = EASY_PRESET['start_inset_x_m']
             config['start_clearance_m'] = EASY_PRESET['start_clearance_m']
             config['start_side_y_m'] = EASY_PRESET['start_side_y_m']
             config['hold_sweep_slip_m'] = easy_info.get('hold_sweep_slip_m')

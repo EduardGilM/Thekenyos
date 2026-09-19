@@ -69,25 +69,27 @@ EASY_PRESET = {
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    # 0.40 m + 0.32 m span put the mean start ~0.56 m in front of the rim;
-    # the 1.28 s PPO window then never sees a settled deposit. 0.12 m clips
-    # the wrist; 0.22 m put the pads through the front wall and dumped.
-    # 0.32 m / 0.08 m span stays outside. Start Z is 0.10 m above the rim
-    # so a 1.28 s window can finish the lower; the hold sweep stays at
+    # Student starts over the opening so the 1.28 s window only has to lower
+    # and release. 0.10 m over the hole put the wrist through the liner;
+    # 0.16 m plus a +X inset keeps TCP in the 15 cm opening while the wrist
+    # sits on the robot side of the front wall. Flip start_over_opening to
+    # restore the 0.32 m outside-crate carry. The hold sweep stays at
     # 0.40 m / 0.28 m so a closer student pose cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
     # not a measured length.
+    'start_over_opening': True,
+    'start_open_radius_m': 0.08,
+    'start_inset_x_m': 0.06,
     'start_margin_m': 0.32,
-    'start_clearance_m': 0.10,
+    'start_clearance_m': 0.16,
     'shaping_length_m': 0.60,
     'n_start_poses': 24,
     'start_x_span_m': 0.08,
     'start_y_span_m': 0.04,
-    # Opening radius is 0.15 m. 0.16–0.26 m Y plus a backward swing tracked
-    # the exterior side wall (easy21 clip) and crushed at 300–500 N. Keep
-    # |Y| in [0.10, 0.14] so a retract lands over the hole, still off-center.
+    # Kept for the outside-crate restore path. Over-opening samples a disk
+    # around CENTER + [inset_x, 0], not this side Y.
     'start_side_y_m': 0.10,
-    'start_z_span_m': 0.08,
+    'start_z_span_m': 0.04,
     # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
     # stay away. 100 is an engineering jackpot, not a measured harvest value.
     'deposit_reward': 100.0,

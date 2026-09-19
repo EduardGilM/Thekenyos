@@ -3,9 +3,10 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
-    hover_tcp_world_m, basket_chassis_aabb_m, easy_start_local_m,
-    grasp_local_near_tcp, hold_close_fracs, jaw_hold_q, jaw_open_closed_from_gaps,
-    offset_grasp_local, scripted_jaw_target, select_hold_close, tcp_outside_basket,
+    hover_tcp_world_m, basket_chassis_aabb_m, easy_over_opening_local_m,
+    easy_start_local_m, grasp_local_near_tcp, hold_close_fracs, jaw_hold_q,
+    jaw_open_closed_from_gaps, offset_grasp_local, scripted_jaw_target,
+    select_hold_close, tcp_outside_basket, tcp_over_opening_above_rim,
 )
 
 
@@ -63,10 +64,18 @@ class ReachTeacherMathTest(unittest.TestCase):
         pushed = push_tcp_outside_basket(inside, margin_m=0.40)
         self.assertGreaterEqual(float(pushed[0]), float(hi[0] + 0.40) - 1e-9)
         self.assertTrue(tcp_outside_basket(pushed, margin_m=0.04, above_rim_m=0.0))
+        over = easy_over_opening_local_m()
+        self.assertTrue(tcp_over_opening_above_rim(over))
+        self.assertFalse(tcp_outside_basket(over, margin_m=0.04, above_rim_m=0.0))
+        self.assertFalse(tcp_over_opening_above_rim(near))
+        self.assertFalse(tcp_over_opening_above_rim(inside, min_clearance_m=0.30))
+        self.assertTrue(tcp_over_opening_above_rim(inside, min_clearance_m=0.16))
         with self.assertRaises(ValueError):
             easy_start_local_m(-0.1)
         with self.assertRaises(ValueError):
             easy_start_local_m(1.1)
+        with self.assertRaises(ValueError):
+            tcp_over_opening_above_rim([np.nan, 0.0, 0.0])
 
     def test_hold_sweep_picks_tightest_contacting_keeper(self):
         fracs = hold_close_fracs()

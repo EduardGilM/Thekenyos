@@ -757,12 +757,13 @@ def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
 
 def apply_native_easy_start(model, data, controller, tcp_site: int, *,
                             far_frac: float = 0.0) -> float:
-    """Move the native arm to a random outside-crate carry start. Fruit is not written."""
+    """Move the native arm to the easy start pose. Fruit is not written."""
     import mujoco
     import numpy as np
     from treesim.kiwi_rl.curriculum import EASY_PRESET
     from treesim.kiwi_rl.reach_teacher import (
-        random_easy_start_local_m, solve_tcp_hover, tcp_outside_basket,
+        easy_over_opening_local_m, random_easy_start_local_m, solve_tcp_hover,
+        tcp_outside_basket, tcp_over_opening_above_rim,
     )
     frac = float(far_frac)
     if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
@@ -779,12 +780,17 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
     home_tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
     home_local = chassis_R.T @ (home_tcp - chassis_p)
     rng = np.random.default_rng(7 + int(round(frac * 10_000)))
-    local = random_easy_start_local_m(
-        rng, home_local,
-        margin_m=EASY_PRESET['start_margin_m'],
-        clearance_m=EASY_PRESET['start_clearance_m'])
-    if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
-        raise ValueError('easy start TCP still intersects the crate volume')
+    if EASY_PRESET.get('start_over_opening'):
+        local = easy_over_opening_local_m(rng)
+        if not tcp_over_opening_above_rim(local):
+            raise ValueError('easy start TCP is not over the opening above the rim')
+    else:
+        local = random_easy_start_local_m(
+            rng, home_local,
+            margin_m=EASY_PRESET['start_margin_m'],
+            clearance_m=EASY_PRESET['start_clearance_m'])
+        if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+            raise ValueError('easy start TCP still intersects the crate volume')
     target = chassis_p + chassis_R @ local
     q_init = np.asarray(data.qpos[qids], dtype=np.float64)
     arm_q, err = solve_tcp_hover(
