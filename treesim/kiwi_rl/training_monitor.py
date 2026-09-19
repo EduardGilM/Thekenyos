@@ -102,6 +102,32 @@ def due_checkpoints(run_dir: str | Path, every: int) -> list[Path]:
     return [path for _, path in sorted(due)]
 
 
+def due_latest_checkpoint(run_dir: str | Path, every: int) -> Path | None:
+    """Use latest.pt at the same cadence as numbered checkpoints.
+
+    Speedrun numbered files only exist every 50 updates; latest.pt is
+    overwritten every update so the CPU sidecar can still preview the student.
+    """
+    if not isinstance(every, int) or every < 0:
+        raise ValueError('video-every must be a non-negative integer')
+    if every == 0:
+        return None
+    latest = Path(run_dir) / 'latest.pt'
+    sidecar = Path(str(latest) + '.json')
+    if not latest.exists() or not sidecar.exists():
+        return None
+    try:
+        meta = json.loads(sidecar.read_text(encoding='utf-8'))
+        update = int(meta.get('completed_updates', 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if update < 1:
+        return None
+    if update != 1 and update % every != 0:
+        return None
+    return latest
+
+
 def compose_progress_frame(scene_rgb, gripper_rgb, *, overlay_px: int = 128, inset: int = 8):
     """Place a nearest-neighbour gripper view on a third-person frame."""
     import numpy as np

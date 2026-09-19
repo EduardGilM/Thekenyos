@@ -8,7 +8,7 @@ import numpy as np
 
 from treesim.kiwi_rl.training_monitor import (
     LiveDashboard, compose_progress_frame, curriculum_preview_from_checkpoint,
-    due_checkpoints, read_jsonl, render_dashboard_html, series_from_rows,
+    due_checkpoints, due_latest_checkpoint, read_jsonl, render_dashboard_html, series_from_rows,
     svg_chart, write_dashboard,
 )
 
@@ -64,6 +64,17 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertEqual([path.name for path in due_checkpoints(root, 5)],
                              ['checkpoint-0001.pt', 'checkpoint-0005.pt', 'checkpoint-0010.pt'])
             self.assertEqual(due_checkpoints(root, 0), [])
+
+    def test_due_latest_checkpoint_follows_completed_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'latest.pt').write_bytes(b'x')
+            (root / 'latest.pt.json').write_text(json.dumps({'completed_updates': 20}), encoding='utf-8')
+            self.assertEqual(due_latest_checkpoint(root, 10).name, 'latest.pt')
+            self.assertIsNone(due_latest_checkpoint(root, 50))
+            (root / 'latest.pt.json').write_text(json.dumps({'completed_updates': 0}), encoding='utf-8')
+            self.assertIsNone(due_latest_checkpoint(root, 10))
+            self.assertIsNone(due_latest_checkpoint(root, 0))
 
     def test_live_dashboard_copies_hub_and_lists_videos(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -12,8 +12,8 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from treesim.kiwi_rl.training_monitor import (
-    LiveDashboard, checkpoint_paths, due_checkpoints, record_progress_video,
-    spawn_progress_video,
+    LiveDashboard, checkpoint_paths, due_checkpoints, due_latest_checkpoint,
+    record_progress_video, spawn_progress_video,
 )
 
 
@@ -53,6 +53,23 @@ def record_due_videos(dashboard: LiveDashboard, *, every: int, steps: int, camer
             break
         spawned.append(dict(update=update, pid=process.pid, output=str(output)))
         break
+    if spawned:
+        return spawned
+    latest = due_latest_checkpoint(dashboard.run_dir, every)
+    if latest is None:
+        return spawned
+    info = checkpoint_paths(latest)
+    update = int(info['completed_updates'])
+    output = dashboard.video_path(update)
+    if output.exists() or output.with_name(output.stem + '.partial.mp4').exists():
+        return spawned
+    interval = info['camera_every'] if camera_every is None else camera_every
+    print(json.dumps(dict(event='record_progress_video', update=update,
+                          checkpoint=str(latest), output=str(output))), flush=True)
+    process = spawn_progress_video(latest, output, steps=steps, camera_every=interval)
+    if process is None:
+        return spawned
+    spawned.append(dict(update=update, pid=process.pid, output=str(output)))
     return spawned
 
 
