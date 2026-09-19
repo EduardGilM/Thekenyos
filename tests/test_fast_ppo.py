@@ -61,10 +61,25 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
         self.assertIn('evaluate_mission', source)
         self.assertIn('drain_faults', source)
+        self.assertIn('--speedrun', source)
+        self.assertIn('should_persist_checkpoint', source)
         run_src = inspect.getsource(train_fast.run)
         self.assertIn('fruit-count', run_src)
         self.assertIn('curriculum_blocked', run_src)
+        self.assertIn('eval_profile', run_src)
         self.assertNotIn('remaining curriculum through stage 6 needs', run_src)
+
+    def test_speedrun_checkpoint_stride_skips_idle_updates(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import should_persist_checkpoint
+        kw = dict(updates=2000, eval_every=100, checkpoint_every=50, video_every=50)
+        self.assertFalse(should_persist_checkpoint(1, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(50, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(100, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(7, promoted=True, **kw))
+        self.assertTrue(should_persist_checkpoint(2000, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(1, updates=2000, eval_every=50,
+                                                 checkpoint_every=1, video_every=10, promoted=False))
 
 
 if __name__ == '__main__':

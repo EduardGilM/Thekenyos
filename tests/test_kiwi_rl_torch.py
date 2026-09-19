@@ -137,6 +137,9 @@ class LearningRegressionTest(unittest.TestCase):
         torch.testing.assert_close(tanh_logprob(u, mu, ls), expected)
         np.testing.assert_allclose(gaussian_logprob_tanh(u.numpy(), mu.numpy(), ls.numpy()),
                                    expected.numpy(), atol=1e-6)
+        mask = torch.tensor([1., 0., 1.], dtype=torch.float64)
+        sliced = tanh_logprob(u[:, [0, 2]], mu[:, [0, 2]], ls[[0, 2]])
+        torch.testing.assert_close(tanh_logprob(u, mu, ls, dim_mask=mask), sliced)
 
     def test_saturated_logprob_stays_finite(self):
         from treesim.kiwi_rl.ppo import tanh_logprob

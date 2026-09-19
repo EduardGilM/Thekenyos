@@ -10,8 +10,9 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    evaluate_skills, evaluation_horizon_steps, fruit_block_reason, next_stage,
-    promotion_ready, sample_world_skills, stage_named, summarise_stage,
+    apply_speedrun_preset, evaluate_skills, evaluation_horizon_steps,
+    fruit_block_reason, idle_locomotion_mask, next_stage, promotion_ready,
+    sample_world_skills, stage_named, summarise_stage,
 )
 
 
@@ -25,8 +26,37 @@ def _split_action(raw):
     return applied[:, :3], applied[:, 3:10]
 
 
+def policy_dim_mask(stage, device, enabled=True):
+    """Zero N3 log-prob/entropy while the stage holds the chassis."""
+    import torch
+    if not enabled:
+        return None
+    mask = idle_locomotion_mask(10, stage.allow_locomotion)
+    if mask is None:
+        return None
+    return torch.as_tensor(mask, device=device)
+
+
+def should_persist_checkpoint(update_index, *, updates, eval_every, checkpoint_every,
+                              video_every, promoted):
+    """Write weights on eval, video, promotion, last update, or the checkpoint stride."""
+    if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 1:
+        raise ValueError('update_index must be a positive integer')
+    for name, value in (('updates', updates), ('eval_every', eval_every),
+                        ('checkpoint_every', checkpoint_every), ('video_every', video_every)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f'{name} must be a non-negative integer')
+    if updates < 1 or eval_every < 1 or checkpoint_every < 1:
+        raise ValueError('updates, eval_every and checkpoint_every must be >= 1')
+    if update_index == updates or promoted:
+        return True
+    if update_index % checkpoint_every == 0 or update_index % eval_every == 0:
+        return True
+    return bool(video_every) and update_index % video_every == 0
+
+
 def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, carry=None,
-            reset_all=False):
+            reset_all=False, dim_mask=None):
     import torch
     from treesim.kiwi_rl.ppo import tanh_logprob
     if carry is None:
@@ -49,7 +79,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             memory = memory * (~reset)[:, None]
             mean, logstd, value, memory = policy(rgbd, r84, memory)
             raw = mean if deterministic else mean + logstd.exp() * torch.randn_like(mean)
-            logp = tanh_logprob(raw, mean, logstd)
+            logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
             base, arm = _split_action(raw)
             runtime.set_base_commands(base.contiguous())
             runtime.set_gait_actions(gait(r84))
@@ -86,7 +116,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
 
 
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coef=0.005,
-           gamma=0.9996, epochs=1):
+           gamma=0.9996, epochs=1, dim_mask=None):
     import torch
     from treesim.kiwi_rl.ppo import (
         compute_gae_torch, gaussian_entropy, tanh_gaussian_entropy, tanh_logprob,
@@ -125,12 +155,12 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             for row in rows:
                 memory = memory * (~row['reset'][sl])[:, None]
                 mean, logstd, value, memory = policy(row['rgbd'][sl], row['r84'][sl], memory)
-                new_logp = tanh_logprob(row['raw'][sl], mean, logstd)
+                new_logp = tanh_logprob(row['raw'][sl], mean, logstd, dim_mask=dim_mask)
                 logps.append(new_logp)
                 predictions.append(value)
                 draw = mean + logstd.exp() * torch.randn_like(mean)
-                entropies.append(tanh_gaussian_entropy(logstd, raw=draw, mu=mean))
-                gaussians.append(gaussian_entropy(logstd))
+                entropies.append(tanh_gaussian_entropy(logstd, raw=draw, mu=mean, dim_mask=dim_mask))
+                gaussians.append(gaussian_entropy(logstd, dim_mask=dim_mask))
             logratio = torch.stack(logps) - torch.stack([r['logp'][sl] for r in rows])
             ratio = logratio.exp()
             kl = ((ratio - 1.) - logratio).mean()
@@ -149,7 +179,10 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             entropy_g = torch.stack(gaussians).mean()
             loss = actor + .5 * critic - entropy_coef * entropy
             (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
-            action_dim = int(logstd.shape[-1])
+            if dim_mask is None:
+                action_dim = int(logstd.shape[-1])
+            else:
+                action_dim = int(dim_mask.to(dtype=logstd.dtype).sum().clamp(min=1).item())
             metrics.append((float(loss.detach()), float(kl.detach()), float(entropy.detach()),
                             float(entropy_g.detach()), action_dim))
         if stop_extra:
@@ -178,11 +211,12 @@ def np_finite(value):
     return isinstance(value, (int, float)) and math.isfinite(float(value))
 
 
-def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0.02):
+def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0.02,
+                     eval_profile='default'):
     """Deterministic eval over the stage horizon without stacking RGBD history."""
     import torch
     runtime.configure_skills(evaluate_skills(stage, runtime.worlds))
-    horizon = evaluation_horizon_steps(stage, control_dt)
+    horizon = evaluation_horizon_steps(stage, control_dt, profile=eval_profile)
     runtime.reset()
     worlds = runtime.worlds
     memory = torch.zeros(worlds, 64, device='cuda:0')
@@ -246,6 +280,7 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/mean_harvested': float(harvested_peak.mean()),
         'evaluation/recovered_worlds': recovered_total,
         'evaluation/overflow_worlds': overflow_total,
+        'evaluation/eval_profile': eval_profile,
         'evaluation/worlds': worlds,
     }
 
@@ -302,11 +337,17 @@ def run(args):
         raise ValueError(
             f'stage {stage.name} needs {stage.fruit_count} fruit bodies; scene has {n_fruits}. '
             f'Re-export with --fruit-count {stage.fruit_count}.')
+    eval_profile = getattr(args, 'eval_profile', 'default')
+    mask_idle = bool(getattr(args, 'mask_idle_locomotion', True))
+    checkpoint_every = int(getattr(args, 'checkpoint_every', 1))
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
-                  curriculum=summarise_stage(stage),
+                  curriculum=summarise_stage(stage, profile=eval_profile),
                   training_ready=False,
+                  speedrun=bool(getattr(args, 'speedrun', False)),
+                  eval_profile=eval_profile,
+                  mask_idle_locomotion=mask_idle,
                   entropy_kind='tanh_gaussian_differential_nats',
                   scene_fruit_count=n_fruits,
                   curriculum_blocked_reason=blocked_reason,
@@ -326,41 +367,43 @@ def run(args):
             load_checkpoint(args.initialize_from, {'student':policy}, None,
                             expected_meta={'camera':'hand_color_sensor'})
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
+        dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
         apply_stage(runtime, stage, numpy_rng)
-        collect(runtime, policy, gait, 4, args.camera_every, reset_all=True)
+        collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask)
         torch.cuda.synchronize()
         start = time.monotonic()
         reports = []
-        initial_checkpoint = args.output / 'checkpoint-0000.pt'
-        save_checkpoint(initial_checkpoint, {'student':policy}, {'student':optimizer},
+        last_checkpoint = args.output / 'checkpoint-0000.pt'
+        save_checkpoint(last_checkpoint, {'student':policy}, {'student':optimizer},
             {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()},
             dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0,
                  curriculum_stage=stage.name))
         apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
         baseline = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
-                                    control_dt=runtime.control_dt)
+                                    control_dt=runtime.control_dt, eval_profile=eval_profile)
         baseline.update(curriculum_stage=stage.name, curriculum_index=stage.index)
         log.log(baseline, step=0)
         dashboard.refresh()
         if args.video_every:
-            spawn_progress_video(initial_checkpoint, dashboard.video_path(0),
+            spawn_progress_video(last_checkpoint, dashboard.video_path(0),
                                  steps=args.video_steps, camera_every=args.camera_every)
         evaluations = [dict(update=0, **baseline)]
         eval_success_rates = []
         eval_episodes = 0
         best_distance = baseline['evaluation/mean_closest_distance_m']
-        best_checkpoint = str(initial_checkpoint)
+        best_checkpoint = str(last_checkpoint)
         carry = {}
         apply_stage(runtime, stage, numpy_rng)
         for iteration in range(args.updates):
             began = time.monotonic()
             rows, bootstrap, carry = collect(runtime, policy, gait, args.steps, args.camera_every,
-                                             carry=carry, reset_all=False)
+                                             carry=carry, reset_all=False, dim_mask=dim_mask)
             torch.cuda.synchronize()
             rollout_seconds = time.monotonic() - began
             metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
-                             entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=args.ppo_epochs)
+                             entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=args.ppo_epochs,
+                             dim_mask=dim_mask)
             torch.cuda.synchronize()
             duration = time.monotonic() - began
             metrics.update(update=iteration+1, transitions=(iteration+1)*args.steps*args.worlds,
@@ -379,25 +422,20 @@ def run(args):
                 overflow_worlds=int(carry.get('overflow_worlds', 0)),
                 curriculum_stage=stage.name, curriculum_index=stage.index,
                 guidance_weight=stage.guidance_weight,
+                eval_profile=eval_profile,
+                idle_locomotion_masked=int(dim_mask is not None),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
-            checkpoint = args.output / f'checkpoint-{iteration+1:04d}.pt'
-            meta = dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
-                        model_sha256=manifest['model_sha256'], config=config, completed_updates=iteration+1,
-                        curriculum_stage=stage.name)
-            save_checkpoint(checkpoint, {'student':policy}, {'student':optimizer},
-                {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()}, meta)
             del rows, bootstrap
+            promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
                 apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
                 eval_metrics = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
-                                                control_dt=runtime.control_dt)
+                                                control_dt=runtime.control_dt, eval_profile=eval_profile)
                 evaluations.append(dict(update=iteration+1, **eval_metrics))
                 metrics.update(eval_metrics)
                 eval_success_rates.append(eval_metrics['evaluation/success_rate'])
                 eval_episodes += int(eval_metrics['evaluation/worlds'])
                 distance = eval_metrics['evaluation/mean_closest_distance_m']
-                if distance < best_distance:
-                    best_distance, best_checkpoint = distance, str(checkpoint)
                 if promotion_ready(eval_success_rates, stage, episodes_seen=eval_episodes):
                     nxt = next_stage(stage)
                     if nxt is not None and nxt.fruit_count > n_fruits:
@@ -409,9 +447,11 @@ def run(args):
                     else:
                         metrics['curriculum_promoted'] = True
                         metrics['curriculum_blocked'] = 0
+                        promoted = nxt is not None
                         if nxt is not None:
                             stage = nxt
-                            config['curriculum'] = summarise_stage(stage)
+                            dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
+                            config['curriculum'] = summarise_stage(stage, profile=eval_profile)
                             config['stage'] = stage.name
                             config['curriculum_blocked_reason'] = fruit_block_reason(stage, n_fruits)
                             (args.output / 'config.json').write_text(
@@ -422,20 +462,40 @@ def run(args):
                             apply_stage(runtime, stage, numpy_rng)
                             metrics['curriculum_stage'] = stage.name
                             metrics['curriculum_index'] = stage.index
+                            metrics['idle_locomotion_masked'] = int(dim_mask is not None)
                 else:
                     apply_stage(runtime, stage, numpy_rng)
                     carry = {}
+            persist = should_persist_checkpoint(
+                iteration + 1, updates=args.updates, eval_every=args.eval_every,
+                checkpoint_every=checkpoint_every, video_every=args.video_every,
+                promoted=promoted)
+            checkpoint = last_checkpoint
+            if persist:
+                checkpoint = args.output / f'checkpoint-{iteration+1:04d}.pt'
+                meta = dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
+                            model_sha256=manifest['model_sha256'], config=config,
+                            completed_updates=iteration+1, curriculum_stage=stage.name)
+                save_checkpoint(checkpoint, {'student':policy}, {'student':optimizer},
+                    {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()}, meta)
+                last_checkpoint = checkpoint
+                if 'evaluation/mean_closest_distance_m' in metrics:
+                    distance = metrics['evaluation/mean_closest_distance_m']
+                    if distance < best_distance:
+                        best_distance, best_checkpoint = distance, str(checkpoint)
+            metrics['checkpoint_written'] = int(persist)
             log.log(metrics, step=iteration+1)
             dashboard.refresh()
-            if args.video_every and (iteration + 1) % args.video_every == 0:
+            if persist and args.video_every and (iteration + 1) % args.video_every == 0:
                 spawn_progress_video(checkpoint, dashboard.video_path(iteration + 1),
                                      steps=args.video_steps, camera_every=args.camera_every)
             reports.append(metrics)
             print(json.dumps(metrics), flush=True)
-        log.log_checkpoint(checkpoint)
+        log.log_checkpoint(last_checkpoint)
         report = dict(config=config, updates=reports, evaluation=evaluations[-1],
                       baseline=baseline, evaluations=evaluations, best_reach_checkpoint=best_checkpoint,
-                      best_mean_closest_distance_m=best_distance, curriculum=summarise_stage(stage),
+                      best_mean_closest_distance_m=best_distance,
+                      curriculum=summarise_stage(stage, profile=eval_profile),
                       training_ready=False,
                       elapsed_seconds=time.monotonic()-start, wandb_url=log.url, numerical=runtime.check())
         (args.output/'report.json').write_text(json.dumps(report,indent=2)+'\n')
@@ -458,20 +518,37 @@ def main():
     p.add_argument('--minibatch-worlds', type=int, default=512)
     p.add_argument('--updates', type=int, default=2)
     p.add_argument('--eval-every', type=int, default=50)
+    p.add_argument('--checkpoint-every', type=int, default=1,
+                   help='Write student weights every N updates (always on eval/video/last)')
     p.add_argument('--camera-every', type=int, default=2)
     p.add_argument('--nconmax', type=int, default=128)
     p.add_argument('--njmax', type=int, default=512)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--stage', default='deposit_pixels',
                    help='TK-RL-003 curriculum stage to start from')
+    p.add_argument('--speedrun', action='store_true',
+                   help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
+    p.add_argument('--eval-profile', choices=['default', 'speedrun'], default='default')
+    p.add_argument('--mask-idle-locomotion', action=argparse.BooleanOptionalAction, default=True,
+                   help='Drop N3 from PPO log-prob/entropy while the stage holds the chassis')
     p.add_argument('--entropy-coef', type=float, default=0.005)
     p.add_argument('--gamma', type=float, default=0.9996)
     p.add_argument('--ppo-epochs', type=int, default=2)
     add_training_log_args(p)
     add_monitor_args(p)
     a = p.parse_args()
+    if a.speedrun:
+        preset = apply_speedrun_preset({})
+        a.eval_every = preset['eval_every']
+        a.checkpoint_every = preset['checkpoint_every']
+        a.entropy_coef = preset['entropy_coef']
+        a.video_every = preset['video_every']
+        a.mask_idle_locomotion = preset['mask_idle_locomotion']
+        a.eval_profile = preset['eval_profile']
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
+    if not 1 <= a.checkpoint_every <= 10000:
+        p.error('Invalid checkpoint-every')
     if not 0 <= a.video_every <= 10000 or not 8 <= a.video_steps <= 512:
         p.error('Invalid video-every or video-steps')
     if a.stage not in {s.name for s in __import__('treesim.kiwi_rl.curriculum', fromlist=['STAGES']).STAGES}:

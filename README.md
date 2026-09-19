@@ -739,6 +739,16 @@ FAST_SCENE=/path/to/fast-scene python -B -m unittest \
   tests.test_fast_ppo tests.test_training_log tests.test_curriculum -v
 ```
 
+`--speedrun` is the wall-clock preset for that same 1→6 chain: eval every 100 updates, checkpoints/videos every 50, entropy 0.01, and eval horizons 8/15/20/20/45/45 s. Training episode timeouts stay 30–900 s. Stages 01–03 still hold the chassis; PPO then drops the three N3 dimensions from log-prob and entropy (the env already zeros those commands). Promotion gates stay two consecutive evals at the blueprint rates after 200 evaluated worlds. This is not a teacher, a weld, or field harvest; `training_ready` stays false.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/speedrun \
+  --stage deposit_pixels --worlds 4096 --steps 64 --updates 2000 \
+  --minibatch-worlds 512 --speedrun \
+  --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
+```
+
 `--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
 weights with a fresh optimizer. The GPU runtime captures each 50 Hz control
 interval and evaluates contact/release outcomes at every physics substep. The

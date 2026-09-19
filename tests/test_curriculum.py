@@ -78,6 +78,39 @@ class CurriculumTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             promotion_ready([1.2, 1.0], stage)
 
+    def test_speedrun_shortens_eval_not_gates_or_timeouts(self):
+        deposit = stage_named('deposit_pixels')
+        harvest = stage_named('stationary_harvest')
+        multi = stage_named('multi_harvest')
+        self.assertAlmostEqual(evaluation_horizon_s(deposit), 30.0)
+        self.assertAlmostEqual(evaluation_horizon_s(deposit, profile='speedrun'), 8.0)
+        self.assertAlmostEqual(evaluation_horizon_s(harvest, profile='speedrun'), 20.0)
+        self.assertAlmostEqual(evaluation_horizon_s(multi, profile='speedrun'), 45.0)
+        self.assertEqual(deposit.gate_success_rate, 0.90)
+        self.assertEqual(deposit.gate_episodes, 200)
+        self.assertEqual(deposit.budget_s, 30.0)
+        from treesim.kiwi_rl.curriculum import (
+            SPEEDRUN_EVAL_CAP_S, SPEEDRUN_PRESET, apply_speedrun_preset,
+            idle_locomotion_mask, summarise_stage,
+        )
+        self.assertEqual(set(SPEEDRUN_EVAL_CAP_S), {stage.name for stage in STAGES})
+        preset = apply_speedrun_preset({'eval_every': 50, 'gate_success_rate': 0.90})
+        self.assertEqual(preset['eval_every'], 100)
+        self.assertEqual(preset['eval_profile'], 'speedrun')
+        self.assertEqual(preset['gate_success_rate'], 0.90)
+        self.assertNotIn('gate_episodes', SPEEDRUN_PRESET)
+        self.assertIsNone(idle_locomotion_mask(10, True))
+        self.assertIsNone(idle_locomotion_mask(7, False))
+        mask = idle_locomotion_mask(10, False)
+        np.testing.assert_array_equal(mask[:3], 0)
+        np.testing.assert_array_equal(mask[3:], 1)
+        summary = summarise_stage(deposit, profile='speedrun')
+        self.assertEqual(summary['eval_profile'], 'speedrun')
+        self.assertEqual(summary['evaluation_horizon_s'], 8.0)
+        self.assertFalse(summary['training_ready'])
+        with self.assertRaises(ValueError):
+            evaluation_horizon_s(deposit, profile='cheat')
+
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')
         self.assertIsNone(first_unsatisfied_stage(start, 5))

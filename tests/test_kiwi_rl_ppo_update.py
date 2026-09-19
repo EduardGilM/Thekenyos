@@ -75,6 +75,21 @@ class RecurrentPPOTest(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(tanh_h).all()))
         self.assertLess(float(tanh_h.mean()), 0.0)
 
+    def test_action_dim_mask_drops_idle_base_entropy(self):
+        torch.manual_seed(0)
+        logstd = torch.full((4, 10), -1.6)
+        mask = torch.tensor([0., 0., 0., 1., 1., 1., 1., 1., 1., 1.])
+        masked = ppo.gaussian_entropy(logstd, dim_mask=mask)
+        arm = ppo.gaussian_entropy(logstd[:, 3:])
+        np.testing.assert_allclose(masked.numpy(), arm.numpy(), rtol=1e-5, atol=1e-5)
+        mu = torch.zeros(4, 10)
+        raw = mu + logstd.exp() * torch.randn_like(mu)
+        masked_h = ppo.tanh_gaussian_entropy(logstd, raw=raw, mu=mu, dim_mask=mask)
+        arm_h = ppo.tanh_gaussian_entropy(logstd[:, 3:], raw=raw[:, 3:], mu=mu[:, 3:])
+        np.testing.assert_allclose(masked_h.detach().numpy(), arm_h.detach().numpy(), rtol=1e-5, atol=1e-5)
+        with self.assertRaises(ValueError):
+            ppo.gaussian_entropy(logstd, dim_mask=torch.full((10,), -1.))
+
     def test_kl_guard_stops_before_optimizer_step(self):
         model, batch = self.make_batch()
         batch['m']['log_prob'] += 10.

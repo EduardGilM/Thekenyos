@@ -40,6 +40,26 @@ POLICY_DT_S = 0.02
 # without OOM. Multi-fruit needs a longer cap than one-fruit stages.
 EVAL_CAP_S = 45.0
 MULTI_EVAL_CAP_S = 90.0
+EVAL_PROFILES = ('default', 'speedrun')
+# Speedrun eval caps keep the 0.5 s settle visible; they do not shorten training
+# episode timeouts or lower promotion gates. Deposit 8 s is ~16× settle time.
+SPEEDRUN_EVAL_CAP_S = {
+    'deposit_pixels': 8.0,
+    'grasp_detach': 15.0,
+    'stationary_harvest': 20.0,
+    'visual_approach': 20.0,
+    'multi_harvest': 45.0,
+    'generalise': 45.0,
+}
+# Wall-clock / PPO knobs only. Fruit stays free; oracle stays an evaluator.
+SPEEDRUN_PRESET = {
+    'eval_every': 100,
+    'checkpoint_every': 50,
+    'entropy_coef': 0.01,
+    'video_every': 50,
+    'mask_idle_locomotion': True,
+    'eval_profile': 'speedrun',
+}
 
 
 @dataclass(frozen=True)
@@ -232,19 +252,50 @@ def evaluate_skills(stage: Stage, worlds: int) -> dict[str, np.ndarray]:
     }
 
 
-def evaluation_horizon_s(stage: Stage) -> float:
+def evaluation_horizon_s(stage: Stage, *, profile: str = 'default') -> float:
     """Eval wall budget: stage timeout, capped so RGBD is not stacked."""
-    cap = MULTI_EVAL_CAP_S if stage.fruit_count > 1 else EVAL_CAP_S
+    if profile not in EVAL_PROFILES:
+        raise ValueError(f'unknown eval profile {profile!r}; expected one of {EVAL_PROFILES}')
+    if profile == 'speedrun':
+        try:
+            cap = float(SPEEDRUN_EVAL_CAP_S[stage.name])
+        except KeyError as exc:
+            raise ValueError(f'speedrun eval cap missing for {stage.name}') from exc
+        if not np.isfinite(cap) or cap <= 0:
+            raise ValueError(f'invalid speedrun eval cap for {stage.name}')
+    else:
+        cap = MULTI_EVAL_CAP_S if stage.fruit_count > 1 else EVAL_CAP_S
     return float(min(stage.budget_s, cap))
 
 
-def evaluation_horizon_steps(stage: Stage, control_dt: float = POLICY_DT_S) -> int:
+def evaluation_horizon_steps(stage: Stage, control_dt: float = POLICY_DT_S, *,
+                             profile: str = 'default') -> int:
     if not np.isfinite(control_dt) or control_dt <= 0:
         raise ValueError('control_dt must be finite and positive')
-    steps = int(round(evaluation_horizon_s(stage) / float(control_dt)))
+    steps = int(round(evaluation_horizon_s(stage, profile=profile) / float(control_dt)))
     if steps < 1:
         raise ValueError('evaluation horizon must cover at least one control step')
     return steps
+
+
+def idle_locomotion_mask(action_dim: int, allow_locomotion: bool):
+    """Zero N3 base dims when the stage holds the chassis. None = all actions live."""
+    if not isinstance(action_dim, int) or isinstance(action_dim, bool) or action_dim not in (7, 10):
+        raise ValueError('action_dim must be 7 (arm) or 10 (base+arm)')
+    if allow_locomotion or action_dim == 7:
+        return None
+    mask = np.ones(action_dim, dtype=np.float32)
+    mask[:3] = 0.0
+    return mask
+
+
+def apply_speedrun_preset(values: dict) -> dict:
+    """Overlay speedrun trainer knobs. Does not change gates or weld fruit."""
+    if not isinstance(values, dict):
+        raise TypeError('values must be a dict')
+    out = dict(values)
+    out.update(SPEEDRUN_PRESET)
+    return out
 
 
 def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: int | None = None) -> bool:
@@ -262,7 +313,7 @@ def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: 
     return all(rate >= stage.gate_success_rate for rate in window)
 
 
-def summarise_stage(stage: Stage) -> dict[str, object]:
+def summarise_stage(stage: Stage, *, profile: str = 'default') -> dict[str, object]:
     return {
         'index': stage.index,
         'name': stage.name,
@@ -273,7 +324,8 @@ def summarise_stage(stage: Stage) -> dict[str, object]:
         'fruit_count': stage.fruit_count,
         'continue_after_success': stage.continue_after_success,
         'randomize_layout': stage.randomize_layout,
-        'evaluation_horizon_s': evaluation_horizon_s(stage),
+        'evaluation_horizon_s': evaluation_horizon_s(stage, profile=profile),
+        'eval_profile': profile,
         'gate_success_rate': stage.gate_success_rate,
         'guidance_weight': stage.guidance_weight,
         'trains': list(stage.trains),
