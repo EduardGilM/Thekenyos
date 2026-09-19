@@ -68,7 +68,7 @@ class PPODecisionQueue:
     """Keep at most eight compact, factual roots for the matched CTI search."""
 
     def __init__(self, worlds=None, *, worlds_per_batch=16, max_batches=8, max_age=8,
-                 segment_steps=64):
+                 segment_steps=64, minimum_remaining_seconds=0.):
         if worlds is not None:
             worlds_per_batch = worlds
         if worlds_per_batch < 1 or max_batches < 1 or max_age < 1 or segment_steps < 1:
@@ -77,6 +77,7 @@ class PPODecisionQueue:
         self.max_batches = max_batches
         self.max_age = max_age
         self.segment_steps = segment_steps
+        self.minimum_remaining_seconds = minimum_remaining_seconds
         self.cursor = 0
         self.batches = deque()
         self.total_collected_roots = 0
@@ -90,7 +91,17 @@ class PPODecisionQueue:
         from .counterfactual import capture_worlds
 
         from .harvest_training import signals
-        ids, self.cursor = choose_worlds(signals(runtime)['distance'], self.worlds_per_batch, self.cursor)
+        distance = signals(runtime)['distance']
+        if self.minimum_remaining_seconds:
+            remaining = round(self.minimum_remaining_seconds/runtime.control_dt)
+            p = collector.progress
+            eligible = ((p.stall_steps-p.stale >= remaining) & (p.max_steps-p.age >= remaining)).nonzero().flatten()
+            if len(eligible) < self.worlds_per_batch:
+                return None
+            selected, self.cursor = choose_worlds(distance[eligible], self.worlds_per_batch, self.cursor)
+            ids = eligible[selected].tolist()
+        else:
+            ids, self.cursor = choose_worlds(distance, self.worlds_per_batch, self.cursor)
         worlds = torch.as_tensor(ids, dtype=torch.long, device=runtime.device_name)
         progress = collector.progress
         # Capture every tensor/dict, including temporal graph dwell and latches.

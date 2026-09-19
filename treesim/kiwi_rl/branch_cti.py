@@ -62,7 +62,7 @@ def refine_plans(plans, scores, valid, *, generator):
 
 
 class BranchCTI:
-    version = 7
+    version = 8
 
     def __init__(self, runtime, gait, *, roots=16, alternatives=12, search_iterations=3,
                  horizon_seconds=6., intervention_seconds=2., block_steps=20):
@@ -250,7 +250,7 @@ class BranchCTI:
         improvements = sum(int(((result['returns'][1:] > result['returns'][:1]+.005) & result['valid'][1:]).sum()) for result in passes)
         repairs = sum(int((result['success'][1:] & ~result['success'][:1] & result['valid'][1:]).sum()) for result in passes)
         avoided = sum(int((~result['failed'][1:] & result['failed'][:1] & result['valid'][1:]).sum()) for result in passes)
-        metrics = dict(version=7, source='ppo', seconds=time.perf_counter()-started,
+        metrics = dict(version=8, source='ppo', seconds=time.perf_counter()-started,
             transitions=sum(result['transitions'] for result in passes), candidate_branches=self.alternatives+1,
             roots_searched=self.roots, pilot_events=self.roots, search_iterations=self.search_iterations,
             alternatives_compared=self.roots*self.alternatives*self.search_iterations,
@@ -260,4 +260,12 @@ class BranchCTI:
             branch_replay_rejected_worlds=int(torch.stack([result['replay_invalid'] for result in passes]).any(0).sum()),
             branch_replay_checked_steps=sum(result['replay_steps'] for result in passes),
             branch_records=records)
+        stages = batch.initial_progress.graph_stage
+        for stage in range(7):
+            source = stages == stage
+            count = int(source.sum()) * self.alternatives * len(passes)
+            metrics[f'stage_{stage}/branches'] = count
+            if count:
+                gained = sum(int(((r['grades'][1:] > r['grades'][:1]+.005) & r['valid'][1:] & source).sum()) for r in passes)
+                metrics[f'stage_{stage}/physical_progress_fraction'] = gained/count
         return (rows, bootstrap), metrics

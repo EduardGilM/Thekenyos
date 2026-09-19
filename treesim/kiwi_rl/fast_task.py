@@ -223,11 +223,11 @@ class FastHarvestTask:
     FORCE_CHECKS = FORCE_CHECKS
 
     def __init__(self, model, data, manifest, *, task_profile=None):
-        from .reward_graph import GRAPH_PROFILE
-        if task_profile not in (None, GRAPH_PROFILE):
+        from .reward_graph import GRAPH_PROFILES
+        if task_profile not in (None, *GRAPH_PROFILES):
             raise ValueError('Unknown physical task profile')
-        self.settle_seconds = 2. if task_profile == GRAPH_PROFILE else SETTLE_TIME_S
-        self.ground_is_failure = task_profile != GRAPH_PROFILE
+        self.settle_seconds = 2. if task_profile in GRAPH_PROFILES else SETTLE_TIME_S
+        self.ground_is_failure = task_profile not in GRAPH_PROFILES
         fruits = manifest.get('fruits', [])
         if not fruits:
             raise ValueError('Fast scene manifest must contain fruits')

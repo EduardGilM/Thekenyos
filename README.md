@@ -1406,3 +1406,17 @@ Focused checks: `tests.test_reward_graph`, `tests.test_cti_learning`,
 check processed 249,600 branch transitions in 4.88 s including learning, used
 40 accepted optimizer steps, and rejected zero replay roots. That demonstrates
 working data flow and throughput, not improved harvesting.
+
+### Continuous graph v2 run
+
+`teacher-graph-cti-002` starts fresh harvesting weights and both optimizers,
+with the fixed gait reused. The corrected graph removes the approach plateau,
+settles the physical reset, recognizes accumulated progress and recovery, and
+records stage-level progress/reward and actual control behavior. CTI v8 uses
+six-second eligible PPO roots and bounded-action entropy. The previous run is
+preserved at checkpoint 338. See docs/reward-graph.md for the versioned contract.
+
+Use the graph command above with `--stall-seconds 8 --max-episode-seconds 30`
+and a new output directory. Validate with `scripts/check_graph_training.py`
+using FAST_SCENE and GAIT_CHECKPOINT, plus the documented graph and CTI tests.
+The dashboard now renders latest and best evaluations separately.

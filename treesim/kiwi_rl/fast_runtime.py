@@ -361,6 +361,8 @@ class FastRuntime:
             wp.launch(_masked_episode_reset, dim=(self.worlds, 12),
                       inputs=[mask_wp, self.control.previous, self._previous_distance,
                               self._reward, self._terminated, self._flags], device=self.device)
+            if hasattr(self, '_settled_previous'):
+                wp.to_torch(self.control.previous)[mask.bool()] = self._settled_previous
             self.task.reset(mask_wp)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
@@ -368,6 +370,30 @@ class FastRuntime:
             wp.launch(_masked_seed_distance, dim=self.worlds,
                       inputs=[mask_wp, self._distance, self._previous_distance, self._reward], device=self.device)
         return self.observe()
+
+    def prepare_settled_reset(self, gait, seconds=4.):
+        """Settle once, then reset worlds from the same physical controller state.
+
+        No training rewards or policy history exist during this preparation.
+        Existing runtime arrays stay in place for CUDA graph and replay safety.
+        """
+        import torch
+        from .reward_graph import GRAPH_PROFILE
+        if self.task_profile != GRAPH_PROFILE or hasattr(self, '_settled_previous'):
+            return
+        with torch.no_grad():
+            zero = torch.zeros((self.worlds, 7), device=self.device_name)
+            for _ in range(round(seconds/self.control_dt)):
+                self.set_gait_actions(gait(self.observe()))
+                self.step(zero)
+            self.check()
+            if bool(wp.to_torch(self.task.failed).bool().any() | wp.to_torch(self.task.detached).bool().any()):
+                raise RuntimeError('Reset settling damaged or detached fruit, or destabilized the robot')
+            self._initial_qpos.assign(self.data.qpos.numpy()[0])
+            self._initial_qvel.assign(self.data.qvel.numpy()[0])
+            self._initial_targets.assign(self.control.targets.numpy()[0])
+            self._settled_previous = wp.to_torch(self.control.previous)[0].clone()
+            self.reset()
 
     def check(self):
         flags = np.asarray(self._flags.numpy(), dtype=np.int64)

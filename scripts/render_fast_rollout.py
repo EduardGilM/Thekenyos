@@ -56,11 +56,12 @@ def main():
             solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
             jaw_cap = saved['meta'].get('config', {}).get('jaw_cap_Nm', .3)
             reward_profile=saved['meta'].get('config',{}).get('reward_profile','potential-harvest/v1')
-            graph_profile=reward_profile=='graph-harvest/v1'
+            graph_profile=reward_profile in ('graph-harvest/v1','graph-harvest/v2')
             rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,
                              solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap,
                              task_profile=reward_profile if graph_profile else None)
             gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
+            rt.prepare_settled_reset(gait)
             from treesim.kiwi_rl.harvest_training import EpisodeProgress, signals
             progress=EpisodeProgress(signals(rt), reward_profile=reward_profile, guidance=0.,
                 stall_steps=round(saved['meta'].get('config',{}).get('stall_seconds',4.)/.02),

@@ -60,6 +60,8 @@ class BranchGpuTest(unittest.TestCase):
             search_rt=FastRuntime(os.environ['FAST_SCENE'],worlds=12,task_profile=GRAPH_PROFILE)
             policy=build_privileged_policy().cuda()
             gait=load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
+            rt.prepare_settled_reset(gait)
+            search_rt.prepare_settled_reset(gait)
             collector=HarvestCollector(rt,role='teacher',reward_profile=GRAPH_PROFILE)
             queue=PPODecisionQueue(worlds=4,segment_steps=16)
             factual,_,_=collector.collect(policy,gait,16,cti_queue=queue,policy_version=0)

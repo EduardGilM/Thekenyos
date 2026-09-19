@@ -274,3 +274,15 @@ Run tests.test_cti_learning and tests.test_branch_cti (CTI_GPU_TEST=1) after
 changes. Count branch transitions as used for learning only after an accepted
 optimizer update. Keep failed physical outcomes and importance weights visible;
 optimizer activity is not evidence of harvesting improvement.
+
+## Continuous graph v2 and CTI v8
+
+The user's corrected objective supersedes the v1 0.5 m saturation above. Use
+continuous geometric positioning, settled physical resets and recovery-aware
+stall timing. Read docs/reward-graph.md. Preserve archived v1 rendering/scoring.
+The sustained v2 profile uses an eight-second inactivity limit, thirty-second
+hard episode limit, and PPO roots with six seconds of remaining CTI evaluation
+budget. Do not change factual and alternative termination rules independently.
+Both learners regularize bounded actions; report saturation and measured motor
+movement separately from Gaussian noise. Run scripts/check_graph_training.py
+and the reward, replay, branch-learning and full-size smoke checks before launch.

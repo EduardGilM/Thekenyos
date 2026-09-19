@@ -2,7 +2,7 @@
 import torch
 import warp as wp
 from treesim.basket import CENTER
-from .reward_graph import GRAPH_PROFILE, CollisionGeometry, graph_step
+from .reward_graph import GRAPH_PROFILE, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -26,7 +26,7 @@ def signals(runtime):
                 failed=wp.to_torch(task.failed).bool().clone(),
                 settle_time=(wp.to_torch(task.settle_time).clone() if hasattr(task, 'settle_time')
                              else torch.zeros_like(wp.to_torch(runtime._distance))))
-    if getattr(runtime, 'task_profile', None) == GRAPH_PROFILE:
+    if getattr(runtime, 'task_profile', None) in GRAPH_PROFILES:
         if not hasattr(runtime, '_graph_geometry'):
             runtime._graph_geometry = CollisionGeometry(runtime)
         result.update(runtime._graph_geometry.signals(runtime))
@@ -41,7 +41,7 @@ class EpisodeProgress:
     """Track meaningful best-so-far progress, never motion or repeat events."""
     def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1., gamma=HARVEST_GAMMA,
                  reward_profile=REWARD_PROFILE, curriculum_stage=0, control_dt=.02):
-        if reward_profile not in (REWARD_PROFILE, CURRICULUM_PROFILE, GRAPH_PROFILE):
+        if reward_profile not in (REWARD_PROFILE, CURRICULUM_PROFILE, *GRAPH_PROFILES):
             raise ValueError('Unknown harvesting reward profile')
         if curriculum_stage not in (0, 1, 2):
             raise ValueError('Curriculum stage must be 0, 1, or 2')
@@ -73,10 +73,16 @@ class EpisodeProgress:
         self.graph_slip = torch.zeros_like(self.closest)
         self.graph_score = torch.zeros_like(self.closest)
         self.graph_stage = torch.zeros_like(self.age)
-        if reward_profile == GRAPH_PROFILE:
+        if reward_profile in GRAPH_PROFILES:
             graph_step(self, initial)
             self.graph_dwell.zero_()
         self.graph_best = self.graph_score.clone()
+        self.graph_reference = self.graph_score.clone()
+        self.graph_progress_reward = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
+        self.graph_time = {name: torch.zeros_like(self.closest) for name in STAGE_NAMES}
+        self.graph_reached = {name: torch.zeros_like(self.ever_grasp) for name in STAGE_NAMES}
+        self.graph_forward = torch.zeros_like(self.age)
+        self.graph_backward = torch.zeros_like(self.age)
 
     @staticmethod
     def potential(state):
@@ -104,12 +110,15 @@ class EpisodeProgress:
         self.curriculum_detach_paid[mask] = False
         self.curriculum_stage_ids[mask] = self.curriculum_stage
         self.curriculum_credit[mask] = 0
-        if self.reward_profile == GRAPH_PROFILE:
-            fresh = EpisodeProgress(initial, reward_profile=GRAPH_PROFILE, control_dt=self.control_dt,
+        if self.reward_profile in GRAPH_PROFILES:
+            fresh = EpisodeProgress(initial, reward_profile=self.reward_profile, control_dt=self.control_dt,
                                     gamma=self.gamma)
             for name, value in vars(self).items():
                 if name.startswith('graph_') and isinstance(value, torch.Tensor):
                     value[mask] = getattr(fresh, name)[mask]
+                elif name.startswith('graph_') and isinstance(value, dict):
+                    for key in value:
+                        value[key][mask] = getattr(fresh, name)[key][mask]
         for key,value in initial.items():
             self.previous[key][mask] = value[mask]
 
@@ -145,7 +154,7 @@ class EpisodeProgress:
         return self.guidance * bonus
 
     def step(self, now, physical_done):
-        if self.reward_profile == GRAPH_PROFILE:
+        if self.reward_profile in GRAPH_PROFILES:
             return self._graph_step(now, physical_done)
         self.age += 1; self.stale += 1
         new_grasp = now['grasp'] & ~self.ever_grasp
@@ -182,10 +191,26 @@ class EpisodeProgress:
     def _graph_step(self, now, physical_done):
         self.age += 1; self.stale += 1
         previous_score = self.graph_score.clone()
+        previous_components = self.graph_components
+        previous_stage = self.graph_stage.clone()
         score = graph_step(self, now)
-        improved = score > self.graph_best + .005
+        if self.reward_profile == GRAPH_PROFILE:
+            # A moving reference recognizes accumulated small gains and recovery.
+            # Regression re-arms it, but cannot itself reset the inactivity timer.
+            improved = score > self.graph_reference + .005
+            self.graph_reference = torch.where(improved | (score < self.graph_reference), score, self.graph_reference)
+        else:
+            improved = score > self.graph_best + .005
         self.stale[improved] = 0
         self.graph_best = torch.maximum(self.graph_best, score)
+        self.graph_forward += (self.graph_stage > previous_stage).long()
+        self.graph_backward += (self.graph_stage < previous_stage).long()
+        for i, name in enumerate(STAGE_NAMES):
+            self.graph_progress_reward[name] = self.gamma*self.graph_components[name] - previous_components[name]
+            active = (score < 2) if i == 0 else ((score >= (2,3,3.6,5,6)[i-1]) & (score < (3,3.6,5,6,7)[i-1]))
+            self.graph_time[name] += active.float()*self.control_dt
+            self.graph_reached[name] |= active
+
         self.closest = torch.minimum(self.closest, now['distance'])
         self.ever_grasp |= self.graph_grip
         self.ever_detached |= self.graph_detached
@@ -209,7 +234,7 @@ class HarvestCollector:
             raise ValueError("role must be 'teacher' or 'student'")
         if role == 'teacher' and teacher_policy is not None:
             raise ValueError('A teacher run cannot also load a teacher checkpoint')
-        if reward_profile == GRAPH_PROFILE and getattr(runtime, 'task_profile', None) != GRAPH_PROFILE:
+        if reward_profile in GRAPH_PROFILES and getattr(runtime, 'task_profile', None) != reward_profile:
             raise ValueError('Graph reward requires matching physical runtime profile')
         self.runtime = runtime
         self.role, self.teacher_policy = role, teacher_policy
@@ -245,6 +270,7 @@ class HarvestCollector:
                 self.memory *= (~self.reset_mask)[:,None]
                 if cti_queue is not None and cti_batch is None:
                     cti_batch = cti_queue.begin(rt,self,policy,policy_version)
+                    if cti_batch is not None: cti_active.fill_(True)
                 if self.role == 'teacher':
                     policy_input = privileged
                 else:
@@ -272,7 +298,7 @@ class HarvestCollector:
                         truncated=truncated,stalled=stalled,episode_ids=self.episode_ids,
                         active_mask=cti_active,
                         graph_state=({name:value for name,value in vars(self.progress).items()
-                                      if name.startswith('graph_')} if self.progress.reward_profile == GRAPH_PROFILE else None))
+                                      if name.startswith('graph_')} if self.progress.reward_profile in GRAPH_PROFILES else None))
                     cti_active[ending] = False
                 timeout_value = torch.zeros_like(value)
                 if bool(truncated.any()):
@@ -293,6 +319,12 @@ class HarvestCollector:
                         row['rgbd'] = self.rgbd
                     if teacher_action is not None:
                         row['teacher_action'] = teacher_action
+                    if self.progress.reward_profile in GRAPH_PROFILES:
+                        row['stage_rewards'] = {k:v.clone() for k,v in self.progress.graph_progress_reward.items()}
+                        row['stage_scores'] = {k:v.clone() for k,v in self.progress.graph_components.items()}
+                        row['stage_rewards']['complete'] = 20*now['success'].float()
+                        row['joint_velocity'] = wp.to_torch(rt.data.qvel)[:, self.runtime.control.contract.dofs[12:]].clone()
+                        row['target_error'] = (wp.to_torch(rt.control.targets)[:,12:] - wp.to_torch(rt.data.qpos)[:,rt.control.contract.qids[12:]]).clone()
                     rows.append(row)
                 if bool(ending.any()):
                     # Do not erase a numerically failed world's state in a reset.
@@ -307,14 +339,18 @@ class HarvestCollector:
                         episodes.append(dict(world=int(world),success=bool(success),grasp=bool(grasp),
                             detached=bool(detached),held_detach=bool(held_detach),physical_failure=bool(failure),stalled=bool(stall),
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
-                    if self.progress.reward_profile == GRAPH_PROFILE:
+                    if self.progress.reward_profile in GRAPH_PROFILES:
                         for entry, world in zip(episodes[-len(ids):], ids.tolist()):
                             entry.update(graph_score=float(self.progress.graph_score[world]),
                                 graph_stage=int(self.progress.graph_stage[world]),
                                 enclosure=bool(self.progress.graph_enclosed[world]),
                                 secure_grip=bool(self.progress.graph_grip[world]),
                                 slip_m_s=float(self.progress.graph_slip[world]),
-                                ground_drop=bool(self.progress.graph_ground_drop[world]))
+                                ground_drop=bool(self.progress.graph_ground_drop[world]),
+                                forward_transitions=int(self.progress.graph_forward[world]),
+                                backward_transitions=int(self.progress.graph_backward[world]),
+                                **{f'reached/{k}':bool(v[world]) for k,v in self.progress.graph_reached.items()},
+                                **{f'time/{k}_seconds':float(v[world]) for k,v in self.progress.graph_time.items()})
                     rt.reset(ending)
                     self.episode_ids[ending] += 1
                     self.memory[ending] = 0
@@ -348,4 +384,5 @@ def episode_metrics(episodes):
             'held_detach':sum(r.get('held_detach',False) for r in episodes)/len(episodes),
             **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys},
             **{k:sum(r.get(k,0) for r in episodes)/len(episodes) for k in
-               ('graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop') if any(k in r for r in episodes)}}
+               ('graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop','forward_transitions','backward_transitions',
+                *[f'reached/{k}' for k in STAGE_NAMES], *[f'time/{k}_seconds' for k in STAGE_NAMES]) if any(k in r for r in episodes)}}

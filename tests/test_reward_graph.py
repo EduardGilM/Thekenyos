@@ -1,7 +1,7 @@
 import unittest
 from copy import deepcopy
 import torch
-from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE, approach_score, enclosure_features, ellipsoid_extent, release_position_distance
+from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE, LEGACY_GRAPH_PROFILE, approach_score, enclosure_features, ellipsoid_extent, release_position_distance
 from treesim.kiwi_rl.harvest_training import EpisodeProgress
 from treesim.kiwi_rl.selective_cti import _choose_winners
 from tests.test_selective_cti import outcome
@@ -17,7 +17,7 @@ def state(**changes):
 
 
 def progress(initial=None, **kwargs):
-    return EpisodeProgress(initial or state(), reward_profile=GRAPH_PROFILE, stall_steps=1000, **kwargs)
+    return EpisodeProgress(initial or state(), reward_profile=kwargs.pop("reward_profile", LEGACY_GRAPH_PROFILE), stall_steps=kwargs.pop("stall_steps",1000), **kwargs)
 
 
 def step(p, **kwargs):
@@ -108,7 +108,7 @@ class GraphTest(unittest.TestCase):
         self.assertFalse(p.graph_detached[0]);self.assertTrue(p.graph_detached[1])
         self.assertTrue(copy.graph_detached.all())
         for k,v in vars(copy).items():
-            if k.startswith('graph_'): self.assertEqual(v.shape,(2,))
+            if k.startswith('graph_') and isinstance(v,torch.Tensor): self.assertEqual(v.shape,(2,))
 
     def test_ppo_queue_preserves_every_graph_tensor_and_configuration(self):
         from types import SimpleNamespace
@@ -125,10 +125,14 @@ class GraphTest(unittest.TestCase):
             batch=PPODecisionQueue(worlds=2).begin(runtime,collector,torch.nn.Linear(1,1),1)
         restored=batch.initial_progress
         self.assertEqual(restored.control_dt,.04);self.assertEqual(restored.gamma,.99)
-        self.assertEqual(restored.reward_profile,GRAPH_PROFILE)
+        self.assertEqual(restored.reward_profile,p.reward_profile)
         for key,value in vars(p).items():
             if key.startswith('graph_'):
-                torch.testing.assert_close(getattr(restored,key),value[list(batch.source_world_ids)])
+                if isinstance(value,dict):
+                    for name,item in value.items():
+                        torch.testing.assert_close(getattr(restored,key)[name],item[list(batch.source_world_ids)])
+                else:
+                    torch.testing.assert_close(getattr(restored,key),value[list(batch.source_world_ids)])
         p.graph_dwell.zero_();self.assertGreater(restored.graph_dwell.sum().item(),0)
 
     def test_ppo_and_cti_discounted_grade_rank_match(self):
@@ -157,3 +161,55 @@ class GraphTest(unittest.TestCase):
         self.assertIn('factual_replay_mismatch',reasons[1][0])
 
 if __name__=='__main__':unittest.main()
+
+
+class ContinuousGraphTest(unittest.TestCase):
+    def test_position_reward_remains_informative_outside_old_cutoff(self):
+        finger=torch.tensor([[[-.1,-.1,.05],[.1,.1,.07]]])
+        jaw=torch.tensor([[[-.1,-.1,-.07],[.1,.1,-.05]]])
+        extent=torch.tensor([[.03,.03,.04]])
+        values=[enclosure_features(torch.tensor([[x,0.,0.]]),extent,finger,jaw,continuous=True)[1].item()
+                for x in (.8,.5,.3,.2,.1,0.)]
+        self.assertTrue(all(b>=a for a,b in zip(values,values[1:])))
+        self.assertGreater(values[1],values[0]);self.assertGreater(values[2],values[1])
+        self.assertEqual(values[-1],1.)
+
+    def test_small_improvements_accumulate_and_recovery_earns_time(self):
+        p=progress(state(insertion=.4),reward_profile=GRAPH_PROFILE,stall_steps=5)
+        for i in range(1,16):
+            _,term,_,_=step(p,insertion=.4+i*.001)
+            self.assertFalse(term.item())
+        step(p,insertion=.2)
+        for i in range(1,10):
+            _,term,_,_=step(p,insertion=.2+i*.001)
+            self.assertFalse(term.item())
+        for _ in range(5): result=step(p,insertion=.209)
+        self.assertTrue(result[1].item())
+
+    def test_reward_bands_sum_and_reset_with_replay_history(self):
+        p=progress(state(insertion=.3),reward_profile=GRAPH_PROFILE)
+        for changes in (dict(insertion=.4),dict(insertion=.2),dict(detached=True),dict(detached=True,settle_time=1.)):
+            step(p,**changes)
+            torch.testing.assert_close(sum(p.graph_progress_reward.values()),p.shaping_reward)
+        p.reset(torch.tensor([True]),state(insertion=.3))
+        self.assertAlmostEqual(p.graph_reference.item(),.6,places=5)
+        self.assertEqual(p.graph_forward.item(),0)
+        self.assertTrue(all(v.item()==0 for v in p.graph_time.values()))
+
+
+    def test_cti_uses_early_roots_without_resetting_factual_timers(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
+        initial={k:v.repeat(4) for k,v in state().items()}
+        p=progress(initial,reward_profile=GRAPH_PROFILE,stall_steps=400)
+        p.stale[:]=torch.tensor([0,150,0,150])
+        collector=SimpleNamespace(progress=p,memory=torch.zeros(4,64),reset_mask=torch.zeros(4,dtype=torch.bool),episode_ids=torch.arange(4),tick=0)
+        runtime=SimpleNamespace(device_name='cpu',control_dt=.02)
+        queue=PPODecisionQueue(worlds=2,minimum_remaining_seconds=6.)
+        with patch('treesim.kiwi_rl.harvest_training.signals',return_value=initial), patch('treesim.kiwi_rl.counterfactual.capture_worlds',return_value=None):
+            batch=queue.begin(runtime,collector,torch.nn.Linear(1,1),0)
+            self.assertEqual(set(batch.source_world_ids),{0,2})
+            torch.testing.assert_close(p.stale,torch.tensor([0,150,0,150]))
+            p.stale.fill_(150)
+            self.assertIsNone(queue.begin(runtime,collector,torch.nn.Linear(1,1),0))

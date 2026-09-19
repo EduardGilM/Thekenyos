@@ -111,3 +111,16 @@ class DashboardTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code,416)
             finally:
                 server.shutdown();server.server_close();thread.join()
+
+
+class LatestVideoTest(unittest.TestCase):
+    def test_later_tied_evaluation_renders_even_when_best_is_initial(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            d=Dashboard(Path(tmp),run='test')
+            d._remote_snapshot=lambda:dict(rows=[dict(step=i,**{'evaluation/success':0.,
+                'evaluation/physical_failure':0.,'evaluation/grasp':0.,'evaluation/closest_distance_m':.2})
+                for i in (0,25)],report=None,failure=None,process_alive=True)
+            with patch('training_dashboard.threading.Thread') as thread:
+                d.poll()
+                self.assertEqual(thread.call_args.kwargs['args'],('checkpoint-000025.pt','checkpoint-000000.pt'))

@@ -2,7 +2,10 @@
 import numpy as np
 import torch
 
-GRAPH_PROFILE = 'graph-harvest/v1'
+LEGACY_GRAPH_PROFILE = 'graph-harvest/v1'
+GRAPH_PROFILE = 'graph-harvest/v2'
+GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, GRAPH_PROFILE)
+STAGE_NAMES = ('position', 'grip', 'extract', 'carry', 'deposit', 'complete')
 GRAPH_CONSTANTS = dict(approach_radius_m=.5, approach_outer_m=1.5,
     enclosure_tolerance_m=.008, enclosure_core_radius_fraction=.25, insertion_range_m=.15, slip_enter_m_s=.05,
     slip_exit_m_s=.08, grip_dwell_s=.1, settle_seconds=2., release_clearance_m=.04,
@@ -18,7 +21,7 @@ def ellipsoid_extent(rotation, radii):
     return ((rotation * radii).square().sum(-1)).sqrt()
 
 
-def enclosure_features(center, extent, finger, jaw):
+def enclosure_features(center, extent, finger, jaw, *, continuous=False):
     """Bounds are actual collision supports in the wrist frame [world,2,3].
 
     Opposing collision supports define the open aperture. An open gripper does
@@ -41,6 +44,11 @@ def enclosure_features(center, extent, finger, jaw):
     error = (violations - tolerance).clamp_min(0).norm(dim=-1)
     enclosed = (violations <= tolerance).all(-1) & (gap > GRAPH_CONSTANTS['minimum_aperture_m'])
     insertion = (1 - error / GRAPH_CONSTANTS['insertion_range_m']).clamp(0, 1)
+    if continuous:
+        # No dead zone: every reduction in distance to the valid jaw region
+        # improves the grade, including from outside the former 15 cm window.
+        aperture_error = (GRAPH_CONSTANTS['minimum_aperture_m'] - gap).clamp_min(0)
+        insertion = 1 / (1 + (error + aperture_error) / .15)
     diameter = 2 * extent[:, 2]
     # Quality peaks at the fruit diameter; compression never earns more credit.
     closure = (1 - (gap - diameter).abs() / GRAPH_CONSTANTS['closure_error_range_m']).clamp(0, 1) * enclosed
@@ -97,7 +105,8 @@ class CollisionGeometry:
             points = (inv @ r[:, body]) @ vertices.T
             points += (inv @ (p[:, body] - p[:, self.hand])[..., None])
             bounds.append(torch.stack((points.amin(-1), points.amax(-1)), dim=1))
-        enclosed, insertion, closure = enclosure_features(local, extent, *bounds)
+        enclosed, insertion, closure = enclosure_features(local, extent, *bounds,
+            continuous=runtime.task_profile == GRAPH_PROFILE)
         cvel = wp.to_torch(runtime.data.cvel)
         com = wp.to_torch(runtime.data.subtree_com)
         point = wp.to_torch(runtime.data.xipos)[:, fruit]
@@ -128,10 +137,18 @@ def graph_step(progress, now):
     approach = approach_score(now['distance'])
     insertion = torch.where(approach >= 1., now['insertion'], 0.)
     score = approach + insertion
+    if progress.reward_profile == GRAPH_PROFILE:
+        score = 2 * now['insertion']
     grip_quality = torch.minimum((progress.graph_dwell / c['grip_dwell_s']).clamp(0, 1), now['closure'])
+    if progress.reward_profile == GRAPH_PROFILE:
+        # Jaw positioning can improve before loaded contact; sustained safe
+        # contact earns the remainder. Empty closure earns nothing.
+        grip_quality = .25 * now['closure'] + .75 * grip_quality
     score = torch.where(now['enclosed'], 2. + grip_quality, score)
     score = torch.where(progress.graph_grip, 3. + .5*(now['stem_force']/c['stem_detach_force_N']).clamp(0, 1), score)
     carry = (1-now['release_distance']/c['carry_range_m']).clamp(0, 1)
+    if progress.reward_profile == GRAPH_PROFILE:
+        carry = 1 / (1 + now['release_distance']/c['carry_range_m'])
     score = torch.where(detached, torch.where(progress.graph_grip, 4.+carry, 3.6), score)
     settling = detached & ~now['touching'] & (now['settle_time'] > 0)
     score = torch.where(settling, 5.+(now['settle_time']/c['settle_seconds']).clamp(0, 1), score)
@@ -140,4 +157,10 @@ def graph_step(progress, now):
     progress.graph_ground_drop = detached & now['ground_contact'] & ~progress.graph_grip & safe & ~now['success']
     progress.graph_score = score
     progress.graph_stage = torch.where(detached & ~progress.graph_grip & ~settling, 3, score.floor().long())
+    # Additive bands telescope exactly to the score, including regressions.
+    # This permits an honest per-stage reward decomposition in telemetry.
+    edges = (0., 2., 3., 3.6, 5., 6., 6.)
+    progress.graph_components = {
+        name: (score - edges[i]).clamp(0., edges[i+1]-edges[i])
+        for i, name in enumerate(STAGE_NAMES)}
     return score

@@ -208,9 +208,10 @@ def update_branch_cti(policy, optimizer, rows, bootstrap, coef=.1, anchor_rows=N
                 logp = normal_log_prob(batch['raw_action'][:, ids][selected], mean, logstd)
                 actor_loss = -(logp*advantages[:, ids][selected]).mean()
                 value_loss = F.smooth_l1_loss(value, targets[:, ids][selected])
-                # Normal entropy regularizes the Gaussian proposal parameters;
-                # this is not claimed to be exact tanh-action entropy.
-                entropy = (logstd.expand_as(mean)+.5*(1+math.log(2*math.pi))).sum(-1).mean()
+                # Match PPO: exploration is measured after bounded controls.
+                from .ppo import tanh_logprob
+                draw = mean + logstd.exp()*torch.randn_like(mean)
+                entropy = (-tanh_logprob(draw, mean, logstd) * log_rhos[:,ids][selected].clamp_max(0).exp()).mean()
                 loss = coef*(actor_loss+.5*value_loss-.001*entropy)
                 optimizer.zero_grad(set_to_none=True)
                 if not bool(torch.isfinite(loss)):

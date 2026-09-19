@@ -72,7 +72,7 @@ events=tail_jsonl('phase-events.jsonl',200)
 branches=tail_jsonl('cti-branches.jsonl',3)
 phase=active.get('phase')
 if not phase and events: phase=events[-1].get('phase')
-if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4,5,6,7) else 'ppo'
+if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4,5,6,7,8) else 'ppo'
 status=active.get('status') if active.get('status') in ('paused','running') else None
 print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
@@ -161,7 +161,7 @@ def _phase(snapshot):
                 return event['phase']
     rows = snapshot.get('rows')
     if isinstance(rows, list) and rows and isinstance(rows[-1], dict):
-        if rows[-1].get('cti/version') in (2,3,4,5,6,7):
+        if rows[-1].get('cti/version') in (2,3,4,5,6,7,8):
             return 'cti-v'+str(rows[-1]['cti/version'])
     return 'ppo'
 
@@ -235,18 +235,30 @@ class Dashboard:
                     self.state['error'] = failure.get('error') if isinstance(failure, dict) else str(failure)
                 if remote.get('active_status') == 'paused' and not failure and not report:
                     self.state['status'] = 'paused'
-            if checkpoint and not self.no_render and checkpoint != self.last_render_checkpoint and \
+            latest_eval = next((row for row in reversed(rows) if 'evaluation/success' in row), None)
+            latest_checkpoint = f"checkpoint-{latest_eval.get('update',latest_eval['step']):06d}.pt" if latest_eval else checkpoint
+            if latest_checkpoint and not self.no_render and latest_checkpoint != self.last_render_checkpoint and \
                     time.monotonic() - self.last_render_at >= RENDER_INTERVAL:
                 with self.lock:
                     if not self.render_busy:
                         self.render_busy = True
-                        threading.Thread(target=self.render, args=(checkpoint,),
+                        threading.Thread(target=self.render_pair, args=(latest_checkpoint,checkpoint),
                                          name='dashboard-render', daemon=True).start()
         except Exception as exc:
             with self.lock:
                 self.state.update(fetched_at=time.time(), error=f'{type(exc).__name__}: {exc}', status='stale')
 
-    def render(self, checkpoint):
+    def render_pair(self, latest, best):
+        try:
+            self.render(latest, release=False)
+            if best and best != latest:
+                self.render(best, kind='best_video', release=False)
+            else:
+                with self.lock: self.state['best_video'] = self.state.get('video')
+        finally:
+            with self.lock: self.render_busy = False
+
+    def render(self, checkpoint, kind='video', release=True):
         match = CHECKPOINT_RE.fullmatch(checkpoint)
         if not match:
             return
@@ -309,10 +321,10 @@ class Dashboard:
                          preview_url=f'/media/{Path(checkpoint).stem}/preview.png',
                          checkpoint=checkpoint, created_at=created, report=report)
             with self.lock:
-                self.state['video'] = video
+                self.state[kind] = video
                 self.state['last_video_checkpoint'] = checkpoint
                 self.state['render'] = {'status': 'complete', 'error': None, 'checkpoint': checkpoint}
-            self.last_render_checkpoint = checkpoint
+            if kind == 'video': self.last_render_checkpoint = checkpoint
             self.last_render_at = time.monotonic()
         except Exception as exc:
             with self.lock:
@@ -322,7 +334,7 @@ class Dashboard:
         finally:
             self.last_render_at = time.monotonic()
             with self.lock:
-                self.render_busy = False
+                if release: self.render_busy = False
 
     def worker(self):
         while True:

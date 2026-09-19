@@ -1,4 +1,44 @@
-# Temporal harvesting reward graph
+# Continuous harvesting graph v2
+
+The current profile is `graph-harvest/v2` with CTI v8. It supersedes the v1
+approach radius and stall rules below; v1 checkpoints retain their old scoring.
+
+- Position grade is `2 / (1 + jaw_region_error_m / .15)`. The error measures
+  distance of the fruit core to the valid jaw opening, including aperture
+  deficiency. There is no 0.5 m plateau or hard distance cutoff.
+- Safe enclosure adds bounded jaw-fit and sustained-contact credit. Secure
+  grip, safe extraction, retained carry and two-second settling remain physical
+  outcomes, never prescribed actions. Carry distance also uses smooth decay.
+- Before reward history or policy memory starts, each runtime settles for four
+  seconds under fixed gait and zero harvesting increments. Reset restores the
+  settled pose, velocity, controller targets and gait history in each world.
+  Damage, detachment or robot failure during settling blocks training.
+- A 0.005 score improvement accumulates relative to the last progress reference.
+  Regression lowers the reference without resetting the timer, allowing real
+  recovery to earn time. The run uses an eight-second inactivity limit and a
+  thirty-second hard episode limit. Repeated motion earns no repeatable bonus.
+- CTI collects only roots with at least six seconds remaining before both
+  inactivity and hard limits. It preserves timers and factual replay; it does
+  not silently give alternatives different termination rules.
+- PPO and CTI both regularize entropy after tanh. CTI weights this term by
+  clipped importance ratios. All valid branches retain V-trace actor/critic
+  learning, factual KL rollback and numerical checks.
+
+W&B records stage_reward/* and stage_progress/* for position, grip, extract,
+carry, deposit and completion. The additive progress bands sum to shaping;
+completion reward is separate. Episode metrics record stage reach, duration,
+forward/backward transitions and termination reasons. Joint-named metrics
+record bounded command mean/spread/saturation, measured speed and target error.
+CTI reports physical grade improvement over the factual branch by source stage.
+The local dashboard shows both the latest and best evaluated videos.
+
+Validation: `scripts/check_graph_training.py` checks settled drift, physical
+command sensitivity and isolated world resets. The GPU branch test checks
+settled PPO roots, factual replay, rejected corrupt evidence, actor and critic
+learning. These checks establish a usable learning path, not harvest competence.
+
+## Archived v1 contract
+
 
 This profile implements the user's six-stage task. It is a training objective
 and evaluator, not a scripted action controller. The privileged teacher still

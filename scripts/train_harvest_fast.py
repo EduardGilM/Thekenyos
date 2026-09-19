@@ -25,7 +25,7 @@ def evaluate(runtime, policy, gait, args, role='student'):
     from treesim.kiwi_rl.harvest_training import HarvestCollector,episode_metrics
     collector = HarvestCollector(runtime,stall_seconds=args.stall_seconds,
         max_episode_seconds=args.max_episode_seconds,guidance=0.,role=role,
-        reward_profile=('graph-harvest/v1' if args.reward_graph else 'potential-harvest/v1'))
+        reward_profile=('graph-harvest/v2' if args.reward_graph else 'potential-harvest/v1'))
     completed = {}
     for _ in range(int(args.max_episode_seconds / runtime.control_dt) // args.steps + 2):
         _,_,episodes = collector.collect(policy,gait,args.steps,deterministic=True,store=False)
@@ -72,6 +72,8 @@ def run(args):
     from treesim.kiwi_rl.ppo import save_checkpoint,load_checkpoint
     from treesim.kiwi_rl.training_log import TrainingLog
     role=args.role
+    if args.reward_graph and args.cti and args.stall_seconds < 6.:
+        raise ValueError('Graph CTI requires at least six seconds before inactivity termination')
     if args.cti and role != 'teacher':
         raise ValueError('Selective CTI currently supports the privileged teacher only')
     if role == 'teacher' and (args.eval_scene is None or args.eval_worlds < args.teacher_min_eval_episodes):
@@ -102,7 +104,7 @@ def run(args):
     args.output.mkdir(parents=True,exist_ok=bool(args.resume_from))
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
     config.update(role=role,scope=('temporal physical reward graph' if args.reward_graph else 'full physical episodes; bounded guidance'),
-        reward_profile=('graph-harvest/v1' if args.reward_graph else 'milestone-harvest/v1' if args.curriculum else REWARD_PROFILE),reward_gamma=HARVEST_GAMMA,
+        reward_profile=('graph-harvest/v2' if args.reward_graph else 'milestone-harvest/v1' if args.curriculum else REWARD_PROFILE),reward_gamma=HARVEST_GAMMA,
         actor_inputs=('privileged simulator state and R84' if role=='teacher' else 'gripper RGB-D and R84'),
         checkpoint_roles={'student':'sensor-only PPO actor','teacher':'privileged PPO actor'},
         source_dir=str(Path(__file__).resolve().parents[1]),
@@ -110,13 +112,15 @@ def run(args):
         jaw_cap_Nm=1.0,
         force_limit_scope='per_jaw_and_nonpad_group',
         optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
-        cti_version=(7 if args.reward_graph else 5) if args.cti else 0,
+        cti_version=(8 if args.reward_graph else 5) if args.cti else 0,
         initialization=('checkpoint' if args.initialize_from or args.resume_from else 'random'),
         cti_optimizer='independent_adam_vtrace' if args.reward_graph else 'independent_adam',
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     if args.reward_graph:
         from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS
-        config['reward_graph_constants']=GRAPH_CONSTANTS
+        config['reward_graph_constants']={k:v for k,v in GRAPH_CONSTANTS.items()
+            if k not in ('approach_radius_m','approach_outer_m','insertion_range_m')}
+        config['reward_graph_constants'].update(position_scale_m=.15, reset_settle_seconds=4., cti_minimum_remaining_seconds=6.)
     resumed=resume_history(args.output,args.resume_from,config) if args.resume_from else None
     if resumed and resumed['latest']['elapsed_seconds']>=args.train_seconds:
         raise ValueError('The total training budget has already been used')
@@ -125,18 +129,21 @@ def run(args):
     try:
         camera='hand_camera' if role=='student' else None
         runtime=FastRuntime(args.scene,worlds=args.worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v1' if args.reward_graph else None)
+                task_profile='graph-harvest/v2' if args.reward_graph else None)
         evaluation_runtime=FastRuntime(args.eval_scene or args.scene,worlds=args.eval_worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v1' if args.reward_graph else None)
+                task_profile='graph-harvest/v2' if args.reward_graph else None)
         cti = None
         if args.cti:
             from treesim.kiwi_rl.selective_cti import SelectiveCTI, update_cti
             cti_runtime=FastRuntime(args.scene,worlds=args.cti_worlds*(args.cti_alternatives+1) if args.reward_graph else args.cti_worlds,camera=None,
                 arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],
                 jaw_cap_Nm=config['jaw_cap_Nm'],
-                task_profile='graph-harvest/v1' if args.reward_graph else None)
+                task_profile='graph-harvest/v2' if args.reward_graph else None)
         config['epa_horizon_capacity']=runtime.epa_horizon_capacity
         gait=load_gait_artifact(args.gait_checkpoint).cuda().eval()
+        if args.reward_graph:
+            for target in (runtime, evaluation_runtime, *([cti_runtime] if args.cti else [])):
+                target.prepare_settled_reset(gait)
         if args.cti:
             if args.reward_graph:
                 from treesim.kiwi_rl.branch_cti import BranchCTI
@@ -198,7 +205,8 @@ def run(args):
         cti_queue=None
         if cti is not None:
             from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
-            cti_queue=PPODecisionQueue(worlds=args.cti_worlds,segment_steps=args.steps)
+            cti_queue=PPODecisionQueue(worlds=args.cti_worlds,segment_steps=args.steps,
+                minimum_remaining_seconds=6. if args.reward_graph else 0.)
         if role=='student':
             from PIL import Image
             rgb=runtime.pixels()[0,:3].permute(1,2,0).cpu().numpy()
@@ -295,6 +303,17 @@ def run(args):
             metrics['optimizer_epochs']=epochs
             metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
             metrics['reward/shaping_mean']=float(torch.stack([r['shaping_reward'] for r in rows]).mean())
+            if args.reward_graph:
+                for name in rows[0]['stage_rewards']:
+                    metrics[f'stage_reward/{name}'] = float(torch.stack([r['stage_rewards'][name] for r in rows]).mean())
+                    metrics[f'stage_progress/{name}'] = float(torch.stack([r['stage_scores'][name] for r in rows]).mean())
+                for i, name in enumerate(('shoulder_0','shoulder_1','elbow_0','elbow_1','wrist_0','wrist_1','jaw')):
+                    actions = torch.stack([r['raw'][:,i].tanh() for r in rows])
+                    metrics[f'action_mean/{name}'] = float(actions.mean())
+                    metrics[f'action_spread/{name}'] = float(actions.std(unbiased=False))
+                    metrics[f'action_saturation/{name}'] = float((actions.abs()>.95).float().mean())
+                    metrics[f'joint_speed/{name}'] = float(torch.stack([r['joint_velocity'][:,i].abs() for r in rows]).mean())
+                    metrics[f'target_error/{name}'] = float(torch.stack([r['target_error'][:,i].abs() for r in rows]).mean())
             del rows,bootstrap
             torch.cuda.synchronize(); index+=1
             transitions+=args.worlds*args.steps
