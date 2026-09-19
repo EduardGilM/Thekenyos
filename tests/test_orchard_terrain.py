@@ -64,18 +64,33 @@ class OrchardTerrainTest(unittest.TestCase):
         grass_g = [floor.color_at(0.0, y)[1] for y in np.linspace(-0.8, 0.8, 48)]
         self.assertGreater(float(np.std(grass_g)), 0.003)
 
-    def test_preview_uses_matte_ground_and_a_focused_sun(self):
+    def test_preview_uses_visible_tiles_and_no_shadow_grid(self):
+        from io import BytesIO
+
+        from PIL import Image
+
         from scripts.record_orchard_mujoco import _SUN_DIR, aim_sun, mjcf
-        from treesim.orchard_terrain import earth_cut_png_bytes
+        from treesim.orchard_terrain import (
+            earth_cut_png_bytes, grass_tile_png_bytes, soil_tile_png_bytes,
+        )
         floor = _pinned()
         xml = mjcf(floor, [], [])
         self.assertIn('castshadow="false"', xml)
-        self.assertIn('roughness="0.92"', xml)
-        self.assertIn('shadowsize="4096"', xml)
-        self.assertIn('earth_cut.png', xml)
+        self.assertNotIn('castshadow="true"', xml)
+        self.assertIn('grass_tile.png', xml)
+        self.assertIn('soil_tile.png', xml)
+        self.assertIn('mesh="orchard_grass"', xml)
+        self.assertIn('mesh="orchard_soil"', xml)
+        self.assertIn('emission="0.48"', xml)
+        self.assertIn('rgba="0 0 0 0"', xml)
         png = earth_cut_png_bytes(0)
         self.assertGreater(len(png), 64)
         self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
+        grass = np.asarray(Image.open(BytesIO(grass_tile_png_bytes(0))))
+        soil = np.asarray(Image.open(BytesIO(soil_tile_png_bytes(0))))
+        self.assertGreater(float(grass.std()), 18.0)
+        self.assertGreater(float(soil.std()), 12.0)
+        self.assertGreater(float(floor.colors_rgb.std()), 0.04)
 
         class Lights:
             light_pos = np.zeros((2, 3))

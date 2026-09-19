@@ -221,15 +221,9 @@ def _appearance_rgb(x: np.ndarray, y: np.ndarray, xx: np.ndarray, yy: np.ndarray
         rgb = rgb * (1.0 - 0.18 * worn)[..., None] + worn[..., None] * np.array(
             [0.34, 0.27, 0.13])
     rgb = np.clip(rgb, 0.0, 1.0)
-    # Fine grass blades and soil crumbs baked into the albedo. This is a
-    # procedural PBR-style base colour for classic MuJoCo GL, not a scanned
-    # Filament material set.
-    blade = np.sin(yy * (2.0 * np.pi / 0.032) + 0.55 * np.sin(xx * (2.0 * np.pi / 0.11)))
-    blade = 0.68 + 0.32 * (0.5 + 0.5 * blade) ** 1.35
-    tuft = 0.90 + 0.10 * clump
-    grain = 0.84 + 0.16 * grit + 0.08 * speck
-    mix = grass * blade * tuft + (1.0 - grass) * grain
-    rgb = rgb * mix[..., None]
+    tiled = (grass[..., None] * sample_world_tile(grass_tile_rgb(), xx, yy)
+             + (1.0 - grass)[..., None] * sample_world_tile(soil_tile_rgb(), xx, yy))
+    rgb = 0.22 * rgb + 0.78 * tiled
     return np.clip(rgb, 0.0, 1.0)
 
 
@@ -364,6 +358,97 @@ def earth_cut_png_bytes(seed: int = 0) -> bytes:
     pixels = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
     buf = BytesIO()
     Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _png_rgb(rgb: np.ndarray) -> bytes:
+    from io import BytesIO
+    from PIL import Image
+    pixels = np.clip(np.asarray(rgb) * 255.0, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def sample_world_tile(tile: np.ndarray, xx: np.ndarray, yy: np.ndarray,
+                      period_m: float = 0.35) -> np.ndarray:
+    """Nearest-neighbour wrap of a square RGB tile in world metres."""
+    n = int(tile.shape[0])
+    j = np.floor(np.mod(xx / period_m, 1.0) * n).astype(np.int32) % n
+    i = np.floor(np.mod(yy / period_m, 1.0) * n).astype(np.int32) % n
+    return tile[i, j]
+
+
+def grass_tile_rgb(seed: int = 4, n: int = 256) -> np.ndarray:
+    """Tileable lawn: visible blades and litter, not a flat green."""
+    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+    rgb = np.zeros((n, n, 3), dtype=np.float64)
+    rgb[:] = (0.07, 0.13, 0.03)
+    for _ in range(2200):
+        cx = float(rng.uniform(0.0, n))
+        y0 = int(rng.integers(0, n))
+        length = int(rng.integers(18, 64))
+        lean = float(rng.uniform(-0.55, 0.55))
+        hue = float(rng.uniform(0.0, 1.0))
+        col = np.array([0.10 + 0.16 * hue, 0.34 + 0.42 * hue, 0.04 + 0.08 * hue])
+        width = int(rng.integers(1, 4))
+        for t in range(length):
+            x = int(cx + lean * t) % n
+            y = (y0 + t) % n
+            x1 = x + width
+            if x1 <= n:
+                rgb[y, x:x1] = 0.22 * rgb[y, x:x1] + 0.78 * col
+            else:
+                rgb[y, x:n] = 0.22 * rgb[y, x:n] + 0.78 * col
+                rgb[y, 0:x1 - n] = 0.22 * rgb[y, 0:x1 - n] + 0.78 * col
+    for _ in range(180):
+        x, y = int(rng.integers(0, n)), int(rng.integers(0, n))
+        rgb[y:min(n, y + 3), x:min(n, x + 4)] = (0.32, 0.21, 0.08)
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def grass_tile_png_bytes(seed: int = 4, n: int = 256) -> bytes:
+    return _png_rgb(grass_tile_rgb(seed, n))
+
+
+def soil_tile_rgb(seed: int = 8, n: int = 256) -> np.ndarray:
+    """Tileable cultivated earth: crumbs and stones, not a flat brown."""
+    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+    x = np.linspace(0.0, 1.0, n)
+    y = np.linspace(0.0, 1.0, n)
+    clump = _value_noise(rng, x, y, 0.5, wavelength_m=0.18)
+    grit = _value_noise(rng, x, y, 0.5, wavelength_m=0.05)
+    wet = np.array([0.14, 0.08, 0.04])
+    dry = np.array([0.58, 0.38, 0.16])
+    rgb = (1.0 - clump)[..., None] * wet + clump[..., None] * dry
+    rgb = rgb * (0.72 + 0.40 * grit[..., None])
+    for _ in range(140):
+        px, py = int(rng.integers(2, n - 4)), int(rng.integers(2, n - 4))
+        rgb[py:py + 4, px:px + 5] = (0.42, 0.33, 0.20)
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def soil_tile_png_bytes(seed: int = 8, n: int = 256) -> bytes:
+    return _png_rgb(soil_tile_rgb(seed, n))
+
+
+def canopy_dapple_png_bytes(seed: int = 11, n: int = 256) -> bytes:
+    """Soft noisy shade card for under the pergola (not a shadow-map grid)."""
+    from io import BytesIO
+    from PIL import Image
+    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+    u = np.linspace(0.0, 1.0, n)
+    v = np.linspace(0.0, 1.0, n)
+    uu, vv = np.meshgrid(u, v)
+    blobs = _value_noise(rng, u, v, 0.5, wavelength_m=0.22)
+    spec = _value_noise(rng, u, v, 0.5, wavelength_m=0.07)
+    edge = np.clip(np.minimum(np.minimum(uu, 1.0 - uu), np.minimum(vv, 1.0 - vv)) / 0.12, 0.0, 1.0)
+    alpha = edge * (0.12 + 0.52 * blobs * blobs) * (0.80 + 0.20 * spec)
+    rgba = np.zeros((n, n, 4), dtype=np.uint8)
+    rgba[..., 0:3] = (18, 22, 12)
+    rgba[..., 3] = np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
     return buf.getvalue()
 
 
