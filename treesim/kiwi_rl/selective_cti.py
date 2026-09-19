@@ -8,9 +8,29 @@ import time
 
 import torch
 
-from .counterfactual import capture, restore, restore_worlds
+from .counterfactual import capture, restore, restore_worlds, replay_position_errors
 from .harvest_training import EpisodeProgress, signals, HARVEST_GAMMA
 from .fast_teacher import privileged_observation
+
+_EXPLORATION_SCALES = (.5, 1., 2.)
+_EXPLORATION_BLOCKS = (8, 32, 100)
+
+
+def sample_policy_sequences(count, steps, *, device, seed):
+    """Sample coherent latent residuals from local through broad policy scales."""
+    candidates = []
+    for index in range(count):
+        scale = _EXPLORATION_SCALES[index % len(_EXPLORATION_SCALES)]
+        block = _EXPLORATION_BLOCKS[(index // len(_EXPLORATION_SCALES)) % len(_EXPLORATION_BLOCKS)]
+        candidate_seed = int(seed + index * 7919)
+        generator = torch.Generator(device=device).manual_seed(candidate_seed)
+        knot_count = math.ceil(steps / block)
+        knots = torch.randn((knot_count, 7), generator=generator, device=device)
+        residual = knots.repeat_interleave(block, dim=0)[:steps]
+        candidates.append(dict(label=f'policy-residual-{index + 1}', residual=residual,
+                               noise_seed=candidate_seed, scale=scale,
+                               block_steps=block, std_floor=.25 if scale == 2. else 0.))
+    return candidates
 
 
 def _progress_over(candidate, reference, approach_gain=.015):
@@ -62,7 +82,7 @@ class SelectiveCTI:
     def __init__(self, runtime, gait, *, stall_seconds=4., max_episode_seconds=30.,
                  minimum_gain=.1, perturb_steps=None, root_spacing=20,
                  horizon_seconds=4., intervention_seconds=2., retention_seconds=.5,
-                 approach_gain=.015):
+                 approach_gain=.015, alternatives=12):
         if runtime.worlds > 64:
             raise ValueError('CTI runtime must use at most 64 worlds')
         values = (stall_seconds, max_episode_seconds, horizon_seconds,
@@ -72,6 +92,9 @@ class SelectiveCTI:
         self.runtime, self.gait, self.rounds = runtime, gait, 0
         self.stall_seconds, self.max_episode_seconds = stall_seconds, max_episode_seconds
         self.minimum_gain, self.approach_gain = minimum_gain, approach_gain
+        self.alternatives = int(alternatives)
+        if self.alternatives < 1:
+            raise ValueError('at least one CTI alternative is required')
         self.horizon_steps = max(1, round(horizon_seconds / runtime.control_dt))
         self.perturb_steps = (max(1, round(intervention_seconds / runtime.control_dt))
                               if perturb_steps is None else int(perturb_steps))
@@ -96,25 +119,24 @@ class SelectiveCTI:
                 (previous_holding & ~now['holding']) |
                 (progress.stale >= max(1, progress.stall_steps - 20)))
 
-    def _act(self, policy, memory, *, explore=False, intervention=None, noise=None):
+    def _act(self, policy, memory, *, explore=False, noise=None, noise_scale=1., std_floor=0.):
         rt = self.runtime
         obs = rt.observe().detach().clone()
         priv = privileged_observation(rt, obs).detach().clone()
         memory_in = memory.detach().clone()
         mean, logstd, _, next_memory = policy(priv, obs, memory)
-        raw = mean + logstd.exp() * (torch.randn_like(mean) if noise is None else noise) if explore else mean
+        if explore:
+            sampled_noise = torch.randn_like(mean)  # Keep continuation RNG aligned across candidates.
+            residual = sampled_noise if noise is None else noise
+            std = logstd.exp().clamp_min(std_floor) if std_floor else logstd.exp()
+            raw = mean + std * residual * noise_scale
+        else:
+            raw = mean
         action = raw.tanh()
-        if intervention is not None:
-            kind, alternative = intervention
-            if kind == 'hold_arm_close_jaw':
-                action[:, :6] = 0.  # Hold joint targets; this does not freeze physics.
-            elif kind == 'coherent_alternative':
-                action[:, :6] = alternative[:, :6]
-            action[:, 6] = 1.  # Positive velocity closes the jaw from -1 toward 0.
         rt.set_gait_actions(self.gait(obs).detach())
         return obs, priv, memory_in, action, next_memory.detach()
 
-    def _branch(self, policy, root, trigger, intervention, noise_seed=None):
+    def _branch(self, policy, root, trigger, candidate, noise_seed=None):
         rt = self.runtime
         memory, progress, _ = self._restore_app(root)
         if noise_seed is not None:
@@ -128,8 +150,6 @@ class SelectiveCTI:
                        ('holding', 'detached', 'success', 'failed', 'stalled', 'truncated',
                         'horizon', 'numerical', 'lost_fruit', 'retained', 'replay_invalid')})
         result['triggered'] = trigger.clone()
-        result['replay_qpos_error'] = torch.zeros_like(initial['distance'])
-        result['replay_qvel_error'] = torch.zeros_like(initial['distance'])
         result['replay_steps'] = torch.zeros_like(initial['distance'])
         window, segment = deque(maxlen=self.retention_steps), []
         transitions = 0
@@ -137,13 +157,13 @@ class SelectiveCTI:
             if not bool(active.any()):
                 break
             factual = getattr(self, 'factual', ())
-            # Match the PPO noise during its recorded prefix; changing the jaw
-            # must not also silently resample all six arm commands.
-            noise = {'noise': factual[tick]['noise']} if tick < len(factual) else {}
+            noise = (candidate['residual'][tick] if candidate is not None and
+                     tick < self.perturb_steps else None)
             obs, priv, memory_in, action, memory = self._act(
-                policy, memory, explore=True,
-                intervention=intervention if tick < self.perturb_steps else None, **noise)
-            recorded = factual[tick] if intervention is None and tick < len(factual) else None
+                policy, memory, explore=True, noise=noise,
+                noise_scale=candidate['scale'] if noise is not None else 1.,
+                std_floor=candidate['std_floor'] if noise is not None else 0.)
+            recorded = factual[tick] if candidate is None and tick < len(factual) else None
             if recorded is not None:
                 action = recorded['action'].clone()
                 rt.set_gait_actions(recorded['gait'])
@@ -165,20 +185,31 @@ class SelectiveCTI:
             now = signals(rt)
             if recorded is not None:
                 import warp as wp
-                qerr=(wp.to_torch(rt.data.qpos)-recorded['qpos']).abs().amax(dim=1)
-                verr=(wp.to_torch(rt.data.qvel)-recorded['qvel']).abs().amax(dim=1)
-                terr=(wp.to_torch(rt.control.targets)-recorded['targets']).abs().amax(dim=1)
-                checked=active & recorded['active']
-                mismatch=(qerr>1e-4) | (verr>1e-3) | (terr>1e-6)
-                for key in ('holding','detached','success','failed'):
-                    mismatch |= now[key] != recorded['signals'][key]
+                errors = replay_position_errors(rt, recorded)
+                checked = active & recorded['active']
+                first = tick == 0
+                mismatch = ((errors['base_m'] > (1e-5 if first else .002)) |
+                            (errors['fruit_m'] > (1e-5 if first else .01)) |
+                            (errors['robot_rad'] > (1e-4 if first else .01)))
+                if first:
+                    mismatch |= errors['fruit_orientation_rad'] > .001
+                mismatch |= ~torch.isfinite(torch.stack(list(errors.values()))).all(dim=0)
+                mismatch |= (wp.to_torch(rt.control.targets)-recorded['targets']).abs().amax(dim=1) > 1e-6
+                # Warm contact trajectories drift even after full same-runtime restore.
+                # Check errors in physical units, with exact discrete task outcomes.
+                for key, value in now.items():
+                    if value.dtype == torch.bool:
+                        mismatch |= value != recorded['signals'][key]
                 result['replay_invalid'] |= checked & mismatch
-                result['replay_qpos_error'] = torch.maximum(result['replay_qpos_error'], torch.where(checked,qerr,0.))
-                result['replay_qvel_error'] = torch.maximum(result['replay_qvel_error'], torch.where(checked,verr,0.))
+                for key, error in errors.items():
+                    name = 'replay_' + key
+                    result[name] = torch.maximum(result.get(name, torch.zeros_like(error)),
+                                                 torch.where(checked, error, 0.))
                 result['replay_steps'] += checked.float()
             _, terminated, truncated, stalled = progress.step(now, done)
             if recorded is not None:
-                result['replay_invalid'] |= active & ((terminated | truncated) != recorded['ending'])
+                result['replay_invalid'] |= active & ((terminated != recorded['terminated']) |
+                    (truncated != recorded['truncated']) | (progress.task_reward != recorded['task_reward']))
             result['task_return'][active] += HARVEST_GAMMA ** tick * progress.task_reward[active]
             result['lost_fruit'] |= active & ~now['success'] & now['detached'] & ~now['holding']
             window.append({key: value.clone() for key, value in now.items()})
@@ -208,7 +239,10 @@ class SelectiveCTI:
             active &= ~finish
             # Ended worlds must not accumulate physics failures during another
             # world's continuation. Their stored outcomes and labels are frozen.
-            if bool(finish.any()) and bool(active.any()):
+            # A PPO reset of OTHER worlds also runs mw.forward on every world.
+            # Reproduce that solver refresh even when our selected mask is zero.
+            source_reset = tick < len(factual) and factual[tick].get('source_reset', False)
+            if (bool(finish.any()) or source_reset) and bool(active.any()):
                 rt.reset(finish.to(dtype=torch.uint8))
                 progress.reset(finish, signals(rt))
                 memory[finish] = 0
@@ -219,7 +253,9 @@ class SelectiveCTI:
         records = []
         for candidate, outcome in enumerate(outcomes):
             for world in range(len(outcome['score'])):
-                row = dict(pass_name=pass_name, candidate=candidate, skill=names[candidate],
+                gain = float((outcome['score'][world] - outcomes[0]['score'][world]).item())
+                row = dict(score_delta_vs_factual=gain if math.isfinite(gain) else None,
+                           pass_name=pass_name, candidate=candidate, skill=names[candidate],
                            world=world, eligible=not reasons[candidate][world],
                            rejection_reasons=reasons[candidate][world])
                 for key, value in outcome.items():
@@ -241,8 +277,16 @@ class SelectiveCTI:
             transitions += count
         provisional, reasons = _choose_winners(outcomes, initial, minimum_gain=self.minimum_gain,
                                                approach_gain=self.approach_gain)
-        names = ['policy' if item is None else item[0] for item in candidates]
+        names = ['factual-policy'] + [item['label'] for item in candidates[1:]]
         records = self._records(outcomes, reasons, names, 'search')
+        for record in records:
+            candidate_index = record['candidate']
+            if candidate_index and record['world'] == 0:
+                candidate = candidates[candidate_index]
+                record.update(exploration='piecewise-gaussian/v1',
+                    noise_seed=candidate['noise_seed'], noise_scale=candidate['scale'],
+                    noise_std_floor=candidate['std_floor'], block_steps=candidate['block_steps'],
+                    intervention_steps=self.perturb_steps)
         confirmed = torch.full_like(provisional, -1)
         examples = []
         if bool((provisional >= 0).any()):
@@ -303,10 +347,8 @@ class SelectiveCTI:
                 progress=app['progress'], task_return=torch.zeros(rt.worlds,device=rt.device_name)))
             self.factual = batch.factual
             trigger = torch.ones(rt.worlds,dtype=torch.bool,device=rt.device_name)
-            generator = torch.Generator(device=rt.device_name).manual_seed(1307+self.rounds)
-            alternative = (torch.randn((rt.worlds,7),generator=generator,device=rt.device_name)*.5).clamp(-1,1)
-            candidates = [None, ('close_jaw',None), ('hold_arm_close_jaw',None),
-                          ('coherent_alternative',alternative)]
+            candidates = [None] + sample_policy_sequences(self.alternatives, self.perturb_steps,
+                device=rt.device_name, seed=1307+self.rounds)
             try:
                 examples, branch = self._episode(frozen,root,trigger,None,candidates)
             finally:
@@ -316,7 +358,7 @@ class SelectiveCTI:
                               **batch.sources[record['world']])
         selected=branch['selected_worlds']
         successful=(int(torch.stack([r['success_mask'] & r['mask'] for r in examples]).any(dim=0).sum()) if examples else 0)
-        metrics=dict(version=3,source='ppo',seconds=time.perf_counter()-started,
+        metrics=dict(version=4,source='ppo',seconds=time.perf_counter()-started,
                      transitions=branch['transitions'],candidate_branches=len(candidates),
                      pilot_events=rt.worlds,roots_searched=rt.worlds,
                      alternatives_compared=rt.worlds*(len(candidates)-1),
@@ -335,7 +377,8 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
     selected_worlds = (int(torch.stack([row['mask'] for row in rows]).any(dim=0).sum().item()) if rows else 0)
     target_actions = sum(int(row['mask'].sum().item()) for row in rows)
     metrics = dict(loss=0., selected_worlds=selected_worlds, target_actions=target_actions,
-                   updated=False, kl=0., rejected_update=False, nonfinite_update=False)
+                   updated=False, kl=0., target_error_before=None, target_error_after=None,
+                   rejected_update=False, nonfinite_update=False)
     if not rows or not target_actions or not coef:
         return metrics
     for row in rows:
@@ -345,6 +388,18 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
     anchors = rows if anchor_rows is None else list(anchor_rows)
     if not anchors:
         raise ValueError('factual anchors must not be empty')
+
+    def target_error():
+        total_error = None
+        with torch.no_grad():
+            for row in rows:
+                mean, _, _, _ = policy(row['privileged'], row['r84'], row['memory'].detach())
+                error = (mean.tanh()[row['mask']] - row['action'][row['mask']]).square().mean(dim=-1).sum()
+                total_error = error if total_error is None else total_error + error
+        return float((total_error / target_actions).item())
+
+    before_error = target_error()
+    metrics['target_error_before'] = before_error if math.isfinite(before_error) else None
     policy_before, optimizer_before = deepcopy(policy.state_dict()), deepcopy(optimizer.state_dict())
     fixed = []
     with torch.no_grad():
@@ -383,8 +438,10 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
                 kls.append(kl)
             kl = torch.cat(kls).mean()
         kl_value = float(kl.item())
+        attempted_error = target_error()
         finite_state = all(bool(torch.isfinite(value).all()) for value in policy.state_dict().values())
-        metrics['nonfinite_update'] |= not math.isfinite(kl_value) or not finite_state
+        metrics['nonfinite_update'] |= (not math.isfinite(kl_value) or not finite_state or
+                                        not math.isfinite(attempted_error))
         # Zero is only a logging placeholder when nonfinite_update is true.
         metrics['kl'] = max(0., kl_value) if math.isfinite(kl_value) else 0.
         accepted = not metrics['nonfinite_update'] and kl_value <= .01
@@ -397,4 +454,8 @@ def update_cti(policy, optimizer, examples, coef=.1, anchor_rows=None):
         metrics['rejected_update'] = True
     else:
         metrics['updated'] = True
+    # Measure the policy state that will be retained. A rejected, nonfinite or
+    # excessive-KL step must report the restored pre-update target error.
+    final_error = attempted_error if accepted else target_error()
+    metrics['target_error_after'] = final_error if math.isfinite(final_error) else None
     return metrics

@@ -214,7 +214,7 @@ CTI requires replay acceptance and meaningful physical outcome comparisons, not
 a successful full harvest first. Early action-branch experiments may develop
 executor competence; keep their data separate from factual PPO. Process-local
 snapshots alone are not evidence of CTI policy training or benefit.
-CTI v3 roots must come from the actual PPO collector, with factual action replay
+CTI v4 roots must come from the actual PPO collector, with factual action replay
 and source episode/timestep/policy identifiers. Never substitute independently
 generated pilot trajectories. Reject targets when cross-runtime factual replay
 fails; preserve bounded queueing and frozen collection-policy continuations.

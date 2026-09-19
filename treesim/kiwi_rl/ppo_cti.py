@@ -143,7 +143,7 @@ class PPODecisionQueue:
         if not isinstance(control_targets, torch.Tensor):
             control_targets, control_previous = wp.to_torch(control_targets), wp.to_torch(control_previous)
         ended = terminated | truncated
-        record = dict(valid=_clone(active), active=_clone(active), episode_ids=selected(episode_ids),
+        record = dict(source_reset=bool(ended.any()), valid=_clone(active), active=_clone(active), episode_ids=selected(episode_ids),
                       obs=selected(obs), raw_action=selected(raw_action), action=selected(action),
                       noise=selected(noise),
                       gait_action=selected(gait_action), gait=selected(gait_action), next_obs=selected(next_obs),

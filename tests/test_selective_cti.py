@@ -9,7 +9,9 @@ from unittest.mock import patch
 import torch
 
 from treesim.kiwi_rl.harvest_training import EpisodeProgress
-from treesim.kiwi_rl.selective_cti import SelectiveCTI, _choose_winners, update_cti
+from treesim.kiwi_rl.selective_cti import (
+    SelectiveCTI, _choose_winners, sample_policy_sequences, update_cti,
+)
 def state(distance=.2, basket=.8, grasp=False, detached=False):
     return dict(distance=torch.tensor([distance]), basket_distance=torch.tensor([basket]),
                 grasp=torch.tensor([grasp]), holding=torch.tensor([grasp]),
@@ -74,6 +76,39 @@ class SelectiveChoiceTest(unittest.TestCase):
             self.assertEqual(winner.item(), -1)
 
 
+class PolicyExplorationTest(unittest.TestCase):
+    def test_sampled_sequences_are_seeded_coherent_all_joint_and_both_jaw_signs(self):
+        first = sample_policy_sequences(12, 100, device='cpu', seed=421)
+        repeated = sample_policy_sequences(12, 100, device='cpu', seed=421)
+        self.assertEqual({candidate['block_steps'] for candidate in first}, {8, 32, 100})
+        self.assertEqual({candidate['scale'] for candidate in first}, {.5, 1., 2.})
+        stacked = torch.stack([candidate['residual'] for candidate in first])
+        self.assertTrue(torch.all(stacked.abs().sum(dim=(0, 1)) > 0))
+        jaw = stacked[:, :, 6]
+        self.assertTrue((jaw > 0).any())
+        self.assertTrue((jaw < 0).any())
+        for left, right in zip(first, repeated):
+            torch.testing.assert_close(left['residual'], right['residual'], rtol=0, atol=0)
+            self.assertEqual(left['noise_seed'], right['noise_seed'])
+
+    def test_policy_residual_opens_and_closes_jaw_without_special_action_override(self):
+        runtime = SimpleNamespace(worlds=1, device_name='cpu', control_dt=.02)
+        runtime.observe = lambda: torch.zeros(1, 84)
+        runtime.set_gait_actions = lambda actions: None
+        cti = SelectiveCTI(runtime, lambda obs: torch.zeros(1, 12))
+        policy = lambda priv, obs, memory: (torch.zeros(1, 7), torch.zeros(7),
+                                             torch.zeros(1), memory)
+        memory = torch.zeros(1, 64)
+        residual = torch.tensor([.3, -.2, .1, .4, -.3, .2, 1.])
+        with patch('treesim.kiwi_rl.selective_cti.privileged_observation',
+                   return_value=torch.zeros(1, 32)):
+            _, _, _, closing, _ = cti._act(policy, memory, explore=True, noise=residual)
+            _, _, _, opening, _ = cti._act(policy, memory, explore=True, noise=-residual)
+        self.assertTrue((closing[0, :6] != 0).all())
+        self.assertGreater(closing[0, 6].item(), 0)
+        self.assertLess(opening[0, 6].item(), 0)
+
+
 class _TinyTeacher(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -91,6 +126,11 @@ def training_row():
                 success_mask=torch.tensor([True, False, False]))
 
 
+def residual_candidate(steps=2):
+    return dict(label='policy-residual-test', residual=torch.ones(steps, 7),
+                noise_seed=19, scale=1., std_floor=0., block_steps=steps)
+
+
 class CTIUpdateTest(unittest.TestCase):
     def test_updates_only_selected_bounded_action_rows(self):
         policy = _TinyTeacher()
@@ -103,6 +143,9 @@ class CTIUpdateTest(unittest.TestCase):
         self.assertLessEqual(metrics['kl'], .01)
         self.assertEqual(metrics['selected_worlds'], 2)
         self.assertEqual(metrics['target_actions'], 2)
+        self.assertIsNotNone(metrics['target_error_before'])
+        self.assertIsNotNone(metrics['target_error_after'])
+        self.assertLess(metrics['target_error_after'], metrics['target_error_before'])
         self.assertFalse(torch.equal(before, policy.actor.bias))
 
     def test_rejects_unbounded_targets_and_nonfinite_coefficient(self):
@@ -127,6 +170,7 @@ class CTIUpdateTest(unittest.TestCase):
         self.assertTrue(metrics['rejected_update'])
         self.assertFalse(metrics['updated'])
         self.assertGreater(metrics['kl'], .01)
+        self.assertAlmostEqual(metrics['target_error_after'], metrics['target_error_before'], places=7)
         for key, value in policy.state_dict().items():
             torch.testing.assert_close(value, policy_before[key], rtol=0, atol=0)
         actual = optimizer.state_dict()
@@ -149,9 +193,11 @@ class CTIUpdateTest(unittest.TestCase):
         anchors[0]['reset'] = torch.tensor([False, True, False])
         optimizer = torch.optim.Adam(policy.parameters(), lr=.001)
         self.assertTrue(update_cti(policy, optimizer, [row], anchor_rows=anchors)['updated'])
-        torch.testing.assert_close(memories[0], memories[-2])
-        torch.testing.assert_close(memories[1], memories[-1])
-        torch.testing.assert_close(memories[1], torch.ones(3, 64))
+        # Target-error measurements add one forward pass before and after the
+        # optimizer step. The recurrent-anchor passes remain paired around it.
+        torch.testing.assert_close(memories[1], memories[-3])
+        torch.testing.assert_close(memories[2], memories[-2])
+        torch.testing.assert_close(memories[2], torch.ones(3, 64))
 
     def test_nonfinite_post_step_kl_rolls_back_and_remains_json_serializable(self):
         policy = _TinyTeacher()
@@ -167,6 +213,7 @@ class CTIUpdateTest(unittest.TestCase):
         self.assertFalse(metrics['updated'])
         self.assertTrue(metrics['rejected_update'])
         self.assertTrue(metrics['nonfinite_update'])
+        self.assertAlmostEqual(metrics['target_error_after'], metrics['target_error_before'], places=7)
         json.dumps(metrics, allow_nan=False)
         self.assertEqual(optimizer.state_dict()['state'], {})
         for key, value in policy.state_dict().items():
@@ -181,6 +228,7 @@ class CTIUpdateTest(unittest.TestCase):
         hook.remove()
         self.assertTrue(metrics['rejected_update'])
         self.assertTrue(metrics['nonfinite_update'])
+        self.assertAlmostEqual(metrics['target_error_after'], metrics['target_error_before'], places=7)
         json.dumps(metrics, allow_nan=False)
         self.assertEqual(optimizer.state_dict()['state'], {})
         for key, value in policy.state_dict().items():
@@ -202,11 +250,11 @@ class CTISegmentTest(unittest.TestCase):
             return torch.zeros(1, 64), EpisodeProgress(state(), stall_steps=stall_steps,
                                                       max_steps=max_steps), torch.zeros(1)
         cti._restore_app = restore_root
-        def act(policy, memory, *, explore, intervention=None):
+        def act(policy, memory, *, explore, noise=None, noise_scale=1., std_floor=0.):
             if rt.tick == 0:
-                rt.kind = intervention
+                rt.kind = noise is not None
             action = .1 * torch.rand(1, 7)
-            if intervention:
+            if noise is not None:
                 action += .5
             recorded[-1].append(action.clone())
             return torch.full((1, 84), float(rt.tick)), torch.zeros(1, 32), memory.clone(), action, memory + 1
@@ -226,11 +274,19 @@ class CTISegmentTest(unittest.TestCase):
 
     def test_actual_confirmed_segment_labels_and_matched_noise(self):
         cti, rt, recorded, observe = self.fixture()
+        candidate = residual_candidate()
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, candidate])
         self.assertEqual(metrics['selected_worlds'], 1)
         self.assertEqual(len(examples), 2)
+        confirmed = [row for row in metrics['branch_records']
+                     if row['pass_name'] == 'confirmation' and row['candidate'] == 1]
+        self.assertEqual(confirmed[0]['selected_candidate'], 1)
+        sampled = next(row for row in metrics['branch_records']
+                       if row['pass_name'] == 'search' and row['candidate'] == 1)
+        self.assertEqual(sampled['noise_seed'], candidate['noise_seed'])
+        self.assertEqual(sampled['block_steps'], candidate['block_steps'])
         # Restore before initial signals; then search pair; then confirmation pair.
         for i, row in enumerate(examples):
             torch.testing.assert_close(row['action'], recorded[4][i])
@@ -241,9 +297,10 @@ class CTISegmentTest(unittest.TestCase):
 
     def test_second_seed_must_confirm_improvement(self):
         cti, rt, recorded, observe = self.fixture(reject_confirmation=True)
+        candidate = residual_candidate()
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, candidate])
         self.assertEqual(metrics['provisional_worlds'], 1)
         self.assertEqual(metrics['selected_worlds'], 0)
         self.assertEqual(examples, [])
@@ -252,9 +309,10 @@ class CTISegmentTest(unittest.TestCase):
         # Baseline stalls on step 6; the new grasp moves its stall to step 7.
         # Step 6 is an explicit leaf, so the grasp is useful partial progress.
         cti, rt, recorded, observe = self.fixture(stall_steps=6)
+        candidate = residual_candidate()
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, candidate])
         self.assertEqual(metrics['selected_worlds'], 1)
         self.assertTrue(examples)
         self.assertTrue(metrics['branch_records'][0]['stalled'])
@@ -265,7 +323,7 @@ class CTISegmentTest(unittest.TestCase):
         for stall_steps, expected_stall in ((100, False), (3, True)):
             cti, rt, recorded, observe = self.fixture(stall_steps=stall_steps)
             with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
-                result, _, _ = cti._branch(None, None, torch.tensor([True]), ('close_jaw', None))
+                result, _, _ = cti._branch(None, None, torch.tensor([True]), residual_candidate())
             self.assertEqual(result['stalled'].item(), expected_stall)
             self.assertEqual(result['horizon'].item(), not expected_stall)
             if expected_stall:
@@ -277,7 +335,7 @@ class CTISegmentTest(unittest.TestCase):
         cti, rt, recorded, observe = self.fixture(max_steps=3)
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, residual_candidate()])
         self.assertEqual(examples, [])
         self.assertIn('incomplete_retention', metrics['branch_records'][1]['rejection_reasons'])
 
@@ -285,7 +343,7 @@ class CTISegmentTest(unittest.TestCase):
         cti, rt, recorded, observe = self.fixture(transient=True)
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, residual_candidate()])
         self.assertEqual(examples, [])
         candidate = metrics['branch_records'][1]
         self.assertIn('no_retained_progress', candidate['rejection_reasons'])
@@ -298,39 +356,10 @@ class CTISegmentTest(unittest.TestCase):
         rt.check = fail
         with patch('treesim.kiwi_rl.selective_cti.signals', side_effect=observe):
             examples, metrics = cti._episode(None, None, torch.tensor([True]), torch.zeros(1),
-                                             [None, ('close_jaw', None)])
+                                             [None, residual_candidate()])
         self.assertEqual(examples, [])
         self.assertTrue(metrics['branch_records'][1]['numerical'])
         json.dumps(metrics['branch_records'], allow_nan=False)
-
-    def test_recorded_noise_preserves_unmodified_arm_actions(self):
-        rt=SimpleNamespace(worlds=1,device_name='cpu',control_dt=.02,
-            observe=lambda:torch.zeros(1,84),set_gait_actions=lambda a:None)
-        cti=SelectiveCTI(rt,lambda obs:torch.zeros(1,12))
-        policy=_TinyTeacher()
-        noise=torch.full((1,7),.23)
-        with patch('treesim.kiwi_rl.selective_cti.privileged_observation',return_value=torch.zeros(1,32)):
-            baseline=cti._act(policy,torch.zeros(1,64),explore=True,noise=noise)[3]
-            candidate=cti._act(policy,torch.zeros(1,64),explore=True,noise=noise,
-                intervention=('close_jaw',None))[3]
-        torch.testing.assert_close(candidate[:,:6],baseline[:,:6],atol=0,rtol=0)
-        self.assertEqual(candidate[0,6].item(),1.)
-
-    def test_skill_actions_close_jaw_and_hold_targets(self):
-        rt = SimpleNamespace(worlds=1, device_name='cpu', control_dt=.02,
-                             observe=lambda: torch.zeros(1, 84), set_gait_actions=lambda a: None)
-        cti = SelectiveCTI(rt, lambda obs: torch.zeros(1, 12))
-        policy = _TinyTeacher()
-        with patch('treesim.kiwi_rl.selective_cti.privileged_observation', return_value=torch.zeros(1, 32)):
-            for skill in ('close_jaw', 'hold_arm_close_jaw', 'coherent_alternative'):
-                _, _, _, action, _ = cti._act(policy, torch.zeros(1, 64),
-                    intervention=(skill, torch.full((1, 7), .4)))
-                self.assertEqual(action[0, 6].item(), 1.)
-                if skill == 'hold_arm_close_jaw':
-                    self.assertTrue((action[0, :6] == 0).all())
-                if skill == 'coherent_alternative':
-                    torch.testing.assert_close(action[0, :6], torch.full((6,), .4))
-
 
 @unittest.skipUnless(os.environ.get('CTI_GPU_TEST') == '1' and os.environ.get('FAST_SCENE') and
                      os.environ.get('GAIT_CHECKPOINT') and

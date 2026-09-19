@@ -842,7 +842,7 @@ Student distillation uses a frozen learned teacher on states visited by the
 sensor-only student. It requires successful evaluation evidence for the exact
 teacher checkpoint; an unverified scripted controller is not a substitute.
 
-Selective counterfactual training v3 uses actual PPO rollout decision points.
+Selective counterfactual training v4 uses actual PPO rollout decision points.
 `--cti --cti-worlds 16 --cti-every-seconds 0` continuously collects one selected
 16-world root batch per PPO buffer, mixing nearest-fruit and rotating worlds.
 The bounded queue retains up to eight batches and expires old policy versions.
@@ -855,8 +855,12 @@ A separate small runtime executes the selected PPO states. It replays recorded
 actions and gait commands for the factual prefix (64 steps / 1.28 seconds in the
 main profile), then continues with that root's frozen policy. Every factual
 step checks joint state, controller targets, physical task flags and episode
-termination; mismatched roots cannot teach. Coherent two-second alternatives
-include jaw closure, holding arm targets with closure, and seeded arm alternatives.
+termination; mismatched roots cannot teach. The first replay step uses strict
+physical-unit tolerances; later contact drift permits 2 mm base, 10 mm fruit-center
+and 0.01 rad joint error, while discrete task outcomes and task rewards must match.
+Twelve two-second alternatives sample all seven controls without scripted skills,
+using seeded Gaussian residuals with 0.5/1/2 scales and 8/32/100-step blocks.
+Broad proposals retain a generic variance floor when policy variance collapses.
 Four-second searches use matched continuation noise and a second confirmation.
 Source identities, replay failures, queue counts and applied updates are logged.
 This is bounded sampling from each PPO buffer, not branching every transition.
@@ -872,7 +876,9 @@ Confirmed sampled actions feed a separate imitation update after factual PPO;
 branch rows never enter PPO. A factual-policy KL check rolls back both model and
 Adam state above 0.01 or on nonfinite updates. W&B separates selected candidates,
 applied updates and rejected updates. `cti-branches.jsonl` records branch scores
-and rejection reasons. CTI targets 10% amortized wall time; one round can overshoot.
+and rejection reasons, sampled-plan seeds/scales/durations, and score differences
+against the factual path. Auxiliary updates report target error before and after
+the retained update (after rollback if rejected). CTI targets 10% amortized wall time; one round can overshoot.
 The one-hour budget includes CTI work. A matched-compute control remains necessary
 to measure learning benefit. Student observations and distillation gates are unchanged.
 

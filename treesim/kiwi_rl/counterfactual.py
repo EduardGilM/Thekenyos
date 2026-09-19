@@ -401,3 +401,38 @@ def restore_worlds(runtime, snapshot, world_ids=None):
         for path, target in arrays.items():
             target.index_copy_(0, indices, snapshot.arrays[path])
     return deepcopy(snapshot.application_state)
+
+
+def replay_position_errors(runtime, recorded):
+    """Per-world replay errors in metres/radians, without mixing qpos units.
+
+    Full same-runtime replay of the trained contact policy has shown a 5 mm
+    fruit-centre / 0.0015 rad joint drift over 64 steps despite identical roots;
+    subset replay showed a comparable floor. Check the first transition
+    separately from later contact amplification, and always compare task flags
+    and returns. Fruit spin is reported but is not a universal geometry metric.
+    """
+    import torch
+    actual = _world_tensor(runtime.data.qpos)
+    expected = _world_tensor(recorded['qpos']).to(device=actual.device, dtype=actual.dtype)
+    if actual.shape != expected.shape:
+        raise ValueError('Recorded qpos must match replay world and state dimensions')
+    model = runtime.model
+    offsets = []
+    for body in (runtime.chassis, runtime.fruit_body):
+        joint = int(model.body_jntadr[body])
+        # mjJNT_FREE is zero. Both bodies in the supported FastRuntime profile
+        # have native free-joint positions followed by wxyz quaternions.
+        if joint < 0 or int(model.jnt_type[joint]) != 0:
+            raise ValueError('Replay geometry requires free chassis and fruit joints')
+        offsets.append(int(model.jnt_qposadr[joint]))
+    base, fruit = offsets
+    joint_ids = _world_tensor(runtime.control.qids).to(device=actual.device, dtype=torch.long)
+    a, b = actual[:, fruit + 3:fruit + 7].double(), expected[:, fruit + 3:fruit + 7].double()
+    a, b = a / a.norm(dim=-1, keepdim=True), b / b.norm(dim=-1, keepdim=True)
+    b = torch.where((a * b).sum(dim=-1, keepdim=True) < 0, -b, b)
+    orientation = 4 * torch.atan2((a - b).norm(dim=-1), (a + b).norm(dim=-1))
+    return dict(base_m=(actual[:, base:base + 3] - expected[:, base:base + 3]).norm(dim=-1),
+                fruit_m=(actual[:, fruit:fruit + 3] - expected[:, fruit:fruit + 3]).norm(dim=-1),
+                robot_rad=(actual[:, joint_ids] - expected[:, joint_ids]).abs().amax(dim=-1),
+                fruit_orientation_rad=orientation)

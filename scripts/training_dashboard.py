@@ -70,7 +70,7 @@ events=tail_jsonl('phase-events.jsonl',200)
 branches=tail_jsonl('cti-branches.jsonl',3)
 phase=active.get('phase')
 if not phase and events: phase=events[-1].get('phase')
-if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3) else 'ppo'
+if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4) else 'ppo'
 status=active.get('status') if active.get('status') in ('paused','running') else None
 print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
@@ -138,7 +138,7 @@ def _phase(snapshot):
                 return event['phase']
     rows = snapshot.get('rows')
     if isinstance(rows, list) and rows and isinstance(rows[-1], dict):
-        if rows[-1].get('cti/version') in (2,3):
+        if rows[-1].get('cti/version') in (2,3,4):
             return 'cti-v'+str(rows[-1]['cti/version'])
     return 'ppo'
 

@@ -126,6 +126,26 @@ class WorldSnapshotTest(unittest.TestCase):
         self.assertNotIn('data.shared', snapshot.arrays)
         self.assertTrue(all(value.shape[0] == 2 for value in snapshot.arrays.values()))
 
+    def test_replay_geometry_uses_native_addresses_and_quaternion_sign_equivalence(self):
+        import torch
+        rt = self.runtime(2)
+        rt.data.qpos = np.zeros((2, 35), dtype=np.float32)
+        rt.data.qpos[:, [8, 23]] = 1.
+        rt.model = _Part(body_jntadr=np.array([0, 1]), jnt_type=np.array([0, 0]),
+                         jnt_qposadr=np.array([5, 20]))
+        rt.chassis, rt.fruit_body = 0, 1
+        rt.control.qids = np.array([0, 1, 2], dtype=np.int32)
+        recorded = {'qpos': torch.from_numpy(rt.data.qpos.copy())}
+        recorded['qpos'][:, 23:27] *= -1
+        rt.data.qpos[:, 5] += .001
+        rt.data.qpos[:, 20:22] += [.003, .004]
+        rt.data.qpos[:, 2] += .005
+        errors = counterfactual.replay_position_errors(rt, recorded)
+        torch.testing.assert_close(errors['base_m'], torch.full((2,), .001))
+        torch.testing.assert_close(errors['fruit_m'], torch.full((2,), .005))
+        torch.testing.assert_close(errors['robot_rad'], torch.full((2,), .005))
+        self.assertTrue((errors['fruit_orientation_rad'] == 0).all())
+
     def test_rejects_unknown_buffers_and_invalid_ids(self):
         from unittest.mock import patch
         source = self.runtime(8)
@@ -223,6 +243,216 @@ class CrossRuntimeReplayTest(unittest.TestCase):
                                                    msg=f'{key} discrete replay mismatch at tick {tick}')
                 torch.testing.assert_close(done, expected['done'], rtol=0, atol=0)
             print(f'WORLD_REPLAY source={source_worlds} target={target_worlds} steps=64 maxima={maxima}', flush=True)
+
+
+@unittest.skipUnless(os.environ.get('CTI_REPLAY_RESET_GPU_TEST') == '1' and
+                     os.environ.get('CTI_REPLAY_CHECKPOINT'),
+                     'explicit warmed reset replay opt-in and teacher checkpoint required')
+class WarmedCrossRuntimeReplayTest(unittest.TestCase):
+    def test_factual_foreign_resets_replay_across_eight_warm_buffers(self):
+        import torch
+        import warp as wp
+        from treesim.kiwi_rl.fast_runtime import FastRuntime
+        from treesim.kiwi_rl.control import load_gait_artifact
+        from treesim.kiwi_rl.fast_teacher import build_privileged_policy
+        from treesim.kiwi_rl.harvest_training import HarvestCollector, signals
+        from treesim.kiwi_rl.ppo import load_checkpoint
+        from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
+        original_slots = os.environ.get('CTI_REPLAY_ORIGINAL_SLOTS') == '1'
+        source_worlds = int(os.environ.get('CTI_REPLAY_SOURCE_WORLDS', '4096'))
+        target_worlds = int(os.environ.get('CTI_REPLAY_TARGET_WORLDS', '16'))
+        wp.init()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)), torch.no_grad():
+            source = FastRuntime(os.environ['FAST_SCENE'], worlds=source_worlds)
+            target = FastRuntime(os.environ['FAST_SCENE'], worlds=target_worlds)
+            policy = build_privileged_policy().cuda().eval()
+            restored = load_checkpoint(os.environ['CTI_REPLAY_CHECKPOINT'], {'teacher': policy})
+            gait = load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
+            collector = HarvestCollector(source, role='teacher', stall_seconds=4., max_episode_seconds=30.)
+            queue = PPODecisionQueue(worlds_per_batch=target_worlds)
+            torch.set_rng_state(restored['rng']['torch'])
+            torch.cuda.set_rng_state_all(restored['rng']['cuda'])
+            failures = []
+            total_foreign = 0
+            for buffer in range(8):
+                collector.collect(policy, gait, 64, cti_queue=queue, policy_version=buffer)
+                batch = queue.pop_ready(buffer)
+                self.assertIsNotNone(batch)
+                results = {}
+                slots = (torch.tensor(batch.source_world_ids, device='cuda:0') if original_slots
+                         else torch.arange(target_worlds, device='cuda:0'))
+                def arranged(value):
+                    result = torch.zeros_like(value)
+                    result[slots] = value
+                    return result
+                def selected(array):
+                    return wp.to_torch(array)[slots]
+                foreign_resets = sum(bool(step['source_reset']) and not bool(step['ending'].any())
+                                     for step in batch.factual_steps)
+                total_foreign += foreign_resets
+                for match_source_resets in (False, True):
+                    counterfactual.restore_worlds(target, batch.snapshot, slots)
+                    from copy import deepcopy
+                    replay_progress = deepcopy(batch.initial_progress)
+                    root_arrays = counterfactual._world_arrays(target)
+                    for path, saved in batch.snapshot.arrays.items():
+                        torch.testing.assert_close(root_arrays[path][slots], saved, rtol=0, atol=0, equal_nan=True)
+                    valid = torch.ones(target_worlds, dtype=torch.bool, device='cuda:0')
+                    maxima = dict(qpos=0., qvel=0., targets=0., observation=0.)
+                    mismatch = torch.zeros_like(valid)
+                    first_mismatch = None
+                    physical_mismatch = torch.zeros_like(valid)
+                    for tick, step in enumerate(batch.factual_steps):
+                        active = step['valid']
+                        target.set_gait_actions(arranged(step['gait_action']))
+                        _, _, done, _ = target.step(arranged(step['action']))
+                        target.check()
+                        for key, array, tolerance in (('qpos', target.data.qpos, 1e-4),
+                                                      ('qvel', target.data.qvel, 1e-3),
+                                                      ('targets', target.control.targets, 1e-6)):
+                            actual = selected(array)
+                            error = (actual - step[key]).abs().amax(dim=-1)
+                            mismatch |= active & (error > tolerance)
+                            if bool(active.any()):
+                                maxima[key] = max(maxima[key], float(error[active].max()))
+                        # Geometry helper expects native target order.
+                        geometry = counterfactual.replay_position_errors(target, {'qpos': arranged(step['qpos'])})
+                        first_step = tick == 0
+                        geometry_bad = ((geometry['base_m'] > (1e-5 if first_step else .002)) |
+                                        (geometry['fruit_m'] > (1e-5 if first_step else .01)) |
+                                        (geometry['robot_rad'] > (1e-4 if first_step else .01)))
+                        if first_step:
+                            geometry_bad |= geometry['fruit_orientation_rad'] > .001
+                        geometry_bad |= ~torch.isfinite(torch.stack(list(geometry.values()))).all(dim=0)
+                        physical_mismatch |= active & geometry_bad[slots]
+                        obs_error = (target.observe()[slots] - step['next_obs']).abs().amax(dim=-1)
+                        if bool(active.any()):
+                            maxima['observation'] = max(maxima['observation'], float(obs_error[active].max()))
+                        current = {key:value[slots] for key,value in signals(target).items()}
+                        _, terminated, truncated, _ = replay_progress.step(current, done[slots])
+                        physical_mismatch |= active & ((terminated != step['terminated']) |
+                            (truncated != step['truncated']) | (replay_progress.task_reward != step['task_reward']))
+                        for key, value in signals(target).items():
+                            if value.dtype == torch.bool:
+                                different = active & (value[slots] != step['signals'][key])
+                                mismatch |= different
+                                physical_mismatch |= different
+                        if first_mismatch is None and bool(mismatch.any()):
+                            bad = int(mismatch.nonzero()[0])
+                            qpos_error = (selected(target.data.qpos)[bad] - step['qpos'][bad]).abs()
+                            qvel_error = (selected(target.data.qvel)[bad] - step['qvel'][bad]).abs()
+                            first_mismatch = dict(tick=tick, world=bad,
+                                qpos_index=int(qpos_error.argmax()), qpos_error=float(qpos_error.max()),
+                                qvel_index=int(qvel_error.argmax()), qvel_error=float(qvel_error.max()),
+                                previous_source_reset=bool(batch.factual_steps[tick-1]['source_reset']) if tick else False)
+                        finish = active & step['ending']
+                        valid &= ~finish
+                        if bool(finish.any()) or (match_source_resets and step['source_reset']):
+                            target.reset(arranged(finish))
+                        if not bool(valid.any()):
+                            break
+                    results['matched' if match_source_resets else 'local_only'] = dict(
+                        mismatched_worlds=int(mismatch.sum()), physical_rejected_worlds=int(physical_mismatch.sum()),
+                        first_mismatch=first_mismatch, **maxima)
+                    if match_source_resets and bool(mismatch.any()):
+                        failures.append((buffer, int(mismatch.sum()), maxima))
+                print(f'WARM_REPLAY buffer={buffer} foreign_resets={foreign_resets} results={results}', flush=True)
+            if not original_slots:
+                self.assertGreater(total_foreign, 0, 'regression must exercise foreign-world reset forwards')
+            # Keep strict trajectory failures visible in diagnostics. They also
+            # occur with full same-runtime snapshots; acceptance requires the
+            # separate physical geometry and exact task-outcome guards above.
+            print(f'WARM_REPLAY strict_trajectory_failures={failures}', flush=True)
+
+
+@unittest.skipUnless(os.environ.get('CTI_REPLAY_FLOOR_GPU_TEST') == '1',
+                     'explicit same-runtime numerical-floor diagnostic opt-in required')
+class ReplayNumericalFloorTest(unittest.TestCase):
+    def test_same_runtime_full_snapshot_vs_cross_runtime_at_warm_roots(self):
+        import json
+        import torch
+        import warp as wp
+        from treesim.kiwi_rl.fast_runtime import FastRuntime
+        from treesim.kiwi_rl.control import load_gait_artifact
+        from treesim.kiwi_rl.fast_teacher import build_privileged_policy
+        from treesim.kiwi_rl.harvest_training import HarvestCollector, signals
+        from treesim.kiwi_rl.ppo import load_checkpoint
+        from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
+        wp.init()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)), torch.no_grad():
+            source = FastRuntime(os.environ['FAST_SCENE'], worlds=16)
+            target = FastRuntime(os.environ['FAST_SCENE'], worlds=16)
+            policy = build_privileged_policy().cuda().eval()
+            restored = load_checkpoint(os.environ['CTI_REPLAY_CHECKPOINT'], {'teacher': policy})
+            gait = load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
+            collector = HarvestCollector(source, role='teacher', stall_seconds=4., max_episode_seconds=30.)
+            queue = PPODecisionQueue(worlds_per_batch=16)
+            torch.set_rng_state(restored['rng']['torch'])
+            torch.cuda.set_rng_state_all(restored['rng']['cuda'])
+            fruit_joint = int(source.model.body_jntadr[source.fruit_body])
+            fq = int(source.model.jnt_qposadr[fruit_joint])
+            fv = int(source.model.jnt_dofadr[fruit_joint])
+            def angle(a, b):
+                a, b = a.double(), b.double()
+                a, b = a / a.norm(dim=-1, keepdim=True), b / b.norm(dim=-1, keepdim=True)
+                b = torch.where((a*b).sum(dim=-1, keepdim=True) < 0, -b, b)
+                return 4 * torch.atan2((a-b).norm(dim=-1), (a+b).norm(dim=-1))
+            def differences(q, v, expected):
+                eq, ev = expected['qpos'], expected['qvel']
+                return dict(base_position_m=(q[:, :3]-eq[:, :3]).norm(dim=-1),
+                    base_orientation_rad=angle(q[:, 3:7], eq[:, 3:7]),
+                    robot_joint_rad=(q[:, 7:fq]-eq[:, 7:fq]).abs().amax(dim=-1),
+                    fruit_position_m=(q[:, fq:fq+3]-eq[:, fq:fq+3]).norm(dim=-1),
+                    fruit_orientation_rad=angle(q[:, fq+3:fq+7], eq[:, fq+3:fq+7]),
+                    fruit_linear_m_s=(v[:, fv:fv+3]-ev[:, fv:fv+3]).norm(dim=-1),
+                    fruit_angular_rad_s=(v[:, fv+3:fv+6]-ev[:, fv+3:fv+6]).norm(dim=-1))
+            for buffer in range(4):
+                full_root = counterfactual.capture(source)
+                collector.collect(policy, gait, 64, cti_queue=queue, policy_version=buffer)
+                batch = queue.pop_ready(buffer)
+                self.assertIsNotNone(batch)
+                endpoint = counterfactual.capture(source)
+                for mode in ('same_full_1', 'same_full_2', 'cross_subset_1', 'cross_subset_2'):
+                    if mode.startswith('same'):
+                        rt = source
+                        counterfactual.restore(rt, full_root)
+                        slots = torch.tensor(batch.source_world_ids, device='cuda:0')
+                    else:
+                        rt = target
+                        counterfactual.restore_worlds(rt, batch.snapshot)
+                        slots = torch.arange(16, device='cuda:0')
+                    for path, array in (('data.qpos', rt.data.qpos), ('data.qvel', rt.data.qvel),
+                                        ('control.targets', rt.control.targets)):
+                        torch.testing.assert_close(wp.to_torch(array)[slots], batch.snapshot.arrays[path],
+                                                   rtol=0, atol=0)
+                    maxima, first = {}, {}
+                    flag_mismatch = {key: torch.zeros(16, dtype=torch.bool, device='cuda:0')
+                                     for key in ('success', 'failed', 'holding', 'detached')}
+                    for tick, step in enumerate(batch.factual_steps):
+                        active = step['valid']
+                        actions, gaits = torch.zeros_like(step['action']), torch.zeros_like(step['gait_action'])
+                        actions[slots], gaits[slots] = step['action'], step['gait_action']
+                        rt.set_gait_actions(gaits)
+                        rt.step(actions)
+                        rt.check()
+                        errors = differences(wp.to_torch(rt.data.qpos)[slots], wp.to_torch(rt.data.qvel)[slots], step)
+                        for key, error in errors.items():
+                            value = float(error[active].max())
+                            maxima[key] = max(maxima.get(key, 0.), value)
+                            if tick == 0: first[key] = value
+                        actual_signals = signals(rt)
+                        for key in flag_mismatch:
+                            flag_mismatch[key] |= active & (actual_signals[key][slots] != step['signals'][key])
+                        if step['source_reset']:
+                            mask = torch.zeros(16, dtype=torch.bool, device='cuda:0')
+                            mask[slots] = step['ending']
+                            rt.reset(mask)
+                    print('REPLAY_FLOOR ' + json.dumps(dict(buffer=buffer, mode=mode,
+                        steps=len(batch.factual_steps), first_step=first, maxima=maxima,
+                        mismatched_worlds={key:int(value.sum()) for key,value in flag_mismatch.items()})), flush=True)
+                counterfactual.restore(source, endpoint)
 
 
 @unittest.skipUnless(os.environ.get('FAST_SCENE') and all(importlib.util.find_spec(n) for n in

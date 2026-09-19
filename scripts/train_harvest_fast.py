@@ -102,7 +102,7 @@ def run(args):
         jaw_cap_Nm=1.0,
         force_limit_scope='per_jaw_and_nonpad_group',
         optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
-        cti_version=3 if args.cti else 0,
+        cti_version=4 if args.cti else 0,
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     resumed=resume_history(args.output,args.resume_from,config) if args.resume_from else None
     if resumed and resumed['latest']['elapsed_seconds']>=args.train_seconds:
@@ -176,6 +176,10 @@ def run(args):
         started=time.monotonic()-offset; last_eval=time.monotonic()
         last_cti=time.monotonic()-args.cti_every_seconds
         previous=resumed['latest'] if resumed else {}
+        if cti_queue is not None and previous.get('cti/version',0)>=3:
+            for key in ('total_collected_roots','total_dropped_roots','total_expired_roots','total_popped_roots'):
+                setattr(cti_queue,key,previous.get('cti/'+key,0))
+            cti_queue.total_dropped_roots+=previous.get('cti/queue_roots',0)
         cti_seconds=previous.get('cti/total_seconds',0.)
         cti_transitions=previous.get('cti/total_transitions',0)
         cti_selected=previous.get('cti/total_selected_worlds',0)
@@ -189,11 +193,11 @@ def run(args):
         best=evaluation_score(best_eval)
         best_checkpoint=str(args.output/f"checkpoint-{best_eval['update']:06d}.pt")
         best_result={k:v for k,v in best_eval.items() if k!='update'}
-        phase='cti-v3' if args.cti else role
+        phase='cti-v4' if args.cti else role
         if restored:
             torch.set_rng_state(restored['rng']['torch'])
             torch.cuda.set_rng_state_all(restored['rng']['cuda'])
-            event=dict(event='resume',phase=phase,version=3 if args.cti else 0,at=time.time(),
+            event=dict(event='resume',phase=phase,version=4 if args.cti else 0,at=time.time(),
                 elapsed_seconds=offset,update=index,source_checkpoint=str(args.resume_from),
                 episodes_reset=True,remaining_seconds=args.train_seconds-offset)
             with (args.output/'phase-events.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')
@@ -224,12 +228,12 @@ def run(args):
                 with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                     batch=cti_queue.pop(index)
                     examples,cti_metrics=(cti.run(policy,batch) if batch is not None else
-                        ([],dict(version=3,source='ppo',queue_empty=True)))
+                        ([],dict(version=4,source='ppo',queue_empty=True)))
                     records=cti_metrics.pop('branch_records',[])
                     if records:
                         with (args.output/'cti-branches.jsonl').open('a') as f:
                             f.write(json.dumps(dict(update=index+1,elapsed_seconds=time.monotonic()-started,
-                                                   version=3,records=records))+'\n')
+                                                   version=4,records=records))+'\n')
                     # A short factual sequence checks drift outside the selected branches.
                     cti_metrics.update(update_cti(policy,optimizer,examples,coef=args.cti_coef,
                                                   anchor_rows=rows[:4]))
@@ -241,7 +245,7 @@ def run(args):
                 del examples
             if cti is not None:
                 metrics.update({f'cti/{k}':v for k,v in cti_queue.metrics().items()})
-                metrics.update({'cti/version':3,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
+                metrics.update({'cti/version':4,'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
                                 'cti/total_selected_worlds':cti_selected,'cti/rounds':cti_rounds})
             metrics['optimizer_epochs']=epochs
             metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
