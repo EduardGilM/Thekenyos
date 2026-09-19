@@ -541,10 +541,13 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         from . import foliage as _foliage
         fp = config.foliage
         leaf_col = tuple(getattr(fp, "leaf_color", (0.18, 0.42, 0.12)))
+        hz = orchard_floor.canopy_z if orchard_floor is not None else None
         placements = (leaf_placements if leaf_placements is not None
-                      else _foliage.place_leaves(skeleton, fp, seed=config.seed))
+                      else _foliage.place_leaves(skeleton, fp, seed=config.seed,
+                                                 height_z=hz))
         if spacing and leaf_placements is None:
-            placements.extend(_foliage.place_canopy_leaves(skeleton, fp, seed=config.seed))
+            placements.extend(_foliage.place_canopy_leaves(
+                skeleton, fp, seed=config.seed, height_z=hz))
         if fp.physics:
             # each leaf = its own body on a compliant petiole (flutters; EXPENSIVE:
             # +1 body & joint per leaf, so keep leaf counts small in this mode)

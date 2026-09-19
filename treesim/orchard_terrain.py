@@ -279,7 +279,12 @@ class OrchardFloor:
         return self._bilinear(self.landform_m, x, y)
 
     def canopy_z(self, x, y) -> float:
-        return self.canopy_height_m + self.aisle_plane_z(x, y) + self.landform_z(x, y)
+        """Leaf-roof height: a constant offset above the local ground.
+
+        The pergola wires and visual foliage follow this surface so the roof
+        has the same rolling shape as the floor, not a fitted plane.
+        """
+        return self.canopy_height_m + self.ground_z(x, y)
 
     def ground_z(self, x, y) -> float:
         x, y = float(x), float(y)

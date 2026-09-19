@@ -69,7 +69,7 @@ class OrchardTerrainTest(unittest.TestCase):
             floor.aisle_plane_z(3.0, 0.0) - floor.aisle_plane_z(0.0, 0.0),
             expected, places=9)
         self.assertAlmostEqual(
-            floor.canopy_z(0.0, 0.0) - floor.aisle_plane_z(0.0, 0.0), 1.6)
+            floor.canopy_z(0.0, 0.0) - floor.ground_z(0.0, 0.0), 1.6, places=9)
         # With no ruts or noise, ground follows the aisle plane within the 1 cm crown.
         self.assertLess(abs(floor.ground_z(0.0, 0.0) - floor.aisle_plane_z(0.0, 0.0)), 0.015)
 
@@ -156,9 +156,35 @@ class OrchardTerrainTest(unittest.TestCase):
         self.assertGreater(float(residual.max() - residual.min()), 1.0)
         self.assertGreater(float(roll.landform_m.max()), 0.4)
         self.assertLess(float(roll.landform_m.min()), -0.4)
-        self.assertAlmostEqual(
-            roll.canopy_z(2.0, 3.0) - roll.aisle_plane_z(2.0, 3.0),
-            1.6 + roll.landform_z(2.0, 3.0), places=9)
+        for x, y in ((0.0, 0.0), (2.0, 3.0), (-5.0, 4.0), (8.0, -6.0)):
+            self.assertAlmostEqual(
+                roll.canopy_z(x, y) - roll.ground_z(x, y), 1.6, places=9)
+        # The roof is not a single inclined plane: landform shows up in canopy_z.
+        deltas = [
+            abs(roll.canopy_z(x, y) - (roll.aisle_plane_z(x, y) + 1.6))
+            for x in (-8.0, 0.0, 5.0, 9.0) for y in (-6.0, 2.0, 7.0)
+        ]
+        self.assertGreater(max(deltas), 0.4)
+
+    def test_foliage_tracks_ground_offset(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_canopy_leaves, rotate_xyzw
+        floor = _pinned(seed=7, landform_m=2.4, landform_wavelength_m=18.0,
+                        slope_deg=3.5, noise_m=0.0, rut_depth_m=0.0)
+        skel = generate(height=1.6, seed=7, rows=2, columns=2, spacing=5.0,
+                        ground_z=floor.ground_z, canopy_z=floor.canopy_z)
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           canopy_spacing_m=.2)
+        leaves = place_canopy_leaves(skel, fp, seed=42, height_z=floor.canopy_z)
+        self.assertGreater(len(leaves), 50)
+        offsets, zs = [], []
+        for p in leaves:
+            center = p.attach + rotate_xyzw(p.frame, np.array([0., 0., .11]))
+            offsets.append(center[2] - floor.ground_z(center[0], center[1]))
+            zs.append(center[2])
+        offsets = np.asarray(offsets)
+        self.assertTrue(np.all((offsets > 1.62) & (offsets < 1.76)))
+        self.assertGreater(float(np.max(zs) - np.min(zs)), 0.6)
 
     def test_camera_enters_from_the_side_under_the_canopy(self):
         from scripts.record_orchard_mujoco import camera_pose, free_camera_eye

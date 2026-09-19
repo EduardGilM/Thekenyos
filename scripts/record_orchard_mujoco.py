@@ -33,14 +33,14 @@ def _rgba(rgb, a=1.0) -> str:
     return " ".join(f"{float(c):.3f}" for c in (*rgb, a))
 
 
-def _leaf_mjcf(skeleton, fp: FoliageParams, seed: int) -> tuple[list[str], list[str]]:
+def _leaf_mjcf(skeleton, fp: FoliageParams, seed: int, height_z=None) -> tuple[list[str], list[str]]:
     from treesim.foliage import (
         LEAF_SIZE_CLASSES, leaf_blade_arrays, leaf_blade_style,
         place_canopy_leaves, place_leaves,
     )
-    placements = place_leaves(skeleton, fp, seed=seed)
+    placements = place_leaves(skeleton, fp, seed=seed, height_z=height_z)
     if fp.canopy_spacing_m:
-        placements.extend(place_canopy_leaves(skeleton, fp, seed=seed))
+        placements.extend(place_canopy_leaves(skeleton, fp, seed=seed, height_z=height_z))
     assets = []
     style = leaf_blade_style(fp.leaf_shape)
     for i, scale in enumerate(LEAF_SIZE_CLASSES):
@@ -292,7 +292,7 @@ def main():
         leaf_color=(0.14, 0.36, 0.10),
         canopy_spacing_m=float(args.canopy_spacing),
     )
-    leaf_assets, leaf_geoms = _leaf_mjcf(skeleton, fp, args.seed)
+    leaf_assets, leaf_geoms = _leaf_mjcf(skeleton, fp, args.seed, height_z=floor.canopy_z)
     print(
         f"[orchard-mujoco] posts {args.pergola_rows}x{args.pergola_columns} "
         f"at {spacing:.1f} m; segments {len(skeleton)}; fruit {len(fruit)}; "

@@ -191,8 +191,40 @@ def _cane_samples(canes, step_m: float = 0.45):
     return np.asarray(pts), np.asarray(dirs), np.asarray(owners, dtype=int)
 
 
+def _roof_bar_samples(skel: TreeSkeleton, step_m: float = 0.45):
+    """Tied wires and canes that define the leaf roof (not hanging laterals)."""
+    bars = [s for s in skel if s.order == 1 or (s.order == 2 and s.supported)]
+    if not bars:
+        bars = [s for s in skel if s.order == 2]
+    return _cane_samples(bars, step_m)
+
+
+def _heights_at(xy, height_z, roof_pts) -> np.ndarray:
+    xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+    if height_z is not None:
+        return np.array([float(height_z(float(x), float(y))) for x, y in xy], dtype=float)
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+    pts = np.asarray(roof_pts, dtype=float)
+    z = LinearNDInterpolator(pts[:, :2], pts[:, 2])(xy)
+    miss = ~np.isfinite(z)
+    if np.any(miss):
+        z = np.asarray(z, dtype=float)
+        z[miss] = NearestNDInterpolator(pts[:, :2], pts[:, 2])(xy[miss])
+    return np.asarray(z, dtype=float)
+
+
+def _normals_at(xy, height_z, roof_pts, eps: float = 0.30) -> np.ndarray:
+    xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+    z0 = _heights_at(xy, height_z, roof_pts)
+    zx = _heights_at(xy + np.array([eps, 0.0]), height_z, roof_pts)
+    zy = _heights_at(xy + np.array([0.0, eps]), height_z, roof_pts)
+    n = np.column_stack((-(zx - z0) / eps, -(zy - z0) / eps, np.ones(len(xy))))
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
+    return n
+
+
 def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
-                        seed: int = 0) -> list[LeafPlacement]:
+                        seed: int = 0, height_z=None) -> list[LeafPlacement]:
     spacing = fp.canopy_spacing_m
     if not np.isfinite(spacing) or spacing < .03:
         raise ValueError("canopy_spacing_m must be finite and at least 0.03 m")
@@ -211,24 +243,21 @@ def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
     grid = np.stack(np.meshgrid(np.arange(nx), np.arange(ny)), axis=-1).reshape(-1, 2)
     cell_m = (hi - lo)[:2] / np.array([nx, ny])
     xy = lo[:2] + (grid + .5 + rng.uniform(-.3, .3, grid.shape)) * cell_m
-    points = np.array([p for s in canes for p in (s.start, s.end)])
-    plane = np.linalg.lstsq(np.column_stack((points[:, :2], np.ones(len(points)))),
-                           points[:, 2], rcond=None)[0]
-    # Sit just above the wires; random lift stays inside the existing roof band.
-    z = xy @ plane[:2] + plane[2] + rng.uniform(.04, .14, len(xy))
-    plane_n = np.array([-plane[0], -plane[1], 1.0])
-    samples, sample_dirs, owners = _cane_samples(canes)
+    roof_pts, _, _ = _roof_bar_samples(skel)
+    z = _heights_at(xy, height_z, roof_pts) + rng.uniform(.04, .14, len(xy))
+    normals = _normals_at(xy, height_z, roof_pts)
+    cane_pts, cane_dirs, cane_owners = _cane_samples(canes)
     from scipy.spatial import cKDTree
-    _, near = cKDTree(samples[:, :2]).query(xy)
+    _, near = cKDTree(cane_pts[:, :2]).query(xy)
     out = []
     half = 0.5 * fp.leaf_length
     for i, center_xy in enumerate(xy):
-        cane = canes[int(owners[near[i]])]
-        bar = samples[near[i]]
+        cane = canes[int(cane_owners[near[i]])]
+        bar = cane_pts[near[i]]
         toward = np.array([center_xy[0] - bar[0], center_xy[1] - bar[1], 0.0])
         if np.linalg.norm(toward) < 1e-4:
-            toward = np.cross(plane_n, sample_dirs[near[i]])
-        frame = _horizontal_blade_frame(plane_n, toward, rng)
+            toward = np.cross(normals[i], cane_dirs[near[i]])
+        frame = _horizontal_blade_frame(normals[i], toward, rng)
         heading = rotate_xyzw(frame, np.array([0.0, 0.0, 1.0]))
         center = np.array([center_xy[0], center_xy[1], z[i]])
         out.append(LeafPlacement(
@@ -241,13 +270,14 @@ def place_canopy_leaves(skel: TreeSkeleton, fp: FoliageParams,
 
 
 def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
-                 seed: int = 0) -> list[LeafPlacement]:
+                 seed: int = 0, height_z=None) -> list[LeafPlacement]:
     """Return leaf placements for all eligible twigs."""
     rng = np.random.default_rng(seed + 777)
     out: list[LeafPlacement] = []
     max_order = max(s.order for s in skel.segments)
     thr = min(fp.min_order_for_leaves, max_order)
     kiwi = getattr(fp, "leaf_shape", "elliptic") == "cordate"
+    roof_pts = _roof_bar_samples(skel)[0] if kiwi else None
 
     for seg in skel.segments:
         if seg.order < thr:
@@ -258,26 +288,27 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
         H = seg.direction
         nleaf = fp.leaves_per_terminal if seg.is_terminal else max(1, fp.leaves_per_terminal // 2)
         if kiwi:
-            if not seg.supported:
-                # Hanging fruiting laterals keep fruit; the leaf roof sits on
-                # the tied canes so blades do not drape as a vertical string.
-                continue
-            plane_n = np.array([0.0, 0.0, 1.0])
             along = np.array([H[0], H[1], 0.0])
             if np.linalg.norm(along) < 0.05:
                 along = np.array([1.0, 0.0, 0.0])
-            side = np.cross(plane_n, along)
-            side = side / np.linalg.norm(side)
+            along = along / np.linalg.norm(along)
             for k in range(nleaf):
                 t = (k + 1) / (nleaf + 1)
+                p = seg.start + H * (t * seg.length)
+                xy = np.array([[p[0], p[1]]])
+                plane_n = _normals_at(xy, height_z, roof_pts)[0]
+                side = np.cross(plane_n, along)
+                sn = np.linalg.norm(side)
+                side = side / sn if sn > 1e-8 else np.array([1.0, 0.0, 0.0])
                 lateral = side if (k % 2 == 0) else -side
-                base = seg.start + H * (t * seg.length) + lateral * rng.uniform(0.012, 0.038)
-                tilt = 0.28 if not seg.supported else 0.16
+                z = float(_heights_at(xy, height_z, roof_pts)[0]
+                          + rng.uniform(0.03, 0.10))
+                base = np.array([p[0], p[1], z]) + lateral * rng.uniform(0.012, 0.038)
                 out.append(LeafPlacement(
                     parent_seg=seg.index,
-                    attach=base.copy(),
+                    attach=base,
                     frame=_horizontal_blade_frame(plane_n, lateral, rng,
-                                                  tilt_rad=tilt, yaw_rad=0.85),
+                                                  tilt_rad=0.20, yaw_rad=0.85),
                     length=fp.leaf_length * max(0.4, 1.0 + rng.normal(0, 0.15)),
                     width=fp.leaf_width * max(0.4, 1.0 + rng.normal(0, 0.15)),
                 ))
