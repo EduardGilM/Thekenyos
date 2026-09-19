@@ -326,6 +326,19 @@ function renderCharts(series) {
   if (!names.length) return '<p class="empty">Sin métricas numéricas todavía.</p>';
   return names.map(name => svgChart(series[name].steps, series[name].values, name)).join("\n");
 }
+function queryToken() {
+  try {
+    const token = new URLSearchParams(location.search).get("token") || "";
+    return token && token !== "None" ? token : "";
+  } catch (err) {
+    return "";
+  }
+}
+function withAuth(path) {
+  const token = queryToken();
+  if (!token) return path;
+  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+}
 function renderVideo(video) {
   let extra = chartable(video.min_tcp_fruit_distance_m)
     ? ` · min TCP-fruta ${Number(video.min_tcp_fruit_distance_m).toFixed(3)} m` : "";
@@ -334,11 +347,32 @@ function renderVideo(video) {
   }
   if (video.easy) extra += " · easy-carry";
   return `<figure><figcaption>update ${esc(video.step)}${esc(extra)} · ${esc(video.label || "")}</figcaption>
-    <video controls preload="metadata" src="${esc(video.url)}"></video></figure>`;
+    <video controls preload="metadata" src="${esc(withAuth(video.url))}"></video></figure>`;
 }
 let currentVideo = null;
+function showFetchHint(message) {
+  if (document.getElementById("auth-hint")) return;
+  const sub = document.getElementById("sub");
+  if (!sub) return;
+  const hint = document.createElement("div");
+  hint.id = "auth-hint";
+  hint.className = "warn";
+  hint.textContent = message;
+  sub.after(hint);
+}
 async function tick() {
-  const payload = await fetch("metrics.json?t=" + Date.now(), {cache: "no-store"}).then(r => r.json());
+  const response = await fetch(withAuth("metrics.json?t=" + Date.now()), {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    showFetchHint("No se pudieron leer las métricas (HTTP " + response.status +
+      "). Si Caddy pide token, abre /index.html?token=… o Jupyter /files/workspace/training/monitor-live/index.html.");
+    throw new Error("metrics http " + response.status);
+  }
+  const payload = await response.json();
+  const hint = document.getElementById("auth-hint");
+  if (hint) hint.remove();
   const stage = stageLabel(payload);
   document.getElementById("sub").textContent =
     `${payload.run} · etapa ${stage} · ${payload.rows} filas · actualizado ${payload.generated_at}`;
@@ -541,6 +575,39 @@ class LiveDashboard:
         return write_dashboard(read_jsonl(self.jsonl), self.monitor_dir, run=self.run_dir,
                                videos=list_progress_videos(self.monitor_dir / 'videos'),
                                hub=self.hub)
+
+
+def serve_monitor(directory: str | Path, port: int):
+    """Serve the hub on 0.0.0.0 so Vast Caddy can reverse-proxy it."""
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    directory = Path(directory).resolve()
+    if not directory.is_dir():
+        raise ValueError(f'monitor directory does not exist: {directory}')
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
+        raise ValueError('http-port must be an integer in [0, 65535]')
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(directory), **kwargs)
+
+        def log_message(self, format, *args):
+            return
+
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cross-Origin-Resource-Policy', 'cross-origin')
+            super().end_headers()
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def add_monitor_args(parser) -> None:

@@ -782,10 +782,14 @@ python -B scripts/watch_training.py --run /path/to/run \
 
 The page updates charts from `metrics.json` every two seconds without reloading,
 and shows only the latest CPU progress clip. Default clips are 256 policy steps
-(~10 s at 25 fps). If Jupyter already owns the tunneled port, open
-`monitor/index.html` through `/files/...`. Use `--http-port` only when that port
-is free. Distance, loss and `harvest_successes` on the dashboard are still not
-harvest proof.
+(~10 s at 25 fps). `--http-port 8090` binds `0.0.0.0` so Vast Caddy can proxy
+external port 10100. The live hub on this instance is
+`/workspace/training/monitor-live/index.html`. Open it from Instance Portal →
+Applications → Training Dashboard (that button adds the Caddy token), or from
+Jupyter at `/files/workspace/training/monitor-live/index.html`. Fetch and video
+URLs keep `?token=` when the page was opened with one. A mapped-port 401 is
+Caddy, not an empty run. Distance, loss and `harvest_successes` on the dashboard
+are still not harvest proof.
 
 `benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
 and `--camera`. It reports policy transitions/s separately from physics steps/s.

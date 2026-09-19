@@ -8,8 +8,8 @@ import numpy as np
 
 from treesim.kiwi_rl.training_monitor import (
     LiveDashboard, compose_progress_frame, curriculum_preview_from_checkpoint,
-    due_checkpoints, due_latest_checkpoint, read_jsonl, render_dashboard_html, series_from_rows,
-    svg_chart, write_dashboard,
+    due_checkpoints, due_latest_checkpoint, read_jsonl, render_dashboard_html,
+    serve_monitor, series_from_rows, svg_chart, write_dashboard,
 )
 
 
@@ -42,6 +42,10 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertIn('evaluation/mean_closest_distance_m', html)
             self.assertNotIn('http-equiv="refresh"', html)
             self.assertIn('metrics.json', html)
+            self.assertIn('withAuth', html)
+            self.assertIn('queryToken', html)
+            self.assertIn('credentials', html)
+            self.assertIn('/files/workspace/training/monitor-live/index.html', html)
             self.assertIn('Último vídeo de progreso', html)
             self.assertIn('deposit_pixels', html)
             self.assertIn('001 · deposit_pixels', html)
@@ -192,6 +196,24 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertNotIn('easy-airdrop', html_easy_video)
         first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
         np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
+
+    def test_serve_monitor_exposes_hub_without_cache(self):
+        import urllib.request
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = Path(tmp)
+            (hub / 'index.html').write_text('<html>monitor</html>', encoding='utf-8')
+            (hub / 'metrics.json').write_text(json.dumps({'rows': 1}) + '\n', encoding='utf-8')
+            server = serve_monitor(hub, 0)
+            try:
+                host, port = server.server_address[:2]
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/metrics.json', timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn('no-store', response.headers.get('Cache-Control', ''))
+                    self.assertEqual(response.headers.get('Access-Control-Allow-Origin'), '*')
+                    self.assertEqual(json.loads(response.read().decode()), {'rows': 1})
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == '__main__':

@@ -5,34 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 import sys
-import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from treesim.kiwi_rl.training_monitor import (
     LiveDashboard, checkpoint_paths, due_checkpoints, due_latest_checkpoint,
-    record_progress_video, spawn_progress_video,
+    record_progress_video, serve_monitor, spawn_progress_video,
 )
-
-
-def serve_monitor(directory: Path, port: int) -> ThreadingHTTPServer:
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(directory), **kwargs)
-
-        def log_message(self, format, *args):
-            return
-
-        def end_headers(self):
-            self.send_header('Cache-Control', 'no-store')
-            super().end_headers()
-
-    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
 
 
 def record_due_videos(dashboard: LiveDashboard, *, every: int, steps: int, camera_every: int | None):
