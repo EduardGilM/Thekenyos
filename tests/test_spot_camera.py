@@ -46,6 +46,17 @@ class SpotCameraTest(unittest.TestCase):
         np.testing.assert_allclose(-data.cam_xmat[0].reshape(3, 3)[:, 2],
                                   [0., .987688858, .1564312], atol=2e-5)
 
+    def test_aperture_splits_crossing_triangles_without_removing_housing(self):
+        from treesim.kiwi_rl.spot_camera import _open_aperture, _urdf_rpy_matrix, OPTICAL_RPY_RAD, POSITION_M
+        optical = _urdf_rpy_matrix(OPTICAL_RPY_RAD)
+        local = np.array([[-.02, -.02, .004], [.02, -.02, .004], [0., .03, .004]])
+        vertices = local @ optical.T + POSITION_M
+        out, faces, _ = _open_aperture(vertices, np.array([[0, 1, 2]]), POSITION_M,
+                                      np.zeros(3), [1, 0, 0, 0], np.ones(3))
+        area = sum(np.linalg.norm(np.cross(out[f[1]]-out[f[0]], out[f[2]]-out[f[0]]))/2 for f in faces)
+        expected_hole = 16 * .008**2 * np.sin(2*np.pi/16) / 2
+        self.assertAlmostEqual(.001-area, expected_hole, places=10)
+        self.assertGreater(len(faces), 1)
 
 
 if __name__ == '__main__':

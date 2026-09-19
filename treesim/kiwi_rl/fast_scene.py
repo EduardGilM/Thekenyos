@@ -75,7 +75,7 @@ def _fruit_inertia(mass: float) -> tuple[float, float, float]:
 
 def assemble_fast_scene(directory, *, fruit_count: int | None = None,
                         timestep_s: float = DEFAULT_TIMESTEP_S,
-                        visual_stalk: bool = True):
+                        visual_stalk: bool = True, camera_start: bool = False):
     """Return ``(scene_xml, manifest)`` for a bounded rigid-fruit training scene."""
     import mujoco
     from treesim.native_kiwi import RADII_M
@@ -183,6 +183,15 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
             data.qpos[target_slice] = base_data.qpos[source_slice]
     _set_initial_joints(model, data, base_manifest['robot'])
     mujoco.mj_forward(model, data)
+    start_pose = None
+    robot = dict(base_manifest['robot'])
+    if camera_start:
+        from .fast_start_pose import set_camera_start_pose
+        start_pose = set_camera_start_pose(model, data, robot, fruits[0]['body'])
+        robot['initial_position_rad'] = dict(robot['initial_position_rad'])
+        for name in robot['arm'][:6]:
+            joint = model.joint(robot['prefix'] + name).id
+            robot['initial_position_rad'][name] = float(data.qpos[model.jnt_qposadr[joint]])
     if model.nflex or any(model.eq_type[i] == mujoco.mjtEq.mjEQ_WELD for i in range(model.neq)):
         raise RuntimeError('Fast scene contains flex objects or a hand weld')
     if not np.isfinite(data.qpos).all() or any(w.number for w in data.warning):
@@ -196,7 +205,7 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     if model.nflex or model.nu != base.nu:
         raise RuntimeError('Fast scene changed base topology')
     root = ET.fromstring(assembled_xml)
-    manifest = dict(base_manifest, cameras=cameras, schema=SCHEMA, base_model_sha256=base_manifest['model_sha256'],
+    manifest = dict(base_manifest, robot=robot, start_pose=start_pose, cameras=cameras, schema=SCHEMA, base_model_sha256=base_manifest['model_sha256'],
         model_sha256=hashlib.sha256(assembled_xml.encode()).hexdigest(), fruits=fruits,
         requires_deformable_assembly=False, training_ready=False,
         canopy_dynamics='fixed support', mesh_normalization=normalization,

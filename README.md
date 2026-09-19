@@ -718,7 +718,12 @@ FAST_SCENE=/path/to/fast-scene python -B -m unittest \
 ```
 
 `--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
-weights with a fresh optimizer. The GPU runtime captures each 50 Hz control
+weights with a fresh optimizer. Fast CLI exports solve a collision-free arm
+starting pose with the first fruit in the fixed gripper camera;
+`--keep-base-arm-pose` preserves the source pose for diagnostics. The pose is
+recorded in the scene and motor targets, not supplied to the actor as a target.
+Each run saves `policy-camera-start.png` from the actual GPU observation.
+The GPU runtime captures each 50 Hz control
 interval and evaluates contact/release outcomes at every physics substep. The
 CLIs share a non-default Torch/Warp stream; use that same stream contract when
 embedding the runtime. PPO accumulates gradients across all world minibatches
@@ -847,9 +852,8 @@ on the wrist, from the pinned RELIC nominal sensor frame and published
 60.2° horizontal × 46.4° vertical FOV. The invented mast camera is removed.
 Fast training samples this view at 64 × 48. This is nominal geometry, not
 per-robot calibration; depth remains ideal registered geometric depth, not
-a calibrated ToF sensor. The sensor renderer omits the sealed wrist visual
-housing because the simplified mesh has no camera aperture; collisions and
-external renders retain it. Historical mast-camera checkpoints are incompatible
+a calibrated ToF sensor. The wrist visual mesh has a local camera aperture; the rest of the housing,
+fingers and scene occlude RGB and depth normally. Collision meshes stay intact. Historical mast-camera checkpoints are incompatible
 with the new training camera. The legacy `train_kiwi.py` remains a separate scaffold.
 
 Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from

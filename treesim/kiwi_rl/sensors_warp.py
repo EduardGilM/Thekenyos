@@ -31,23 +31,9 @@ class WarpRGBDRig:
             raise ValueError('Camera names must be nonempty and unique')
         self.model_camera_ids = [native_model.camera(name).id for name in self.cameras]
         with wp.ScopedDevice(self.device):
-            # The nominal Spot RGB aperture is sealed by the simplified wrist
-            # visual mesh. Omit that housing only from this sensor render;
-            # preserve the physical camera pose and every collision geometry.
-            groups = native_model.geom_group.copy()
-            try:
-                if (self.cameras == ('hand_camera',) and
-                    native_model.body(native_model.cam_bodyid[self.model_camera_ids[0]]).name.endswith('arm_link_wr1')):
-                    wrist = native_model.cam_bodyid[self.model_camera_ids[0]]
-                    housing = ((native_model.geom_bodyid == wrist) &
-                               (native_model.geom_contype == 0) &
-                               (native_model.geom_conaffinity == 0))
-                    native_model.geom_group[housing] = 5
-                self.context = mw.create_render_context(native_model, nworld=self.worlds, cam_res=resolution,
-                    cam_active=list(self.cameras), render_rgb=True, render_depth=True, render_seg=False,
-                    use_textures=True, use_shadows=False, use_fast_math=False)
-            finally:
-                native_model.geom_group[:] = groups
+            self.context = mw.create_render_context(native_model, nworld=self.worlds, cam_res=resolution,
+                cam_active=list(self.cameras), render_rgb=True, render_depth=True, render_seg=False,
+                use_textures=True, use_shadows=False, use_fast_math=False)
             self.rgb = [wp.zeros((self.worlds, self.height, self.width), dtype=wp.vec3) for _ in self.cameras]
             self.depth = [wp.zeros((self.worlds, self.height, self.width)) for _ in self.cameras]
             self.valid = [wp.zeros((self.worlds, self.height, self.width), dtype=wp.uint8) for _ in self.cameras]

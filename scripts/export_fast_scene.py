@@ -19,12 +19,15 @@ def main(argv=None):
     parser.add_argument('--timestep', type=float, choices=(.002, .005), default=.005,
                         help='Physics step in seconds: .005=200 Hz, .002=500 Hz')
     parser.add_argument('--no-visual-stalk', action='store_true')
+    parser.add_argument('--keep-base-arm-pose', action='store_true',
+                        help='Diagnostic export without the default fruit-facing starting arm pose')
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error('Preserve existing scene export directories')
     xml, manifest = assemble_fast_scene(args.base_scene, fruit_count=args.fruit_count,
                                         timestep_s=args.timestep,
-                                        visual_stalk=not args.no_visual_stalk)
+                                        visual_stalk=not args.no_visual_stalk,
+                                        camera_start=not args.keep_base_arm_pose)
     args.output.mkdir(parents=True)
     (args.output / 'scene.xml').write_text(xml)
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2, allow_nan=False) + '\n')

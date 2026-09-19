@@ -129,6 +129,10 @@ def run(args):
         if args.initialize_from:
             load_checkpoint(args.initialize_from, {'student':policy}, None,
                             expected_meta={'camera':'hand_camera', 'camera_profile':manifest['cameras']})
+        # Persist the actual starting observation so a run is visually auditable.
+        from PIL import Image
+        rgb = runtime.pixels()[0, :3].permute(1, 2, 0).detach().cpu().numpy()
+        Image.fromarray((rgb.clip(0, 1) * 255).astype('uint8')).save(args.output / 'policy-camera-start.png')
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
         # Compilation and warmup are outside measured rollout throughput.
         collect(runtime, policy, gait, 4, args.camera_every)
@@ -142,6 +146,7 @@ def run(args):
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0))
         baseline = evaluate(runtime, policy, gait, args.steps, args.camera_every)
         log.log(baseline, step=0)
+        print(json.dumps(dict(update=0, **baseline)), flush=True)
         evaluations = [dict(update=0, **baseline)]
         best_distance = baseline['evaluation/mean_closest_distance_m']
         best_checkpoint = str(initial_checkpoint)

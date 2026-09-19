@@ -6,7 +6,7 @@ import numpy as np
 
 @unittest.skipUnless(importlib.util.find_spec('mujoco_warp') and importlib.util.find_spec('torch'), 'CUDA sensing stack required')
 class RGBDTest(unittest.TestCase):
-    def test_spot_housing_is_omitted_only_in_sensor_context(self):
+    def test_wrist_visual_geometry_occludes_sensor_without_mutating_model(self):
         import mujoco
         import mujoco_warp as mw
         import warp as wp
@@ -16,7 +16,7 @@ class RGBDTest(unittest.TestCase):
         <geom type="plane" size="10 10 .1"/>
         <body name="spot_arm_link_wr1" pos="0 0 2">
           <camera name="hand_camera"/>
-          <geom type="sphere" size=".01" contype="0" conaffinity="0" group="2"/>
+          <geom type="box" pos="0 0 -.15" size=".2 .2 .02" contype="0" conaffinity="0" group="2"/>
         </body></worldbody></mujoco>''')
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
@@ -27,7 +27,7 @@ class RGBDTest(unittest.TestCase):
             mw.forward(gm, gd)
             rig = WarpRGBDRig(model, gd, cameras=('hand_camera',), resolution=(32, 24))
             rig.capture(gm, gd, 0.)
-            np.testing.assert_allclose(rig.depth[0].numpy(), 2., atol=2e-5)
+            np.testing.assert_allclose(rig.depth[0].numpy(), .13, atol=2e-5)
         np.testing.assert_array_equal(model.geom_group, groups)
         np.testing.assert_array_equal(model.cam_pos, pos)
 
