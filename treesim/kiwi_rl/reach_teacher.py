@@ -112,25 +112,53 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
     return point
 
 
-def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.015, max_m=0.06, prefer_m=0.03):
-    """Keep a grasp offset a few centimetres from the TCP, toward the pads.
+def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer_m=0.0):
+    """Keep a grasp offset near the TCP, toward the pads when they disagree.
 
     Pure kinematics. The fruit stays a free body; this is not a measured grasp.
+    ``prefer_m=0`` keeps the TCP when the pad centre coincides with it.
     """
     tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
     pocket = np.asarray(pocket_local, dtype=np.float64).reshape(3)
     if not np.isfinite(tcp).all() or not np.isfinite(pocket).all():
         raise ValueError('grasp offset inputs must be finite')
     min_d, max_d, prefer = float(min_m), float(max_m), float(prefer_m)
-    if not np.isfinite([min_d, max_d, prefer]).all() or not 0.005 <= min_d <= prefer <= max_d <= 0.12:
-        raise ValueError('grasp offset bounds must be ordered in [0.005, 0.12] m')
+    if not np.isfinite([min_d, max_d, prefer]).all() or not 0.0 <= min_d <= prefer <= max_d <= 0.12:
+        raise ValueError('grasp offset bounds must be ordered in [0, 0.12] m')
     delta = pocket - tcp
     dist = float(np.linalg.norm(delta))
     if dist < 1e-9:
+        if prefer <= 1e-9:
+            return tcp.copy()
         n = float(np.linalg.norm(tcp))
         direction = (-tcp / n) if n > 1e-9 else np.array([0.0, 0.0, -1.0], dtype=np.float64)
         return tcp + direction * prefer
     return tcp + (delta / dist) * min(max(dist, min_d), max_d)
+
+
+def _pad_geom_ids(model):
+    """Collision geoms on the moving finger vs the fixed jaw. Visuals are skipped."""
+    jaw, finger = [], []
+    for index in range(int(model.ngeom)):
+        if int(model.geom_contype[index]) == 0 and int(model.geom_conaffinity[index]) == 0:
+            continue
+        name = (model.geom(index).name or '').lower()
+        body = (model.body(int(model.geom_bodyid[index])).name or '').lower()
+        label = f'{name} {body}'
+        if any(token in label for token in ('fngr', 'finger')):
+            finger.append(int(index))
+        elif 'jaw' in label:
+            jaw.append(int(index))
+    return tuple(jaw), tuple(finger)
+
+
+def _closest_geom_ids(data, ids, origin, n):
+    origin = np.asarray(origin, dtype=np.float64).reshape(3)
+    ranked = sorted(
+        ids, key=lambda index: float(np.linalg.norm(
+            np.asarray(data.geom_xpos[int(index)], dtype=np.float64).reshape(3) - origin)))
+    keep = max(1, min(int(n), len(ranked)))
+    return tuple(int(index) for index in ranked[:keep])
 
 
 def _hand_link_ids(model):
@@ -144,21 +172,28 @@ def _hand_link_ids(model):
     return jaw_body, finger_body
 
 
-def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.03):
-    """TCP-site body offset toward the hand origin when pad kinematics are unavailable."""
+def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.0):
+    """TCP in the site body frame. Spot's tool centre already sits between the pads."""
     inset = float(inset_m)
-    if not np.isfinite(inset) or not 0.01 <= inset <= 0.08:
-        raise ValueError('grasp inset must be finite in [0.01, 0.08] m')
+    if not np.isfinite(inset) or not 0.0 <= inset <= 0.08:
+        raise ValueError('grasp inset must be finite in [0, 0.08] m')
     if not isinstance(tcp_site, (int, np.integer)) or int(tcp_site) < 0:
         raise ValueError('tcp_site must be a non-negative integer')
     tcp_local = np.asarray(model.site_pos[int(tcp_site)], dtype=np.float64).reshape(3)
     if not np.isfinite(tcp_local).all():
         raise ValueError('TCP site local position must be finite')
-    return offset_grasp_local(tcp_local, tcp_local, prefer_m=inset)
+    if inset <= 1e-9:
+        return tcp_local
+    return offset_grasp_local(tcp_local, tcp_local, prefer_m=inset, min_m=0.0, max_m=max(inset, 0.05))
 
 
-def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.03):
-    """Grasp pocket in the TCP site's body frame, between the jaw and finger."""
+def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.0):
+    """Grasp pocket in the TCP site's body frame, from pad collision geoms.
+
+    Body origins of the jaw/finger links sit at the knuckle, ~12 cm behind the
+    pads. Using those midpoints pulled fruit out of the grasp. Pad geom centres
+    are a few centimetres from the TCP; if they coincide, stay at the TCP.
+    """
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
     rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
@@ -166,17 +201,17 @@ def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.03):
     if not np.isfinite(origin).all() or not np.isfinite(rot).all() or not np.isfinite(tcp).all():
         raise ValueError('hand pose for the grasp pocket must be finite')
     tcp_local = rot.T @ (tcp - origin)
-    jaw_body, finger_body = _hand_link_ids(model)
-    if jaw_body is not None and finger_body is not None:
-        mid = 0.5 * (np.asarray(data.xpos[jaw_body], dtype=np.float64).reshape(3)
-                     + np.asarray(data.xpos[finger_body], dtype=np.float64).reshape(3))
+    jaw_geoms, finger_geoms = _pad_geom_ids(model)
+    if jaw_geoms and finger_geoms:
+        ids = _closest_geom_ids(data, jaw_geoms, tcp, 2) + _closest_geom_ids(data, finger_geoms, tcp, 2)
+        mid = np.mean([np.asarray(data.geom_xpos[index], dtype=np.float64).reshape(3) for index in ids], axis=0)
         if np.isfinite(mid).all():
             pocket_local = rot.T @ (mid - origin)
-            return offset_grasp_local(tcp_local, pocket_local, prefer_m=float(inset_m))
-    return offset_grasp_local(tcp_local, tcp_local, prefer_m=float(inset_m))
+            return offset_grasp_local(tcp_local, pocket_local, min_m=0.0, max_m=0.05, prefer_m=float(inset_m))
+    return offset_grasp_local(tcp_local, tcp_local, min_m=0.0, max_m=0.05, prefer_m=float(inset_m))
 
 
-def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.03):
+def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.0):
     """World COM for a free fruit sitting between the pads. Not a weld."""
     body = int(model.site_bodyid[int(tcp_site)])
     origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
@@ -303,14 +338,15 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.qpos[int(jaw_qposadr)] = hold
             mujoco.mj_forward(model, data)
             pocket = grasp_pocket_world_m(model, data, tcp_site)
+            data.qpos[int(jaw_qposadr)] = jaw_open
             data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
+            mujoco.mj_forward(model, data)
             data.qpos[int(jaw_qposadr)] = hold
             max_load = 0.0
             for _ in range(steps):
                 data.qpos[arm_qids] = start
-                data.qpos[int(jaw_qposadr)] = hold
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)

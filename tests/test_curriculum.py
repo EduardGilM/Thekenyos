@@ -196,6 +196,7 @@ class CurriculumTest(unittest.TestCase):
         teacher_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'reach_teacher.py').read_text(encoding='utf-8')
         self.assertIn('def sweep_jaw_hold', teacher_src)
         self.assertIn('def grasp_pocket_world_m', teacher_src)
+        self.assertIn('def _pad_geom_ids', teacher_src)
         self.assertIn('model.opt.timestep', teacher_src)
         self.assertIn('fruit_equality', teacher_src)
         self.assertIn('if over:', src)

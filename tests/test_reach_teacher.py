@@ -92,11 +92,14 @@ class ReachTeacherMathTest(unittest.TestCase):
 
     def test_grasp_offset_stays_between_pads_not_at_tcp(self):
         tcp = np.array([0.0, 0.0, 0.10])
-        np.testing.assert_allclose(offset_grasp_local(tcp, tcp), [0.0, 0.0, 0.07], atol=1e-9)
-        pulled = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(offset_grasp_local(tcp, tcp), tcp, atol=1e-9)
+        np.testing.assert_allclose(
+            offset_grasp_local(tcp, tcp, prefer_m=0.03, min_m=0.0, max_m=0.06),
+            [0.0, 0.0, 0.07], atol=1e-9)
+        pulled = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.0]), max_m=0.06)
         np.testing.assert_allclose(pulled, [0.0, 0.0, 0.04], atol=1e-9)
         near = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.09]))
-        np.testing.assert_allclose(near, [0.0, 0.0, 0.085], atol=1e-9)
+        np.testing.assert_allclose(near, [0.0, 0.0, 0.09], atol=1e-9)
         with self.assertRaises(ValueError):
             offset_grasp_local(tcp, [np.nan, 0.0, 0.0])
 
