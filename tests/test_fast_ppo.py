@@ -106,7 +106,7 @@ class FastTrainerCLITest(unittest.TestCase):
         from train_fast import apply_easy_cli
         filled = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=None, shaping_coef=None))
-        self.assertEqual(filled.teacher_mix, 1.0)
+        self.assertEqual(filled.teacher_mix, 0.0)
         self.assertEqual(filled.shaping_coef, 5.0)
         kept = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=0.0, shaping_coef=2.0))
@@ -132,6 +132,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('teacher_mask', collect_src)
         self.assertIn('easy_hold_close_mean', run_src)
         self.assertIn('hold_close_frac', run_src)
+        runtime_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('def _scripted_jaw_hold', runtime_src)
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)

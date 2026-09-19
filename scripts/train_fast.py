@@ -717,7 +717,7 @@ def main():
     p.add_argument('--speedrun', action='store_true',
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
     p.add_argument('--easy', action='store_true',
-                   help='Random physics-safe starts, pad-pocket jaw-force sweep, forced carry/deposit; not a weld')
+                   help='Kiwi starts in the jaws; scripted hold/open; RL deposits; not a weld')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,

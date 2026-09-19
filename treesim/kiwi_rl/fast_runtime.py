@@ -335,6 +335,30 @@ def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dt
 
 
 @wp.kernel
+def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                       chassis: int, fruit_bodies: wp.array(dtype=int),
+                       active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
+                       targets: wp.array2d(dtype=float), jaw_hold: wp.array(dtype=float),
+                       jaw_open: float, open_xy_m: float, max_delta: float,
+                       actions: wp.array2d(dtype=float)):
+    """Overwrite only the jaw increment. The student still moves the arm."""
+    world = wp.tid()
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    fruit_pos = xpos[world, fruit]
+    dx = fruit_pos[0] - basket_world[0]
+    dy = fruit_pos[1] - basket_world[1]
+    over = wp.sqrt(dx * dx + dy * dy) < open_xy_m
+    desired = jaw_open if over else jaw_hold[world]
+    current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    actions[world, 6] = delta / max_delta
+
+
+@wp.kernel
 def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                                chassis: int, fruit_bodies: wp.array(dtype=int),
                                active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
@@ -584,6 +608,12 @@ class FastRuntime:
         import mujoco_warp as mw
         with wp.ScopedDevice(self.device):
             wp.copy(self._actions, action_wp)
+            if self._easy:
+                wp.launch(_scripted_jaw_hold, dim=self.worlds, inputs=[
+                    self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
+                    self.task.active_fruit, self._basket_center, self.control.targets,
+                    self._easy_jaw_hold, float(self._jaw_open), float(self._open_xy_m),
+                    float(2.5 * self.control_dt), self._actions], device=self.device)
             wp.capture_launch(self.graph)
         return self.observe(), wp.to_torch(self._reward), wp.to_torch(self._terminated).bool(), {
             'distance_m': wp.to_torch(self._distance),
@@ -746,12 +776,12 @@ class FastRuntime:
         }
 
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
-        """Train-only facilitation: random outside-crate carry + jaw hold sweep.
+        """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
         Does not weld fruit, spawn the arm inside the crate, or write fruit
-        into the liner. Eval still sets guidance_weight=0; the caller must
-        keep teacher_mix at 0 there. Jaw close fractions are a rigid contact
-        sweep, not a calibrated tissue-safe force.
+        into the liner. The script overwrites only the jaw increment. Eval
+        still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
+        fractions are a rigid contact sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
         if shaping_coef is None:
@@ -816,8 +846,8 @@ class FastRuntime:
             ],
             'grasp_local_m': None if not self._easy else [float(x) for x in self._grasp_local_host],
             'weld': False,
-            'scope': ('experimental privileged deposit facilitation; fruit stays free; '
-                      'random outside-crate arm starts; pad-pocket jaw-close sweep holds then deposits'),
+            'scope': ('kiwi starts in the jaws; scripted hold/open under 15 N; '
+                      'student arm deposits; fruit stays free; no weld'),
         }
 
     def _run_hold_sweep(self):

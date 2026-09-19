@@ -909,6 +909,25 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
+            if preview.get('easy'):
+                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, scripted_jaw_target
+                jaw_joint = int(controller.joints[18])
+                opened = float(model.jnt_range[jaw_joint, 1])
+                closed = float(model.jnt_range[jaw_joint, 0])
+                if not np.isfinite(opened):
+                    opened = 0.8
+                if not np.isfinite(closed):
+                    closed = 0.0
+                frac = preview.get('hold_close_frac')
+                hold = jaw_hold_q(0.6 if frac is None else float(frac), opened, closed)
+                fruit_xy = np.asarray(data.xpos[fruit_body], dtype=np.float64)[:2]
+                basket_xy = (
+                    np.asarray(data.xpos[chassis], dtype=np.float64)
+                    + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
+                desired = scripted_jaw_target(
+                    fruit_xy, basket_xy[:2], hold, opened, open_xy_m=0.15)
+                arm = np.asarray(arm, dtype=np.float64).copy()
+                arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
             controller.update_gait(data, command)
             if preview['allow_locomotion'] and action.shape[0] >= 10:
                 command = _n3_command(command, action[:3])

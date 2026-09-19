@@ -64,7 +64,7 @@ SPEEDRUN_PRESET = {
 # the liner, change promotion gates, or turn the oracle into an action teacher.
 # Eval still uses guidance_weight=0 and teacher_mix=0.
 EASY_PRESET = {
-    'teacher_mix': 1.0,
+    'teacher_mix': 0.0,
     'teacher_horizon_updates': 60,
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
@@ -348,7 +348,7 @@ def easy_teacher_mix(update_index, start_mix=None, horizon=None, anneal_after=0)
     until ``anneal_after`` (the first update after deposits are seen).
     """
     if start_mix is None:
-        start_mix = EASY_PRESET['teacher_mix']
+        start_mix = 1.0
     if horizon is None:
         horizon = EASY_PRESET['teacher_horizon_updates']
     if not isinstance(update_index, int) or isinstance(update_index, bool) or update_index < 0:

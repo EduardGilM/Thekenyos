@@ -176,6 +176,8 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('grasp_pocket_world_m', inspect.getsource(apply_native_skill_reset))
         self.assertIn('hold_close_frac', inspect.getsource(apply_native_skill_reset))
         self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
+        from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
+        self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
         html_easy_video = render_dashboard_html(dict(
             schema='training-monitor/v1', training_ready=False, run='x', rows=1,
             latest=dict(step=1), series={}, generated_at='now',

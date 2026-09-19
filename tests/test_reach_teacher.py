@@ -5,7 +5,7 @@ from treesim.kiwi_rl.reach_teacher import (
     axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
     hover_tcp_world_m, basket_chassis_aabb_m, easy_start_local_m,
     grasp_local_near_tcp, hold_close_fracs, jaw_hold_q, offset_grasp_local,
-    select_hold_close, tcp_outside_basket,
+    scripted_jaw_target, select_hold_close, tcp_outside_basket,
 )
 
 
@@ -97,8 +97,20 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 0.8, 'slip_m': 0.14, 'max_load_N': 10.0, 'retained': False},
         ], slip_ok_m=0.04, load_limit_n=15.0)
         self.assertAlmostEqual(dumped['close_frac'], 0.8)
+        empty = select_hold_close([
+            {'close_frac': 0.4, 'slip_m': 0.96, 'max_load_N': 0.0, 'retained': False},
+            {'close_frac': 0.6, 'slip_m': 0.96, 'max_load_N': 0.0, 'retained': False},
+            {'close_frac': 1.0, 'slip_m': 0.96, 'max_load_N': 0.0, 'retained': False},
+        ], slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(empty['close_frac'], 0.6)
         with self.assertRaises(ValueError):
             select_hold_close([])
+
+    def test_scripted_jaw_holds_away_and_opens_over_basket(self):
+        self.assertAlmostEqual(scripted_jaw_target([1.0, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15), -1.2)
+        self.assertAlmostEqual(scripted_jaw_target([0.05, 0.04], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15), 0.0)
+        with self.assertRaises(ValueError):
+            scripted_jaw_target([np.nan, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15)
 
     def test_grasp_offset_stays_between_pads_not_at_tcp(self):
         tcp = np.array([0.0, 0.0, 0.10])

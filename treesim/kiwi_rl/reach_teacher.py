@@ -345,6 +345,28 @@ def hold_close_fracs(n_levels=None, close_min=None, close_max=None):
     return np.linspace(lo, hi, n, dtype=np.float64)
 
 
+def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m):
+    """Hold while the fruit is away from the opening; open once it is over.
+
+    Fruit stays a free body. ``open_xy_m`` is an XY radius around the basket
+    centre, not a validated release pose.
+    """
+    fruit = np.asarray(fruit_xy, dtype=np.float64).reshape(-1)
+    basket = np.asarray(basket_xy, dtype=np.float64).reshape(-1)
+    hold_q = float(hold)
+    open_q = float(opened)
+    radius = float(open_xy_m)
+    if fruit.size < 2 or basket.size < 2:
+        raise ValueError('fruit_xy and basket_xy must include X and Y')
+    if not np.isfinite(fruit[:2]).all() or not np.isfinite(basket[:2]).all():
+        raise ValueError('fruit and basket XY must be finite')
+    if not np.isfinite([hold_q, open_q, radius]).all() or radius <= 0:
+        raise ValueError('jaw targets and open_xy_m must be finite, radius > 0')
+    dx = float(fruit[0] - basket[0])
+    dy = float(fruit[1] - basket[1])
+    return open_q if (dx * dx + dy * dy) < radius * radius else hold_q
+
+
 def jaw_hold_q(close_frac, jaw_open, jaw_closed):
     """Interpolate the jaw target. Fruit stays a free body; this is not a weld."""
     frac = float(close_frac)
@@ -393,8 +415,12 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         idx = 1 if len(ordered) > 1 else 0
         return ordered[idx]
     under = [row for row in cleaned if row['max_load_N'] <= load_limit]
+    contacting = [row for row in under if row['max_load_N'] >= 0.5]
+    if contacting:
+        return max(contacting, key=lambda row: (row['close_frac'], -row['slip_m']))
     if under:
-        return max(under, key=lambda row: (row['close_frac'], -row['slip_m']))
+        # Zero fruit-contact rows are an empty close; do not slam to 1.0 on air.
+        return min(under, key=lambda row: (row['slip_m'], abs(row['close_frac'] - 0.6)))
     return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
 
 
@@ -472,6 +498,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             warmup = max(1, min(8, steps // 5))
             for step in range(steps):
                 data.qpos[arm_qids] = start
+                data.qpos[int(jaw_qposadr)] = hold  # kinematic hold; actuator tracks
                 _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold,
                                       cap_nm=cap, kp=kp, kd=kd)
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
