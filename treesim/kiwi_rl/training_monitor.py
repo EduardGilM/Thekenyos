@@ -23,11 +23,14 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA = 'training-monitor/v1'
 VIDEO_SCHEMA = 'progress-video/v1'
 PRIORITY_CHARTS = (
-    'loss', 'kl', 'grad_norm', 'reward_mean', 'reward_std',
+    'loss', 'kl', 'entropy', 'logstd_mean', 'grad_norm', 'reward_mean', 'reward_std',
     'distance_mean_closest_m', 'distance_final_m', 'distance_closest_m',
     'evaluation/mean_closest_distance_m', 'evaluation/final_distance_m',
     'evaluation/closest_distance_m', 'evaluation/harvest_successes',
-    'harvest_successes', 'evaluation/terminal_transitions', 'terminal_transitions',
+    'evaluation/success_rate', 'evaluation/detach_rate', 'evaluation/grasp_rate',
+    'harvest_successes', 'grasp_events', 'detach_events',
+    'evaluation/terminal_transitions', 'terminal_transitions',
+    'curriculum_index', 'guidance_weight',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
 )
@@ -194,14 +197,18 @@ def _video_figure(video: Mapping[str, Any]) -> str:
 
 _DASHBOARD_SCRIPT = r'''
 <script>
-const CARD_KEYS = ["step", "loss", "reward_mean", "distance_mean_closest_m",
-  "evaluation/mean_closest_distance_m", "evaluation/harvest_successes",
-  "training_transitions_per_second", "torch_peak_allocated_gb"];
-const PRIORITY = ["loss", "kl", "grad_norm", "reward_mean", "reward_std",
+const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "reward_mean",
+  "evaluation/success_rate", "evaluation/mean_closest_distance_m",
+  "evaluation/harvest_successes", "training_transitions_per_second",
+  "torch_peak_allocated_gb"];
+const PRIORITY = ["loss", "kl", "entropy", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
   "evaluation/mean_closest_distance_m", "evaluation/final_distance_m",
   "evaluation/closest_distance_m", "evaluation/harvest_successes",
-  "harvest_successes", "evaluation/terminal_transitions", "terminal_transitions",
+  "evaluation/success_rate", "evaluation/detach_rate", "evaluation/grasp_rate",
+  "harvest_successes", "grasp_events", "detach_events",
+  "evaluation/terminal_transitions", "terminal_transitions",
+  "curriculum_index", "guidance_weight",
   "training_transitions_per_second", "rollout_transitions_per_second",
   "torch_peak_allocated_gb", "rollout_seconds", "update_seconds"];
 const SKIP = new Set(["step", "update", "minibatches", "optimized_transitions", "transitions"]);
@@ -294,9 +301,10 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     series = payload.get('series') or {}
     videos = list(payload.get('videos') or [])
     cards = []
-    for key in ('step', 'loss', 'reward_mean', 'distance_mean_closest_m',
-                'evaluation/mean_closest_distance_m', 'evaluation/harvest_successes',
-                'training_transitions_per_second', 'torch_peak_allocated_gb'):
+    for key in ('step', 'curriculum_index', 'loss', 'entropy', 'reward_mean',
+                'evaluation/success_rate', 'evaluation/mean_closest_distance_m',
+                'evaluation/harvest_successes', 'training_transitions_per_second',
+                'torch_peak_allocated_gb'):
         if key in latest and is_chartable(latest[key]):
             cards.append(
                 f'<div class="card"><div class="k">{html.escape(key)}</div>'
@@ -336,7 +344,7 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
   <header>
     <h1>Monitor de entrenamiento</h1>
     <div class="sub" id="sub">{run} · {rows} filas · actualizado {generated}</div>
-    <div class="warn">La distancia TCP-fruta es una métrica de alcance. <code>harvest_successes = 0</code> y un vídeo de progreso no demuestran cosecha. <code>training_ready</code> sigue en false. El recuadro amarillo es la RGB del gripper RELIC, no un mástil inventado. Las gráficas se actualizan sin recargar la página.</div>
+    <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página.</div>
     <div class="cards" id="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
   </header>
   <main>
@@ -358,7 +366,7 @@ def dashboard_payload(rows: Sequence[Mapping[str, Any]], *, run: str | Path,
                 run=str(run), rows=len(rows), latest=_latest_row(rows),
                 series=series, videos=list(videos or ()),
                 generated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                caveat='Reaching metrics and CPU previews, not harvest success')
+                caveat='Curriculum metrics and CPU previews, not field harvest')
 
 
 def write_dashboard(rows: Sequence[Mapping[str, Any]], monitor_dir: str | Path,
@@ -420,6 +428,21 @@ def add_monitor_args(parser) -> None:
                         help='Policy steps in each CPU progress clip (about 10 s at 25 fps)')
     parser.add_argument('--monitor-hub', type=Path,
                         help='Optional extra copy of index.html for Jupyter /files')
+
+
+def _select_mujoco_gl(env: dict[str, str]) -> dict[str, str]:
+    if env.get('MUJOCO_GL'):
+        return env
+    for library in (
+        '/usr/lib/x86_64-linux-gnu/libOSMesa.so.8',
+        '/usr/lib64/libOSMesa.so.8',
+        '/usr/lib/libOSMesa.so.8',
+    ):
+        if Path(library).exists():
+            env['MUJOCO_GL'] = 'osmesa'
+            return env
+    env['MUJOCO_GL'] = 'egl'
+    return env
 
 
 def checkpoint_paths(checkpoint: str | Path) -> dict[str, Any]:
@@ -517,7 +540,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     if not 1 <= camera_every <= 5:
         raise ValueError('camera_every must be in [1, 5]')
 
-    os.environ.setdefault('MUJOCO_GL', 'egl')
+    os.environ['MUJOCO_GL'] = _select_mujoco_gl(dict(os.environ)).get('MUJOCO_GL', 'egl')
     import numpy as np
     import torch
     import mujoco
@@ -527,7 +550,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     from treesim.kiwi_rl.spot_cameras import require_mujoco_gripper_cameras
     from treesim.kiwi_rl.ppo import load_checkpoint
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
-    from train_physical_smoke import build_policy
+    from train_fast import build_policy
 
     model, data, manifest = load_fast_scene(info['scene'])
     require_mujoco_gripper_cameras(model, manifest['robot'])
@@ -572,9 +595,10 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             with torch.no_grad():
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
+            arm = action[-7:]
             controller.update_gait(data, np.zeros(3, dtype=np.float32))
             controller.targets[12:] = np.clip(
-                controller.targets[12:] + np.clip(action, -1., 1.) * max_delta, lower, upper)
+                controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
                 controller.apply(data)
                 mujoco.mj_step(model, data)
@@ -592,7 +616,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             draw = ImageDraw.Draw(image)
             update = info['completed_updates']
             draw.text((8, 8), f'CPU preview  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
-            draw.text((8, 22), f'TCP-fruit {distance:.3f} m  gripper RGB overlay  not harvest proof', fill=(244, 211, 94))
+            draw.text((8, 22), f'TCP-fruit {distance:.3f} m  gripper RGB overlay  curriculum preview not harvest proof', fill=(244, 211, 94))
             try:
                 encoder.stdin.write(np.asarray(image).tobytes())
             except BrokenPipeError as exc:
@@ -607,11 +631,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
         raise RuntimeError('ffmpeg failed to encode the progress video')
     os.replace(partial, output)
     result = dict(schema=VIDEO_SCHEMA, training_ready=False,
-                  label='CPU native progress preview; not a harvest demonstration',
+                  label='CPU native curriculum preview; not a harvest demonstration',
                   checkpoint=str(info['checkpoint']), scene=str(info['scene']),
                   gait_checkpoint=str(info['gait_checkpoint']), camera=camera,
                   update=info['completed_updates'], steps=steps, fps=fps,
-                  control_dt_s=control_dt, backend='cpu-native-mujoco-egl',
+                  control_dt_s=control_dt, backend=f'cpu-native-mujoco-{os.environ.get("MUJOCO_GL", "egl")}',
                   mean_tcp_fruit_distance_m=float(np.mean(distances)),
                   min_tcp_fruit_distance_m=float(np.min(distances)),
                   final_tcp_fruit_distance_m=float(distances[-1]),
@@ -631,7 +655,7 @@ def spawn_progress_video(checkpoint: str | Path, output: str | Path, *,
     script = Path(__file__).resolve().parents[2] / 'scripts' / 'watch_training.py'
     env = os.environ.copy()
     env['CUDA_VISIBLE_DEVICES'] = ''
-    env.setdefault('MUJOCO_GL', 'egl')
+    env = _select_mujoco_gl(env)
     log_path = output.with_suffix('.record.log')
     command = [python or sys.executable, '-B', str(script),
                '--record-checkpoint', str(checkpoint), '--video-output', str(output),

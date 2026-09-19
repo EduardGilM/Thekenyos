@@ -707,16 +707,29 @@ fruit per independent world. Training pixels come from the nominal gripper
 `hand_color_sensor`, not an invented body mast. On a 24 GB RTX 4090 start
 below the 5090 4096-world profile.
 
+`scripts/train_fast.py` now follows the [TK-RL-003 task curriculum](docs/rl-blueprint.html)
+on that rigid runtime: **deposit from pixels → grasp/detach → stationary harvest
+→ visual approach → multi-fruit mission → generalisation**. Reward/v3 terms
+(deposit +20, grasp +0.5, retained detach +2, loss −25, fall −100, time, smoothness
+and potential shaping) replace the old TCP Δdistance hover. Evaluation uses
+`guidance_weight=0`. Promotion needs two consecutive evals at the blueprint
+gate; this is not a field robot and `training_ready` stays false. The compact
+RGB-D actor is still 64×64 with a shared GRU, not V3 ResNet-18 at 240×320 or
+separate N3/M3 networks. Stage 01–03 keep base velocity at zero; stage 04
+unmasks the 3 locomotion commands. The live scene has one fruit body, so
+stage 05 cannot yet store a growing basket of independent kiwis.
+
 ```bash
 python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
   --output /path/to/fast-scene --timestep .005
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/new-run \
-  --worlds 4096 --steps 64 --updates 10 --minibatch-worlds 512 \
+  --stage deposit_pixels --worlds 3072 --steps 64 --updates 2000 \
+  --minibatch-worlds 256 --eval-every 50 --entropy-coef 0.005 --ppo-epochs 2 \
   --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
 FAST_SCENE=/path/to/fast-scene python -B -m unittest \
   tests.test_fast_scene tests.test_fast_task tests.test_fast_runtime \
-  tests.test_fast_ppo tests.test_training_log -v
+  tests.test_fast_ppo tests.test_training_log tests.test_curriculum -v
 ```
 
 `--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
@@ -728,8 +741,8 @@ before updating, and resets recurrent memory only in terminated worlds.
 `--eval-every 10` records deterministic baseline and periodic evaluations.
 Average closest distance per world avoids selecting a batch just because its
 single best sample is closer. Initial and subsequent checkpoints are preserved;
-`best_reach_checkpoint` identifies the lowest average closest-distance checkpoint,
-which is a reaching metric, not proof of harvesting success.
+`best_reach_checkpoint` remains a reaching diagnostic, not proof of harvesting.
+Curriculum promotion is logged separately from that distance.
 
 Every update appends `training.jsonl` and rewrites `monitor/index.html` with
 inline SVG charts of every numeric field. `--video-every 10` (0 disables)
@@ -753,9 +766,12 @@ harvest proof.
 
 `benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
 and `--camera`. It reports policy transitions/s separately from physics steps/s.
-Training reports also include optimizer time and optimized sample count. A
-transition is one policy action in one world, not a complete harvesting episode.
-W&B losses, rewards and throughput are not proof of improved harvesting.
+Training reports also include optimizer time, entropy, log-std and optimized
+sample count. A transition is one policy action in one world, not a complete
+harvesting episode. W&B losses, rewards and throughput are not proof of improved
+harvesting. CPU progress clips prefer OSMesa so recording does not steal the
+training GPU; they remain a native-MuJoCo preview and can disagree with GPU
+rollouts.
 
 On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
 about 157,000 policy transitions/s including PPO updates (three-update screen,

@@ -143,11 +143,39 @@ def _record(
 
 
 @wp.kernel
+def _apply_goal(goal: wp.array(dtype=int), dt: float, detached: wp.array(dtype=wp.uint8),
+                hand_contact: wp.array(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8),
+                grasp_time: wp.array(dtype=float), retain_time: wp.array(dtype=float),
+                retained_detach: wp.array(dtype=wp.uint8), success: wp.array(dtype=wp.uint8),
+                failed: wp.array(dtype=wp.uint8)):
+    world = wp.tid()
+    if success[world] != 0 or failed[world] != 0:
+        return
+    if detached[world] == 0:
+        if hand_contact[world] != 0:
+            grasp_time[world] = grasp_time[world] + dt
+            if grasp_time[world] >= 0.12:
+                grasped[world] = wp.uint8(1)
+        else:
+            grasp_time[world] = 0.
+    if detached[world] != 0 and grasped[world] != 0 and hand_contact[world] != 0:
+        retain_time[world] = retain_time[world] + dt
+        if retain_time[world] >= 0.2:
+            retained_detach[world] = wp.uint8(1)
+    # DETACH_ONLY succeeds on retained physical separation; deposit/harvest use settle.
+    if goal[world] == 1 and retained_detach[world] != 0:
+        success[world] = wp.uint8(1)
+
+
+@wp.kernel
 def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), hand_contact: wp.array(dtype=wp.uint8),
            basket_contact: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8), stem_force: wp.array(dtype=float),
            hand_load: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
            success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), eq_active: wp.array2d(dtype=wp.bool),
-           target_eq: int):
+           target_eq: int, grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
+           retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
+           grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
+           deposit_paid: wp.array(dtype=wp.uint8), loss_paid: wp.array(dtype=wp.uint8)):
     world = wp.tid()
     if mask[world] != 0:
         detached[world] = wp.uint8(0)
@@ -160,6 +188,14 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
         settle_time[world] = 0.
         success[world] = wp.uint8(0)
         failed[world] = wp.uint8(0)
+        grasped[world] = wp.uint8(0)
+        grasp_time[world] = 0.
+        retain_time[world] = 0.
+        retained_detach[world] = wp.uint8(0)
+        grasp_paid[world] = wp.uint8(0)
+        detach_paid[world] = wp.uint8(0)
+        deposit_paid[world] = wp.uint8(0)
+        loss_paid[world] = wp.uint8(0)
         if target_eq >= 0 and target_eq < eq_active.shape[1]:
             eq_active[world, target_eq] = True
 
@@ -208,6 +244,15 @@ class FastHarvestTask:
         self.settle_time = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.success = wp.zeros_like(self.detached)
         self.failed = wp.zeros_like(self.detached)
+        self.grasped = wp.zeros_like(self.detached)
+        self.grasp_time = wp.zeros(self.worlds, dtype=float, device=self.device)
+        self.retain_time = wp.zeros(self.worlds, dtype=float, device=self.device)
+        self.retained_detach = wp.zeros_like(self.detached)
+        self.grasp_paid = wp.zeros_like(self.detached)
+        self.detach_paid = wp.zeros_like(self.detached)
+        self.deposit_paid = wp.zeros_like(self.detached)
+        self.loss_paid = wp.zeros_like(self.detached)
+        self.goal = wp.zeros(self.worlds, dtype=int, device=self.device)
         self.eq_active = getattr(data, 'eq_active', None)
         if self.eq_active is None or not hasattr(data, 'efc') or not hasattr(data.efc, 'type') or not hasattr(data.efc, 'id'):
             raise ValueError('MJWarp data must expose per-world eq_active and efc.type/id for physical release')
@@ -237,6 +282,10 @@ class FastHarvestTask:
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.model.body(self.manifest['fruits'][0]['body']).id]),
             int(self.model.body_rootid[self.chassis])], device=self.device)
+        wp.launch(_apply_goal, dim=self.worlds, inputs=[
+            self.goal, float(self.model.opt.timestep), self.detached, self.hand_contact, self.grasped,
+            self.grasp_time, self.retain_time, self.retained_detach, self.success, self.failed],
+            device=self.device)
         return self.outputs()
 
     def reset(self, mask=None):
@@ -252,8 +301,12 @@ class FastHarvestTask:
                 raise ValueError('mask must be a Warp array or CUDA Torch tensor')
         wp.launch(_reset, dim=self.worlds, inputs=[mask, self.detached, self.hand_contact, self.basket_contact,
                    self.ground_contact, self.stem_force, self.hand_load, self.damage_proxy, self.settle_time,
-                   self.success, self.failed, self.eq_active, self.equality_id], device=self.device)
+                   self.success, self.failed, self.eq_active, self.equality_id, self.grasped, self.grasp_time,
+                   self.retain_time, self.retained_detach, self.grasp_paid, self.detach_paid,
+                   self.deposit_paid, self.loss_paid], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,
-                'damage_proxy': self.damage_proxy}
+                'damage_proxy': self.damage_proxy, 'grasped': self.grasped,
+                'retained_detach': self.retained_detach, 'hand_contact': self.hand_contact,
+                'ground_contact': self.ground_contact}

@@ -18,19 +18,22 @@ from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 SCHEMA = 'physical-reach-rgbd-r84/v1'
 
 
-def build_policy():
+def build_policy(action_dim=7):
     import torch
     nn = torch.nn
+    if not isinstance(action_dim, int) or action_dim not in (7, 10):
+        raise ValueError('action_dim must be 7 (arm) or 10 (base+arm)')
 
     class ReachPolicy(nn.Module):
         def __init__(self):
             super().__init__()
+            self.action_dim = action_dim
             self.vision = nn.Sequential(nn.Conv2d(5, 16, 5, 2, 2), nn.SiLU(),
                 nn.Conv2d(16, 32, 3, 2, 1), nn.SiLU(), nn.AdaptiveAvgPool2d((2, 2)), nn.Flatten())
             self.belief = nn.GRUCell(128 + 84, 64)
-            self.mean = nn.Linear(64, 7)
+            self.mean = nn.Linear(64, action_dim)
             self.value = nn.Linear(64, 1)
-            self.logstd = nn.Parameter(torch.full((7,), -1.6))
+            self.logstd = nn.Parameter(torch.full((action_dim,), -1.6))
 
         def forward(self, rgbd, r84, memory):
             memory = self.belief(torch.cat((self.vision(rgbd), r84), dim=-1), memory)
