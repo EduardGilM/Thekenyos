@@ -26,84 +26,19 @@ from treesim.config import FoliageParams, FruitParams
 from treesim.gl_backend import bind_mujoco_gl
 from treesim.kiwi_material import STEM_LENGTH
 from treesim.orchard_terrain import (
-    FURROW_COLOR, GRASS_COLOR, SOIL_COLOR, canopy_dapple_png_bytes,
-    earth_cut_png_bytes, floor_kwargs_for_plantation, grass_tile_png_bytes,
-    sample_orchard_floor, soil_tile_png_bytes, visual_meshes,
+    earth_cut_png_bytes, floor_kwargs_for_plantation, sample_orchard_floor,
 )
 from treesim.pergola import generate, place_fruit
 
 # Afternoon key light. Classic-GL shadow maps on thousands of leaf cards
-# alias into a grid, so the preview lights the scene without a shadow map
-# and uses a baked dapple card under the pergola instead.
+# alias into a grid, so this preview does not enable a shadow map. Row
+# shade is baked into the grass/soil albedo instead.
 _SUN_DIR = np.array([0.26, 0.42, -1.0], dtype=float)
 _SUN_DIR /= float(np.linalg.norm(_SUN_DIR))
-
-_FLOOR_MESH = {
-    GRASS_COLOR: ("orchard_grass", "grass_tile", "1 1 1 1"),
-    SOIL_COLOR: ("orchard_soil", "soil_tile", "1 1 1 1"),
-    FURROW_COLOR: ("orchard_furrow", "soil_tile", "0.58 0.42 0.32 1"),
-}
-
-
-def _mesh_asset(name: str, verts, faces, tile_m: float = 0.40) -> str:
-    verts = np.asarray(verts, dtype=np.float64)
-    faces = np.asarray(faces, dtype=np.int32).reshape(-1)
-    vertex = " ".join(f"{float(v):.4f}" for v in verts.reshape(-1))
-    texcoord = " ".join(
-        f"{float(p[0] / tile_m):.3f} {float(p[1] / tile_m):.3f}" for p in verts)
-    face = " ".join(str(int(i)) for i in faces)
-    return (
-        f'    <mesh name="{name}" vertex="{vertex}" texcoord="{texcoord}" '
-        f'face="{face}"/>'
-    )
-
-
-def _canopy_shade_mesh(floor, skeleton, n: int = 18):
-    pts = np.array([s.midpoint[:2] for s in skeleton if s.order >= 1], dtype=float)
-    if len(pts) < 2:
-        return None, None
-    lo, hi = pts.min(0) - 0.6, pts.max(0) + 0.6
-    xs = np.linspace(lo[0], hi[0], n)
-    ys = np.linspace(lo[1], hi[1], n)
-    xx, yy = np.meshgrid(xs, ys)
-    zz = np.array([floor.ground_z(x, y) + 0.012 for x, y in zip(xx.ravel(), yy.ravel())])
-    verts = np.stack([xx.ravel(), yy.ravel(), zz], axis=1)
-    faces = []
-    for i in range(n - 1):
-        for j in range(n - 1):
-            a = i * n + j
-            faces.extend((a, a + 1, a + n, a + 1, a + n + 1, a + n))
-    uv = np.stack([
-        (xx.ravel() - lo[0]) / max(hi[0] - lo[0], 1e-6),
-        (yy.ravel() - lo[1]) / max(hi[1] - lo[1], 1e-6),
-    ], axis=1)
-    vertex = " ".join(f"{float(v):.4f}" for v in verts.reshape(-1))
-    texcoord = " ".join(f"{float(u):.3f} {float(v):.3f}" for u, v in uv)
-    face = " ".join(str(int(i)) for i in faces)
-    asset = f'    <mesh name="canopy_shade" vertex="{vertex}" texcoord="{texcoord}" face="{face}"/>'
-    geom = (
-        '    <geom type="mesh" mesh="canopy_shade" material="canopy_shade" '
-        'contype="0" conaffinity="0"/>'
-    )
-    return asset, geom
 
 
 def _rgba(rgb, a=1.0) -> str:
     return " ".join(f"{float(c):.3f}" for c in (*rgb, a))
-
-
-def _floor_visual_xml(floor) -> tuple[list[str], list[str]]:
-    """Tiled UV grass/soil meshes so the ground texture is visible up close."""
-    stride = max(4, int(floor.nrow) // 96)
-    assets, geoms = [], []
-    for verts, faces, color in visual_meshes(floor, stride):
-        name, material, rgba = _FLOOR_MESH[tuple(color)]
-        assets.append(_mesh_asset(name, verts, faces, tile_m=0.35))
-        geoms.append(
-            f'    <geom type="mesh" mesh="{name}" material="{material}" rgba="{rgba}" '
-            f'contype="0" conaffinity="0"/>'
-        )
-    return assets, geoms
 
 
 def _leaf_mjcf(skeleton, fp: FoliageParams, seed: int, height_z=None) -> tuple[list[str], list[str]]:
@@ -168,10 +103,6 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     geoms.extend(leaf_geoms)
     look_z = 0.5 * (min_z + float(floor.canopy_z(0.0, 0.0)))
     leaf_xml = "\n".join(leaf_assets)
-    floor_assets, floor_geoms = _floor_visual_xml(floor)
-    shade_asset, shade_geom = _canopy_shade_mesh(floor, skeleton)
-    floor_xml = "\n".join(floor_assets)
-    shade_xml = shade_asset or ""
     # Visual earth bulk so the heightfield is a hillside cut, not a floating card.
     bulk = max(6.0, 0.35 * elevation)
     skirt = 0.45
@@ -206,26 +137,16 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
   <asset>
     <texture type="skybox" builtin="gradient" rgb1=".42 .62 .86" rgb2=".90 .93 .96"
              width="512" height="512"/>
-    <texture type="2d" name="grass_tile" file="grass_tile.png"/>
-    <texture type="2d" name="soil_tile" file="soil_tile.png"/>
-    <texture type="2d" name="canopy_dapple" file="canopy_dapple.png"/>
+    <texture type="2d" name="orchard" file="orchard_ground.png"/>
     <texture type="2d" name="earth_cut" file="earth_cut.png"/>
-    <material name="grass_tile" texture="grass_tile" texuniform="false"
-              emission="0.48" reflectance="0.0" specular="0.02" shininess="0.04"
+    <material name="orchard" texture="orchard" texrepeat="1 1" texuniform="false"
+              emission="0.55" reflectance="0.0" specular="0.02" shininess="0.04"
               roughness="0.95" metallic="0.0" rgba="1 1 1 1"/>
-    <material name="soil_tile" texture="soil_tile" texuniform="false"
-              emission="0.42" reflectance="0.0" specular="0.03" shininess="0.05"
-              roughness="0.95" metallic="0.0" rgba="1 1 1 1"/>
-    <material name="canopy_shade" texture="canopy_dapple" texuniform="false"
-              emission="0.08" reflectance="0.0" specular="0" shininess="0"
-              rgba="1 1 1 1"/>
     <material name="earth_cut" texture="earth_cut" texrepeat="8 8" texuniform="true"
               reflectance="0.0" specular="0.03" shininess="0.05"
               roughness="0.95" metallic="0.0"/>
     <hfield name="orchard_ground" nrow="{nrow}" ncol="{ncol}"
             size="{half} {half} {elevation:.5f} {bulk:.3f}"/>
-{floor_xml}
-{shade_xml}
 {leaf_xml}
   </asset>
   <worldbody>
@@ -238,12 +159,10 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
            dir="-0.12 -0.08 -1" diffuse=".22 .26 .22" specular="0 0 0"/>
     <camera name="orbit" pos="80 -110 60" xyaxes="0.81 0.59 0 -0.18 0.25 0.95"
             fovy="46"/>
-    <geom name="ground" type="hfield" hfield="orchard_ground"
-          pos="0 0 {min_z:.5f}" rgba="0 0 0 0"
+    <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
+          pos="0 0 {min_z:.5f}" rgba="1 1 1 1"
           friction="{mu:.3f} 0.01 0.001"/>
 {chr(10).join(soil_geoms)}
-{chr(10).join(floor_geoms)}
-{shade_geom or ""}
 {chr(10).join(geoms)}
     <geom type="sphere" pos="0 0 {look_z:.4f}" size="0.001" rgba="0 0 0 0"
           contype="0" conaffinity="0"/>
@@ -415,9 +334,7 @@ def main():
 
     model = mujoco.MjModel.from_xml_string(
         xml, assets={
-            "grass_tile.png": grass_tile_png_bytes(args.seed),
-            "soil_tile.png": soil_tile_png_bytes(args.seed),
-            "canopy_dapple.png": canopy_dapple_png_bytes(args.seed),
+            "orchard_ground.png": floor.texture_png_bytes(),
             "earth_cut.png": earth_cut_png_bytes(args.seed),
         })
     apply_hfield(model, floor)
@@ -439,7 +356,7 @@ def main():
         f"drawtext=text='{args.pergola_rows} x {args.pergola_columns} posts at "
         f"{spacing:.1f} m   ~{ha:.2f} ha   fruit {len(fruit)}   leaves {len(leaf_geoms)}':"
         f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
-        f"drawtext=text='scripted aisle entry  -  tiled grass/soil  -  dapple shade (no shadow map)  "
+        f"drawtext=text='scripted aisle entry  -  tiled grass/soil albedo  -  no shadow map  "
         f"landform {args.landform_m:.1f} m  -  GL {gl_backend}  -  not Spot gait':"
         f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
     )

@@ -223,7 +223,10 @@ def _appearance_rgb(x: np.ndarray, y: np.ndarray, xx: np.ndarray, yy: np.ndarray
     rgb = np.clip(rgb, 0.0, 1.0)
     tiled = (grass[..., None] * sample_world_tile(grass_tile_rgb(), xx, yy)
              + (1.0 - grass)[..., None] * sample_world_tile(soil_tile_rgb(), xx, yy))
-    rgb = 0.22 * rgb + 0.78 * tiled
+    rgb = 0.18 * rgb + 0.82 * tiled
+    # Soft under-row darkening. This is baked albedo, not a shadow-map grid.
+    dap = 0.70 + 0.30 * grass + 0.08 * (2.0 * patch - 1.0)
+    rgb = rgb * np.clip(dap, 0.48, 1.05)[..., None]
     return np.clip(rgb, 0.0, 1.0)
 
 

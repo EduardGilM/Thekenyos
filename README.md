@@ -128,10 +128,10 @@ not enable ``.15`` m spacing on the default 45×40 commercial field. The
 recording enters from the south margin along a grass aisle and stays under the
 leaf roof so the camera does not dive through the canopy; a visual earth bulk
 sits under the heightfield so the hillside is not a floating card. The visible
-floor is UV-tiled grass and soil meshes (0.35 m period, procedural 256 px tiles),
-not a single filtered heightfield map. Classic-GL shadow maps on the leaf roof
-alias into a grid, so this preview turns shadow maps off and uses a soft dapple
-card under the pergola instead; pip MuJoCo 3.8.1 is still classic GL, not a
+floor is a heightfield whose albedo bakes repeating 0.35 m grass and soil tiles
+into the world map (procedural 256 px tiles, not a photo). Classic-GL shadow maps
+on the leaf roof alias into a grid, so this preview turns shadow maps off; row
+shade is baked into that albedo instead. pip MuJoCo 3.8.1 is still classic GL, not a
 Filament path tracer.
 
 The full 45×40 structural grid without the leaf roof is still available with
