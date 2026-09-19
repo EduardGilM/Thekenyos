@@ -285,7 +285,7 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
         detached[world] = wp.uint8(1)
         grasped[world] = wp.uint8(1)
         grasp_paid[world] = wp.uint8(1)
-        jaw = deposit_jaw[world]
+        jaw = jaw_open if use_pocket != 0 else deposit_jaw[world]
         qpos[world, jaw_qposadr] = jaw
         targets[world, 18] = jaw
     if mode == 2:
@@ -304,7 +304,7 @@ def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
                       qids: wp.array(dtype=int), start_q: wp.array2d(dtype=float),
                       start_index: wp.array(dtype=int), jaw_qposadr: int,
                       jaw_hold_next: wp.array(dtype=float),
-                      jaw_hold: wp.array(dtype=float)):
+                      jaw_hold: wp.array(dtype=float), jaw_open: float):
     world = wp.tid()
     if mask[world] == 0 or reset_mode[world] != 1:
         return
@@ -318,8 +318,8 @@ def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
         targets[world, joint + 12] = value
     hold = jaw_hold_next[world]
     jaw_hold[world] = hold
-    qpos[world, jaw_qposadr] = hold
-    targets[world, 18] = hold
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
 
 
 @wp.kernel
@@ -329,9 +329,7 @@ def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dt
     world = wp.tid()
     if mask[world] == 0 or reset_mode[world] != 1:
         return
-    hold = jaw_hold[world]
-    qpos[world, jaw_qposadr] = hold
-    targets[world, 18] = hold
+    # Teacher slews toward jaw_hold; do not snap the joint onto the fruit.
 
 
 @wp.kernel
@@ -909,7 +907,8 @@ class FastRuntime:
                 wp.launch(_apply_easy_start, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self.control.qids, self._easy_start_q, self._easy_start_index,
-                    self._jaw_qposadr, self._easy_jaw_hold_next, self._easy_jaw_hold],
+                    self._jaw_qposadr, self._easy_jaw_hold_next, self._easy_jaw_hold,
+                    float(self._jaw_open)],
                     device=self.device)
                 mw.forward(self.gpu_model, self.data)
                 self._refresh(mw)

@@ -183,6 +183,39 @@ def _joint_actuator_id(model, qposadr):
     return None
 
 
+def _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold, *, cap_nm=0.3):
+    """Command the jaw toward ``hold`` without rewriting qpos each step.
+
+    Affine-bias actuators get a position target. Motors get a PD torque clipped
+    to ``cap_nm`` (the native CPU jaw cap in ``NativeSpotControl.apply``, not a
+    tissue-safe force). If no actuator is found, set qpos once as a fallback.
+    """
+    import mujoco
+    target = float(hold)
+    cap = float(cap_nm)
+    if not np.isfinite(target) or not np.isfinite(cap) or cap <= 0:
+        raise ValueError('jaw hold and torque cap must be finite and positive')
+    if jaw_act is None:
+        data.qpos[int(jaw_qposadr)] = target
+        return 'qpos'
+    act = int(jaw_act)
+    if int(model.actuator_biastype[act]) == int(mujoco.mjtBias.mjBIAS_AFFINE):
+        data.ctrl[act] = target
+        return 'position'
+    joint_id = None
+    for index in range(int(model.njnt)):
+        if int(model.jnt_qposadr[index]) == int(jaw_qposadr):
+            joint_id = int(index)
+            break
+    q = float(data.qpos[int(jaw_qposadr)])
+    v = 0.0 if joint_id is None else float(data.qvel[int(model.jnt_dofadr[joint_id])])
+    gain = float(model.actuator_gainprm[act, 0])
+    if not np.isfinite(gain) or abs(gain) < 1e-9:
+        gain = 2.0
+    data.ctrl[act] = float(np.clip(gain * (target - q) - 0.04 * v, -cap, cap))
+    return 'motor'
+
+
 def _pad_geom_ids(model):
     """Collision geoms on the moving finger vs the fixed jaw. Visuals are skipped."""
     jaw, finger = [], []
@@ -324,8 +357,8 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
 
     If several static holds keep the fruit without crossing the load gate, take
     one step tighter than the lightest keeper so a moving carry is less likely
-    to drop it. If nothing retains, keep the under-limit command with the
-    smallest slip and, on a tie, the tighter close. Do not slam past 15 N.
+    to drop it. If nothing retains, take the tightest close still under 15 N
+    rather than the lightest slip that still dumps. Do not slam past 15 N.
     ``max_load_N`` is a rigid-sim contact result, not a tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
@@ -356,7 +389,7 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         return ordered[idx]
     under = [row for row in cleaned if row['max_load_N'] <= load_limit]
     if under:
-        return min(under, key=lambda row: (row['slip_m'], -row['close_frac']))
+        return max(under, key=lambda row: (row['close_frac'], -row['slip_m']))
     return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
 
 
@@ -427,14 +460,21 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
             mujoco.mj_forward(model, data)
             max_load = 0.0
-            ramp = max(1, min(20, steps))
-            for step in range(steps):
-                alpha = min(1.0, float(step + 1) / float(ramp))
-                q_jaw = float(jaw_open + alpha * (hold - jaw_open))
+            for _ in range(steps):
                 data.qpos[arm_qids] = start
-                data.qpos[int(jaw_qposadr)] = q_jaw  # ramped kinematic close, then hold
-                if jaw_act is not None:
-                    data.ctrl[jaw_act] = hold
+                _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold)
+                if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
+                    data.eq_active[eq] = 0
+                mujoco.mj_step(model, data)
+                max_load = max(max_load, _hand_fruit_contact_load_n(
+                    model, data, hand_geoms, fruit_geoms))
+            carry_steps = max(1, min(40, steps // 2))
+            carry_q = start.copy()
+            carry_q[0] = start[0] + 0.10
+            for step in range(carry_steps):
+                alpha = float(step + 1) / float(carry_steps)
+                data.qpos[arm_qids] = (1.0 - alpha) * start + alpha * carry_q
+                _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold)  # hold during carry screen
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)

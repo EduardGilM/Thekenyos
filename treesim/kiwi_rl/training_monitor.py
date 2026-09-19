@@ -37,6 +37,7 @@ PRIORITY_CHARTS = (
     'evaluation/terminal_transitions', 'terminal_transitions',
     'curriculum_index', 'guidance_weight', 'teacher_mix', 'shaping_coef',
     'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max', 'easy_hold_close_mean',
+    'teacher_anneal_after',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
 )
@@ -746,16 +747,21 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         if easy:
             pocket = grasp_pocket_world_m(model, data, tcp_site)
             data.qpos[qposadr:qposadr + 3] = pocket
-            frac = 0.75 if hold_close_frac is None else float(hold_close_frac)
-            if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
-                raise ValueError('hold_close_frac must be finite in [0, 1]')
-            hold = jaw_hold_q(frac, opened, closed)
+            data.qpos[int(controller.qids[18])] = opened
+            controller.targets[18] = opened
+            # Teacher (GPU) slews to hold_close_frac; CPU student clips start open.
+            if hold_close_frac is not None:
+                frac = float(hold_close_frac)
+                if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+                    raise ValueError('hold_close_frac must be finite in [0, 1]')
+            hold = None
         else:
             tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
             data.qpos[qposadr:qposadr + 3] = tcp
             hold = jaw_hold_q(1.0, opened, closed)
-        data.qpos[int(controller.qids[18])] = hold
-        controller.targets[18] = hold
+        if hold is not None:
+            data.qpos[int(controller.qids[18])] = hold
+            controller.targets[18] = hold
         data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)
         data.qvel[dofadr:dofadr + 6] = 0.0
         equality = fruit.get('equality')
