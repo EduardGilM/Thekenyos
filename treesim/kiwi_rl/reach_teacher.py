@@ -799,7 +799,7 @@ def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_
     return local
 
 
-def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.22, clearance_m=0.28):
+def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.32, clearance_m=0.28):
     """Chassis-frame TCP start: frac 0 = clear of the crate, 1 = toward home.
 
     The near pose is on the robot side of the front wall with enough margin that

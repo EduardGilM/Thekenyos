@@ -827,6 +827,18 @@ class FastRuntime:
         while len(start_qs) < n:
             start_qs.append(start_qs[0])
             start_errs.append(start_errs[0])
+        # Static hold sweep stays at 0.40 m so a closer training start cannot
+        # knock the fruit into the front wall and poison close-fraction choice.
+        sweep_local = easy_start_local_m(
+            0.0, home_local, margin_m=0.40,
+            clearance_m=EASY_PRESET['start_clearance_m'])
+        sweep_q, sweep_err = solve_tcp_hover(
+            self.model, qpos, self.tcp_site, chassis_p + chassis_R @ sweep_local,
+            qids, dofs, q_home, ranges)
+        if (not np.isfinite(sweep_q).all() or not np.isfinite(sweep_err)
+                or float(sweep_err) > accept):
+            sweep_q = start_qs[-1]
+        self._hold_sweep_q = np.asarray(sweep_q, dtype=np.float32).reshape(6)
         return drop_q.astype(np.float32), float(drop_err), np.stack(start_qs), np.asarray(start_errs)
 
     def set_easy_progress(self, far_frac, rng):
@@ -936,8 +948,11 @@ class FastRuntime:
         from .reach_teacher import sweep_jaw_hold
         host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
         qpos = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
-        start_host = np.asarray(self._easy_start_q.numpy(), dtype=np.float64)
-        start_q = start_host[0].copy() if start_host.ndim == 2 else start_host.reshape(6).copy()
+        sweep = getattr(self, '_hold_sweep_q', None)
+        if sweep is None:
+            start_host = np.asarray(self._easy_start_q.numpy(), dtype=np.float64)
+            sweep = start_host[-1] if start_host.ndim == 2 else start_host.reshape(6)
+        start_q = np.asarray(sweep, dtype=np.float64).reshape(6).copy()
         try:
             return sweep_jaw_hold(
                 self.model, qpos, tcp_site=self.tcp_site,

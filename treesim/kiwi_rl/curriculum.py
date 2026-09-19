@@ -70,12 +70,13 @@ EASY_PRESET = {
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
     # 0.40 m + 0.32 m span put the mean start ~0.56 m in front of the rim;
-    # the 1.28 s PPO window then never sees a settled deposit. 0.12 m still
-    # clips the wrist through the liner. 0.22 m / 0.12 m span stays outside.
-    'start_margin_m': 0.22,
+    # the 1.28 s PPO window then never sees a settled deposit. 0.12 m clips
+    # the wrist; 0.22 m put the pads through the front wall and dumped.
+    # 0.32 m / 0.08 m span stays outside. The hold sweep still uses 0.40 m.
+    'start_margin_m': 0.32,
     'start_clearance_m': 0.28,
     'n_start_poses': 24,
-    'start_x_span_m': 0.12,
+    'start_x_span_m': 0.08,
     'start_y_span_m': 0.10,
     'start_z_span_m': 0.08,
     'ik_accept_err_m': 0.025,

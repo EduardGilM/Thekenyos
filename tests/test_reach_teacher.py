@@ -52,7 +52,7 @@ class ReachTeacherMathTest(unittest.TestCase):
         np.testing.assert_allclose(hi[2], float(CENTER[2] + SIZE[2]))
         near = easy_start_local_m(0.0)
         far = easy_start_local_m(1.0)
-        self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.22) - 1e-9)
+        self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.32) - 1e-9)
         self.assertGreater(float(far[0]), float(near[0]))
         self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
         self.assertTrue(tcp_outside_basket(far, margin_m=0.04, above_rim_m=0.0))
