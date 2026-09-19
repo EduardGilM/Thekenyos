@@ -121,12 +121,13 @@ python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
     --fruit-count 180 --video output/orchard-mujoco.mp4
 ```
 
-The 10° tilt is an assumed farm hillside, not a surveyed block. Dense infill
-stays inside the 100,000-leaf cap by cropping the post grid; do not enable
-``.15`` m spacing on the default 45×40 commercial field. The recording starts
-outside the block and walks into a row so the canopy interior is visible; a
-visual earth bulk sits under the heightfield so the hillside is not a floating
-card.
+The hillside is an assumed rolling landform (value-noise / Perlin-like octaves
+plus a mild residual tilt), not a surveyed DEM and not a single inclined plane.
+Dense infill stays inside the 100,000-leaf cap by cropping the post grid; do
+not enable ``.15`` m spacing on the default 45×40 commercial field. The
+recording enters from the south margin along a grass aisle and stays under the
+leaf roof so the camera does not dive through the canopy; a visual earth bulk
+sits under the heightfield so the hillside is not a floating card.
 
 The full 45×40 structural grid without the leaf roof is still available with
 ``--flat --canopy-spacing 0 --pergola-rows 45 --pergola-columns 40``.

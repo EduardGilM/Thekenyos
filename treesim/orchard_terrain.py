@@ -18,8 +18,9 @@ tighter than a typical commercial pergola (often ~4–5 m) and is an assumed
 layout, not a measured Hayward-block survey. Sampled per seed, assumed
 domain-randomization ranges:
 
-* ``slope_deg`` U(-4, +4) by default; hillside previews may pin up to ±12°
-  as an assumed farm tilt, not a surveyed block.
+* ``slope_deg`` U(-4, +4) by default; hillside previews may pin a mild residual
+  tilt up to ±12°. Rolling ``landform_m`` (value-noise / Perlin-like octaves)
+  is an assumed farm landform, not a surveyed DEM; default amplitude is 0.
 * ``ground_noise_m`` U(0, 0.04)
 * ``rut_depth_m`` U(0, 0.08)
 * ``rut_width_m`` U(0.20, 0.60)
@@ -237,6 +238,7 @@ class OrchardFloor:
     slope_azimuth_rad: float
     colors_rgb: np.ndarray = None
     soil_weight: np.ndarray = None
+    landform_m: np.ndarray = None
     sampled: dict = field(default_factory=dict)
 
     @property
@@ -255,8 +257,29 @@ class OrchardFloor:
     def aisle_plane_z(self, x, y) -> float:
         return self.reference_z_m + self.slope_z(x, y)
 
+    def _bilinear(self, grid, x, y) -> float:
+        grid = np.asarray(grid, dtype=np.float64)
+        nr, nc = grid.shape
+        span = 2.0 * self.half_extent_m
+        u = (float(x) + self.half_extent_m) / span * (nc - 1)
+        v = (float(y) + self.half_extent_m) / span * (nr - 1)
+        if not (0.0 <= u <= nc - 1 and 0.0 <= v <= nr - 1):
+            return 0.0
+        j0 = int(np.floor(u))
+        i0 = int(np.floor(v))
+        j1 = min(j0 + 1, nc - 1)
+        i1 = min(i0 + 1, nr - 1)
+        fu, fv = u - j0, v - i0
+        return float((grid[i0, j0] * (1.0 - fu) + grid[i0, j1] * fu) * (1.0 - fv)
+                     + (grid[i1, j0] * (1.0 - fu) + grid[i1, j1] * fu) * fv)
+
+    def landform_z(self, x, y) -> float:
+        if self.landform_m is None:
+            return 0.0
+        return self._bilinear(self.landform_m, x, y)
+
     def canopy_z(self, x, y) -> float:
-        return self.canopy_height_m + self.aisle_plane_z(x, y)
+        return self.canopy_height_m + self.aisle_plane_z(x, y) + self.landform_z(x, y)
 
     def ground_z(self, x, y) -> float:
         x, y = float(x), float(y)
@@ -264,15 +287,8 @@ class OrchardFloor:
         u = (x + self.half_extent_m) / span * (self.ncol - 1)
         v = (y + self.half_extent_m) / span * (self.nrow - 1)
         if not (0.0 <= u <= self.ncol - 1 and 0.0 <= v <= self.nrow - 1):
-            return self.aisle_plane_z(x, y)
-        j0 = int(np.floor(u))
-        i0 = int(np.floor(v))
-        j1 = min(j0 + 1, self.ncol - 1)
-        i1 = min(i0 + 1, self.nrow - 1)
-        fu, fv = u - j0, v - i0
-        g = self.heights_m
-        return float((g[i0, j0] * (1.0 - fu) + g[i0, j1] * fu) * (1.0 - fv)
-                     + (g[i1, j0] * (1.0 - fu) + g[i1, j1] * fu) * fv)
+            return self.aisle_plane_z(x, y) + self.landform_z(x, y)
+        return self._bilinear(self.heights_m, x, y)
 
     def color_at(self, x, y) -> np.ndarray:
         """Bilinear sample of the grass/soil map in world metres."""
@@ -364,7 +380,9 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
                          slope_azimuth_deg=None, half_extent_m=None,
                          row_pitch_m=None, cell_m=None,
                          appearance_cell_m=None,
-                         canopy_height_m: float = 1.6) -> OrchardFloor:
+                         canopy_height_m: float = 1.6,
+                         landform_m=None,
+                         landform_wavelength_m=None) -> OrchardFloor:
     """Sample one seeded orchard floor.
 
     Omit a keyword to draw it from ``params`` (or the default assumed ranges).
@@ -411,6 +429,12 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         raise ValueError("sampled rut_width_m range must stay inside [0.20, 0.60] m")
     if mu_span[0] < 0.6 - 1e-9 or mu_span[1] > 1.3 + 1e-9:
         raise ValueError("friction must stay inside [0.6, 1.3]")
+    landform_amp = float(landform_m if landform_m is not None else getattr(ph, "orchard_landform_m", 0.0))
+    landform_wl = float(landform_wavelength_m if landform_wavelength_m is not None else getattr(ph, "orchard_landform_wavelength_m", 22.0))
+    if not np.isfinite(landform_amp) or landform_amp < 0.0 or landform_amp > 8.0:
+        raise ValueError("landform_m must be finite and inside [0, 8] m")
+    if landform_amp > 0.0 and (not np.isfinite(landform_wl) or landform_wl < 4.0):
+        raise ValueError("landform_wavelength_m must be finite and at least 4 m")
 
     rng = np.random.default_rng((seed * 2654435761) & 0x7FFFFFFF)
     slope = _sample_unit(rng, slope_span)
@@ -437,6 +461,13 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     aisle = _aisle_weight(xx, row_pitch_m, max(rut_width, 1e-6))
     noise_m_field = noise_amp * noise * (AISLE_NOISE_SCALE * aisle + (1.0 - aisle))
     heights = AISLE_HEIGHT_M + relief + plane + noise_m_field
+    landform = np.zeros_like(heights)
+    if landform_amp > 0.0:
+        # Long-wavelength value noise (Perlin-like octaves). Assumed rolling
+        # farm landform, not a surveyed DEM.
+        landform = landform_amp * _value_noise(rng, x, y, half_extent_m, landform_wl)
+        landform -= float(landform.mean())
+        heights = heights + landform
 
     for px, py in PERGOLA_POST_XY_M:
         r = np.hypot(xx - px, yy - py)
@@ -476,6 +507,8 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         canopy_height_m=float(canopy_height_m),
         post_embed_m=POST_EMBED_M,
         lift_m=float(lift),
+        landform_m=float(landform_amp),
+        landform_wavelength_m=float(landform_wl),
     )
     return OrchardFloor(
         heights_m=heights.astype(np.float64),
@@ -483,6 +516,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         canopy_height_m=float(canopy_height_m), reference_z_m=float(reference_z),
         slope_deg=slope, slope_azimuth_rad=az,
         colors_rgb=colors.astype(np.float64), soil_weight=soil.astype(np.float64),
+        landform_m=landform.astype(np.float64),
         sampled=sampled,
     )
 

@@ -147,8 +147,10 @@ def make_config(args) -> TreeConfig:
     if getattr(args, "hillside", False):
         cfg.physics.terrain = True
         cfg.physics.terrain_kind = "orchard"
-        cfg.physics.orchard_slope_deg = (10.0, 10.0)
+        cfg.physics.orchard_slope_deg = (3.5, 3.5)
         cfg.physics.orchard_slope_azimuth_deg = (38.0, 38.0)
+        cfg.physics.orchard_landform_m = 2.4
+        cfg.physics.orchard_landform_wavelength_m = 18.0
     if args.terrain and args.preset == "pergola" and args.terrain_kind == "noise" and args.terrain_seed is None:
         import random
         cfg.physics.terrain_seed = random.SystemRandom().randrange(2**31)
@@ -285,9 +287,9 @@ def parse_args():
                    help="fixed terrain seed for replay; omitted picks fresh random kiwi "
                         "noise each launch (orchard/apple use the scene --seed)")
     t.add_argument("--hillside", action="store_true",
-                   help="pergola orchard floor with a pinned ~10 deg farm tilt "
-                        "(assumed hillside, not a surveyed block); implies --terrain "
-                        "--terrain-kind orchard")
+                   help="pergola orchard floor with rolling value-noise landform "
+                        "and a mild residual tilt (assumed hillside, not a surveyed "
+                        "block); implies --terrain --terrain-kind orchard")
 
     r = p.add_argument_group("render/sim")
     r.add_argument("--viewer", default="gl", choices=["gl", "rtx", "usd", "null"],

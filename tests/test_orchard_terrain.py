@@ -88,6 +88,10 @@ class OrchardTerrainTest(unittest.TestCase):
             sample_orchard_floor(0, rut_depth_m=0.08, rut_width_m=0.05)
         with self.assertRaises(ValueError):
             sample_orchard_floor(float("nan"))
+        with self.assertRaises(ValueError):
+            sample_orchard_floor(0, landform_m=9.0)
+        with self.assertRaises(ValueError):
+            sample_orchard_floor(0, landform_m=2.0, landform_wavelength_m=1.0)
 
     def test_pergola_posts_sit_on_sampled_floor(self):
         floor = _pinned(seed=42, slope_deg=-3.0, rut_depth_m=0.06, noise_m=0.02)
@@ -141,8 +145,23 @@ class OrchardTerrainTest(unittest.TestCase):
                          int(round(2.0 * half / cover["cell_m"])) + 1)
         self.assertTrue(np.isfinite(floor.ground_z(97.5, 110.0)))
 
-    def test_camera_approaches_the_row(self):
-        from scripts.record_orchard_mujoco import camera_pose
+    def test_landform_rolls_instead_of_a_plane(self):
+        roll = _pinned(seed=7, landform_m=2.4, landform_wavelength_m=18.0,
+                       slope_deg=3.5, noise_m=0.0, rut_depth_m=0.0)
+        self.assertGreater(float(roll.heights_m.max() - roll.heights_m.min()), 1.2)
+        xs, ys = np.meshgrid(roll.x_m, roll.y_m)
+        plane = np.tan(np.radians(roll.slope_deg)) * (
+            xs * np.cos(roll.slope_azimuth_rad) + ys * np.sin(roll.slope_azimuth_rad))
+        residual = roll.heights_m - plane
+        self.assertGreater(float(residual.max() - residual.min()), 1.0)
+        self.assertGreater(float(roll.landform_m.max()), 0.4)
+        self.assertLess(float(roll.landform_m.min()), -0.4)
+        self.assertAlmostEqual(
+            roll.canopy_z(2.0, 3.0) - roll.aisle_plane_z(2.0, 3.0),
+            1.6 + roll.landform_z(2.0, 3.0), places=9)
+
+    def test_camera_enters_from_the_side_under_the_canopy(self):
+        from scripts.record_orchard_mujoco import camera_pose, free_camera_eye
 
         class Floor:
             def canopy_z(self, x, y):
@@ -150,12 +169,19 @@ class OrchardTerrainTest(unittest.TestCase):
             def ground_z(self, x, y):
                 return 0.04
 
-        start = camera_pose(0, 100, Floor(), 32.0, 5.0)
-        end = camera_pose(99, 100, Floor(), 32.0, 5.0)
-        self.assertGreater(start[1], 8.0)
-        self.assertLess(end[1], 4.0)
-        self.assertGreater(end[0][2], 0.2)
-        self.assertLess(end[0][2], 1.6)
+        start_eye = free_camera_eye(*camera_pose(0, 100, Floor(), 32.0, 5.0))
+        end_eye = free_camera_eye(*camera_pose(99, 100, Floor(), 32.0, 5.0))
+        self.assertLess(start_eye[1], -20.0)
+        self.assertGreater(end_eye[1], start_eye[1])
+        for frame in range(100):
+            lookat, distance, azimuth, elevation = camera_pose(
+                frame, 100, Floor(), 32.0, 5.0)
+            eye = free_camera_eye(lookat, distance, azimuth, elevation)
+            canopy = Floor().canopy_z(eye[0], eye[1])
+            ground = Floor().ground_z(eye[0], eye[1])
+            self.assertLess(eye[2], canopy - 0.25)
+            self.assertGreater(eye[2], ground + 0.90)
+            self.assertLess(lookat[2], canopy - 0.15)
 
     def test_flat_generate_unchanged(self):
         skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0)

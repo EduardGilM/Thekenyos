@@ -398,18 +398,27 @@ class PergolaTest(unittest.TestCase):
             cfg = make_config(parse_args())
         self.assertTrue(cfg.physics.terrain)
         self.assertEqual(cfg.physics.terrain_kind, 'orchard')
-        self.assertEqual(cfg.physics.orchard_slope_deg, (10.0, 10.0))
+        self.assertEqual(cfg.physics.orchard_slope_deg, (3.5, 3.5))
         self.assertEqual(cfg.physics.orchard_slope_azimuth_deg, (38.0, 38.0))
+        self.assertGreater(cfg.physics.orchard_landform_m, 0.0)
         self.assertEqual(cfg.foliage.leaf_shape, 'cordate')
         with patch('sys.argv', ['grow_tree.py', '--preset', 'apple', '--hillside']), \
                 patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
             parse_args()
 
     def test_cordate_leaf_is_broader_near_base_than_elliptic(self):
-        from treesim.foliage import leaf_blade_arrays
-        cord, _ = leaf_blade_arrays(.22, .17, shape='cordate')
-        ellip, _ = leaf_blade_arrays(.22, .17, shape='elliptic')
-        self.assertGreater(abs(float(cord[3, 0])), abs(float(ellip[3, 0])))
+        from treesim.foliage import leaf_blade_arrays, leaf_blade_style
+        cord, cfaces = leaf_blade_arrays(.22, .17, **leaf_blade_style('cordate'))
+        ellip, efaces = leaf_blade_arrays(.22, .17, **leaf_blade_style('elliptic'))
+
+        def basal_width(verts):
+            band = verts[verts[:, 2] < 0.30 * 0.22]
+            return float(np.max(np.abs(band[:, 0])))
+
+        self.assertGreater(basal_width(cord), basal_width(ellip))
+        self.assertGreater(len(cord), len(ellip))
+        self.assertGreater(len(cfaces), len(efaces))
+        self.assertGreater(basal_width(cord), abs(float(cord[0, 0])) * 1.35)
 
     def test_height_and_existing_presets(self):
         params = preset("pergola")

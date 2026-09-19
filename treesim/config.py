@@ -241,6 +241,10 @@ class PhysicsParams:
     orchard_rut_depth_m: tuple = (0.0, 0.08)
     orchard_rut_width_m: tuple = (0.20, 0.60)
     orchard_friction: tuple = (0.6, 1.3)
+    # Long-wavelength rolling relief on the orchard floor (assumed landform,
+    # not a surveyed DEM). Zero keeps the older planar-plus-ruts profile.
+    orchard_landform_m: float = 0.0
+    orchard_landform_wavelength_m: float = 22.0
     # Soft velocity limiter (anti-blowup): bodies faster than this get a strong
     # braking force (inactive below the caps, so normal physics is untouched).
     # This is what stops a pick-clamp-scale yank on a 5 g twig (the viewer

@@ -34,14 +34,18 @@ def _rgba(rgb, a=1.0) -> str:
 
 
 def _leaf_mjcf(skeleton, fp: FoliageParams, seed: int) -> tuple[list[str], list[str]]:
-    from treesim.foliage import LEAF_SIZE_CLASSES, leaf_blade_arrays, place_canopy_leaves, place_leaves
+    from treesim.foliage import (
+        LEAF_SIZE_CLASSES, leaf_blade_arrays, leaf_blade_style,
+        place_canopy_leaves, place_leaves,
+    )
     placements = place_leaves(skeleton, fp, seed=seed)
     if fp.canopy_spacing_m:
         placements.extend(place_canopy_leaves(skeleton, fp, seed=seed))
     assets = []
+    style = leaf_blade_style(fp.leaf_shape)
     for i, scale in enumerate(LEAF_SIZE_CLASSES):
         verts, faces = leaf_blade_arrays(
-            fp.leaf_length * scale, fp.leaf_width * scale, shape=fp.leaf_shape)
+            fp.leaf_length * scale, fp.leaf_width * scale, **style)
         vertex = " ".join(f"{float(v):.5f}" for v in verts.reshape(-1))
         face = " ".join(str(int(i)) for i in faces.reshape(-1))
         assets.append(f'    <mesh name="kiwi_leaf_{i}" vertex="{vertex}" face="{face}"/>')
@@ -156,21 +160,54 @@ def apply_hfield(model, floor) -> None:
     model.hfield_data[:] = ((heights - min_z) / span).astype(np.float64).ravel()
 
 
+def free_camera_eye(lookat, distance, azimuth, elevation) -> np.ndarray:
+    """World-space eye of a MuJoCo free camera (matches ``mjv_updateCamera``)."""
+    az = math.radians(float(azimuth))
+    el = math.radians(float(elevation))
+    d = float(distance)
+    lookat = np.asarray(lookat, dtype=float)
+    return lookat + d * np.array([
+        math.cos(el) * math.sin(az),
+        -math.cos(el) * math.cos(az),
+        math.sin(el),
+    ])
+
+
+def mjv_from_eye_target(eye, target):
+    """Convert an explicit eye/target pair into MuJoCo free-camera sphericals."""
+    lookat = np.asarray(target, dtype=float)
+    delta = np.asarray(eye, dtype=float) - lookat
+    distance = float(np.linalg.norm(delta))
+    if not math.isfinite(distance) or distance < 1e-6:
+        raise ValueError("camera eye and target must be distinct finite points")
+    azimuth = math.degrees(math.atan2(delta[0], -delta[1]))
+    elevation = math.degrees(math.asin(float(np.clip(delta[2] / distance, -1.0, 1.0))))
+    return lookat, distance, azimuth, elevation
+
+
+def _aisle_eye_z(floor, x, y) -> float:
+    """Keep the eye in the working volume: above the aisle, below the leaf roof."""
+    ground = float(floor.ground_z(x, y))
+    canopy = float(floor.canopy_z(x, y))
+    z = min(ground + 1.22, canopy - 0.38)
+    z = max(z, ground + 0.95)
+    return min(z, canopy - 0.28)
+
+
 def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0):
-    """Establish the hillside, then walk into a row and look under the canopy."""
+    """Enter from the south margin along a grass aisle, always under the canopy."""
     t = frame / max(n_frames - 1, 1)
     s = t * t * (3.0 - 2.0 * t)
-    x_in = 0.5 * float(spacing)
-    y_in = -0.15 * half_span_m * (1.0 - s) + 1.4 * s
-    canopy = float(floor.canopy_z(x_in, y_in))
-    ground = float(floor.ground_z(x_in, y_in))
-    look_out = np.array([0.0, -0.10 * half_span_m, float(floor.canopy_z(0.0, 0.0))])
-    look_in = np.array([x_in, y_in, 0.62 * ground + 0.38 * canopy])
-    look = (1.0 - s) * look_out + s * look_in
-    azimuth = 52.0 + 38.0 * s
-    elevation = -22.0 + 14.0 * s
-    distance = (0.38 * half_span_m) * (1.0 - s) + 3.4 * s
-    return look, distance, azimuth, elevation
+    x = 0.0
+    y0 = -float(half_span_m) + 2.2
+    y1 = -0.35 * float(spacing)
+    y = (1.0 - s) * y0 + s * y1
+    look_ahead = 5.8 - 1.8 * s
+    x_look = 0.32 * float(spacing)
+    eye = np.array([x, y, _aisle_eye_z(floor, x, y)])
+    target = np.array([x_look, y + look_ahead,
+                       _aisle_eye_z(floor, x_look, y + look_ahead) - 0.06])
+    return mjv_from_eye_target(eye, target)
 
 
 def main():
@@ -185,9 +222,13 @@ def main():
     p.add_argument("--fruit-count", type=int, default=180)
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
-    p.add_argument("--slope-deg", type=float, default=10.0,
-                   help="pinned orchard-floor tilt [deg]; assumed hillside, not a survey")
+    p.add_argument("--slope-deg", type=float, default=3.5,
+                   help="mild residual orchard-floor tilt [deg]; assumed, not a survey")
     p.add_argument("--slope-azimuth-deg", type=float, default=38.0)
+    p.add_argument("--landform-m", type=float, default=2.4,
+                   help="rolling value-noise landform amplitude [m]; 0 disables")
+    p.add_argument("--landform-wavelength-m", type=float, default=18.0,
+                   help="dominant landform wavelength [m]")
     p.add_argument("--canopy-spacing", type=float, default=0.15,
                    help="render-only leaf-roof spacing [m]; 0 disables infill")
     p.add_argument("--hillside", action="store_true", default=True)
@@ -212,6 +253,9 @@ def main():
         p.error("--canopy-spacing must be zero or finite and at least 0.03 m")
     if args.flat:
         args.slope_deg = 0.0
+        args.landform_m = 0.0
+    if not math.isfinite(args.landform_m) or args.landform_m < 0.0:
+        p.error("--landform-m must be finite and >= 0")
 
     try:
         gl_backend = bind_mujoco_gl(args.gl, require_gpu=args.require_gpu)
@@ -226,7 +270,9 @@ def main():
     floor = sample_orchard_floor(
         args.seed, canopy_height_m=1.6,
         slope_deg=float(args.slope_deg), noise_m=0.04, rut_depth_m=0.05, rut_width_m=0.40,
-        friction=1.0, slope_azimuth_deg=float(args.slope_azimuth_deg), **cover,
+        friction=1.0, slope_azimuth_deg=float(args.slope_azimuth_deg),
+        landform_m=float(args.landform_m),
+        landform_wavelength_m=float(args.landform_wavelength_m), **cover,
     )
     skeleton = generate(
         height=1.6, seed=args.seed,
@@ -248,7 +294,8 @@ def main():
         f"[orchard-mujoco] posts {args.pergola_rows}x{args.pergola_columns} "
         f"at {spacing:.1f} m; segments {len(skeleton)}; fruit {len(fruit)}; "
         f"leaves {len(leaf_geoms)}; floor {2*half:.0f}x{2*half:.0f} m; "
-        f"slope {args.slope_deg:.1f} deg; GL {gl_backend}",
+        f"slope {args.slope_deg:.1f} deg; landform {args.landform_m:.1f} m; "
+        f"GL {gl_backend}",
         flush=True,
     )
     xml = mjcf(floor, skeleton, fruit, leaf_assets, leaf_geoms,
@@ -278,8 +325,8 @@ def main():
         f"drawtext=text='{args.pergola_rows} x {args.pergola_columns} posts at "
         f"{spacing:.1f} m   ~{ha:.2f} ha   fruit {len(fruit)}   leaves {len(leaf_geoms)}':"
         f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
-        f"drawtext=text='scripted approach into the row  -  assumed {args.slope_deg:.0f} deg farm tilt  -  "
-        f"render-only foliage  -  GL {gl_backend}  -  not Spot gait':"
+        f"drawtext=text='scripted aisle entry  -  rolling landform {args.landform_m:.1f} m  "
+        f"residual {args.slope_deg:.1f} deg  -  render-only foliage  -  GL {gl_backend}  -  not Spot gait':"
         f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
     )
     encoder = subprocess.Popen([

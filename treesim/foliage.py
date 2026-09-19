@@ -43,6 +43,20 @@ def _rodrigues(v, axis, ang):
 # triangles per leaf mesh; leaves stay massless & non-colliding, so physics
 # cost is still zero.
 # --------------------------------------------------------------------------- #
+# Shared blade styles. Apple stays the coarser elliptic card; kiwi cordate
+# uses more segments, a basal sinus and a serrated margin (artistic proxy).
+LEAF_BLADE_STYLE = {
+    "elliptic": dict(fold=0.55, curl=0.30, droop=0.35, nseg=5),
+    "cordate": dict(fold=0.82, curl=0.16, droop=0.52, nseg=10),
+}
+
+
+def leaf_blade_style(shape: str = "elliptic") -> dict:
+    if shape not in LEAF_BLADE_STYLE:
+        raise ValueError("leaf shape must be elliptic or cordate")
+    return dict(LEAF_BLADE_STYLE[shape], shape=shape)
+
+
 def leaf_blade_arrays(length: float, width: float, fold: float = 0.55,
                      curl: float = 0.30, droop: float = 0.35, nseg: int = 5,
                      shape: str = "elliptic"):
@@ -50,33 +64,43 @@ def leaf_blade_arrays(length: float, width: float, fold: float = 0.55,
 
     Cordate outline is an artistic Actinidia-style proxy, not a scanned cultivar.
     """
-    if shape not in ("elliptic", "cordate"):
+    if shape not in LEAF_BLADE_STYLE:
         raise ValueError("leaf shape must be elliptic or cordate")
     ts = np.linspace(0.0, 1.0, nseg + 1)
     verts: list[tuple] = []
     rows: list[tuple] = []
+    across = 5 if shape == "cordate" else 3
     for t in ts:
         tt = min(float(t), 0.995)
         if shape == "cordate":
-            envelope = (np.sin(np.pi * tt ** 0.58) ** 0.70
-                        + 0.28 * np.sin(np.pi * min(tt * 1.45, 1.0)) * (1.0 - tt))
-            w = 0.5 * width * (envelope + 0.05)
+            sinus = float(np.exp(-(tt / 0.065) ** 2))
+            lobe = float(np.sin(np.pi * min(tt / 0.34, 1.0)) ** 0.80)
+            body = float(np.sin(np.pi * (tt ** 0.62)) ** 0.72)
+            envelope = (0.88 * body + 0.42 * lobe * (1.0 - tt)) * (1.0 - 0.62 * sinus)
+            envelope = max(envelope, 0.035 * (1.0 - tt) + 0.02)
+            serration = 1.0
+            if 0.08 < tt < 0.92:
+                serration += 0.08 * float(np.sin(12.0 * np.pi * tt))
+            w = 0.5 * width * envelope * serration
         else:
             w = 0.5 * width * (np.sin(np.pi * tt ** 0.8) ** 0.85 + 0.03)
         z = length * t
         y_rib = curl * length * t * t - droop * length * t * t * t
-        y_edge = y_rib + fold * w
         i0 = len(verts)
-        verts.append((-w, y_edge, z))
-        verts.append((0.0, y_rib, z))
-        verts.append((w, y_edge, z))
-        rows.append((i0, i0 + 1, i0 + 2))
+        if across == 3:
+            y_edge = y_rib + fold * w
+            verts.extend(((-w, y_edge, z), (0.0, y_rib, z), (w, y_edge, z)))
+        else:
+            for u in (-1.0, -0.52, 0.0, 0.52, 1.0):
+                cup = fold * w * u * u
+                twist = 0.07 * fold * w * u * tt
+                verts.append((u * w, y_rib + cup + twist, z))
+        rows.append(tuple(range(i0, i0 + across)))
     idx: list[int] = []
     for r in range(nseg):
-        l0, m0, r0 = rows[r]
-        l1, m1, r1 = rows[r + 1]
-        idx += [l0, m0, l1, m0, m1, l1,
-                m0, r0, m1, r0, r1, m1]
+        a, b = rows[r], rows[r + 1]
+        for k in range(across - 1):
+            idx += [a[k], a[k + 1], b[k], a[k + 1], b[k + 1], b[k]]
     back = []
     for k in range(0, len(idx), 3):
         back += [idx[k], idx[k + 2], idx[k + 1]]
@@ -106,8 +130,8 @@ LEAF_SIZE_CLASSES = (0.72, 1.0, 1.35)
 
 def leaf_meshes(fp: FoliageParams):
     """One shared blade mesh per size class for this config's leaf size."""
-    shape = getattr(fp, "leaf_shape", "elliptic")
-    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s, shape=shape)
+    style = leaf_blade_style(getattr(fp, "leaf_shape", "elliptic"))
+    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s, **style)
             for s in LEAF_SIZE_CLASSES]
 
 
