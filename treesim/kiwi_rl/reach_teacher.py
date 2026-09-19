@@ -31,6 +31,31 @@ def hover_tcp_world_m(chassis_xpos, chassis_xmat, clearance_m=0.12):
     return xpos + xmat @ hover_tcp_local_m(clearance_m)
 
 
+def easy_airdrop_world_m(chassis_xpos, chassis_xmat, *, above_rim_m=None):
+    """World spawn of a free fruit over the basket opening, above the rim.
+
+    Independent of TCP so the arm can start outside the crate and not occupy
+    the hole. XY is the chassis-frame basket centre; Z is the rim plus
+    ``airdrop_above_rim_m``. Still above the liner: not a weld and not a
+    liner teleport.
+    """
+    from treesim.basket import CENTER, SIZE
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    xpos = np.asarray(chassis_xpos, dtype=np.float64).reshape(3)
+    xmat = np.asarray(chassis_xmat, dtype=np.float64).reshape(3, 3)
+    above = float(EASY_PRESET['airdrop_above_rim_m'] if above_rim_m is None else above_rim_m)
+    if not np.isfinite(above) or not 0 < above <= 0.3:
+        raise ValueError('airdrop_above_rim_m must be finite in (0, 0.3] m')
+    if not np.isfinite(xpos).all() or not np.isfinite(xmat).all():
+        raise ValueError('airdrop pose inputs must be finite')
+    local = np.asarray(CENTER, dtype=np.float64) + np.array(
+        [0.0, 0.0, float(SIZE[2]) + above], dtype=np.float64)
+    pos = xpos + xmat @ local
+    if not np.isfinite(pos).all():
+        raise ValueError('airdrop world position must be finite')
+    return pos
+
+
 def basket_chassis_aabb_m():
     """Axis-aligned crate bounds in the chassis frame, floor to open rim.
 

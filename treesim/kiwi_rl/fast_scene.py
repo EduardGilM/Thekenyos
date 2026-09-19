@@ -21,6 +21,51 @@ SCHEMA = 'fast-training-scene/v1'
 FRUIT_MASS_KG = 0.105
 DEFAULT_TIMESTEP_S = 0.005
 CONTACT_SOLREF = '.02 1'
+BASKET_SHELL_BODY = 'basket_shell'
+BASKET_COLLISION_PREFIXES = ('basket_floor', 'basket_liner')
+
+
+def reattach_basket_collision_geoms(xml: str) -> str:
+    """Move liner/floor geoms onto a welded child of the chassis.
+
+    Newton puts those boxes on ``spot_with_arm_body``. Spot's MJCF then
+    excludes that body from the proximal arm links, so the gripper can occupy
+    the crate without contact. A massless child keeps basket mass/inertia on
+    the chassis (explicit inertial) while giving the arm a body it is allowed
+    to hit. Visual vents stay on the chassis. Not a weld equality.
+    """
+    if not isinstance(xml, str) or not xml:
+        raise ValueError('scene XML must be a non-empty string')
+    if f'name="{BASKET_SHELL_BODY}"' in xml or f"name='{BASKET_SHELL_BODY}'" in xml:
+        return xml
+    root = ET.fromstring(xml)
+    parent_of = {child: parent for parent in root.iter() for child in parent}
+    movers = []
+    parents = set()
+    for geom in root.findall('.//geom'):
+        name = geom.get('name') or ''
+        if not name.startswith(BASKET_COLLISION_PREFIXES):
+            continue
+        body = geom
+        while body is not None and body.tag != 'body':
+            body = parent_of.get(body)
+        if body is None or not body.get('name'):
+            raise ValueError('basket collision geom must belong to a named body')
+        movers.append((geom, body))
+        parents.add(body)
+    if not movers:
+        return xml
+    if len(parents) != 1:
+        raise ValueError('basket collision geoms must share one parent body')
+    chassis = next(iter(parents))
+    shell = ET.SubElement(chassis, 'body', name=BASKET_SHELL_BODY)
+    # Explicit inertial so moved geoms do not add a second basket mass.
+    ET.SubElement(shell, 'inertial', pos='0 0 0', mass='1e-9',
+                  diaginertia='1e-12 1e-12 1e-12')
+    for geom, body in movers:
+        body.remove(geom)
+        shell.append(geom)
+    return ET.tostring(root, encoding='unicode')
 
 
 def _read_base(directory: Path):
@@ -158,6 +203,7 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     # Normalize authored collision meshes after adding the fruit, preserving the
     # existing GPU/MJWarp coordinate-frame workaround and physical invariants.
     assembled_xml, normalization = normalize_collision_meshes(ET.tostring(root, encoding='unicode'))
+    assembled_xml = reattach_basket_collision_geoms(assembled_xml)
     model = mujoco.MjModel.from_xml_string(assembled_xml)
     data = mujoco.MjData(model)
     # Copy home coordinates by joint name. Fixed canopy support can remove
@@ -222,6 +268,7 @@ def load_fast_scene(directory):
     root = ET.fromstring(xml)
     if asset_digests(root) != manifest.get('asset_sha256', {}):
         raise ValueError('Scene asset content changed')
+    xml = reattach_basket_collision_geoms(xml)
     model = mujoco.MjModel.from_xml_string(xml)
     if model.nflex or any(model.eq_type[i] == mujoco.mjtEq.mjEQ_WELD for i in range(model.neq)):
         raise ValueError('Fast scene must contain no flex objects or weld equalities')

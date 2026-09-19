@@ -670,7 +670,7 @@ def main():
     p.add_argument('--speedrun', action='store_true',
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
     p.add_argument('--easy', action='store_true',
-                   help='Outside-crate carry start that recedes over training, privileged deposit mix, stronger shaping; not a weld')
+                   help='Outside-crate arm start, free-fruit airdrop over the opening, privileged deposit mix; not a weld')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,

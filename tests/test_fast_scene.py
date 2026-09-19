@@ -4,8 +4,33 @@ from pathlib import Path
 import tempfile
 import unittest
 import importlib.util
+import xml.etree.ElementTree as ET
 
 import numpy as np
+
+
+class FastSceneXmlTest(unittest.TestCase):
+    def test_reattach_moves_liner_off_chassis(self):
+        from treesim.kiwi_rl.fast_scene import BASKET_SHELL_BODY, reattach_basket_collision_geoms
+        xml = '''<mujoco><worldbody><body name="chassis">
+          <geom name="basket_floor" type="box" size=".1 .1 .01"/>
+          <geom name="basket_liner" type="box" size=".01 .1 .1"/>
+          <geom name="basket_visual_1" type="box" size=".02 .02 .02"/>
+          <body name="arm_link_wr1"><geom name="hand" type="sphere" size=".05"/></body>
+        </body></worldbody></mujoco>'''
+        patched = reattach_basket_collision_geoms(xml)
+        self.assertEqual(reattach_basket_collision_geoms(patched), patched)
+        root = ET.fromstring(patched)
+        shell = root.find(f'.//body[@name="{BASKET_SHELL_BODY}"]')
+        self.assertIsNotNone(shell)
+        self.assertEqual([g.get('name') for g in shell.findall('geom')],
+                         ['basket_floor', 'basket_liner'])
+        chassis = root.find('.//body[@name="chassis"]')
+        chassis_geoms = [g.get('name') for g in chassis.findall('geom')]
+        self.assertIn('basket_visual_1', chassis_geoms)
+        self.assertNotIn('basket_floor', chassis_geoms)
+        self.assertNotIn('basket_liner', chassis_geoms)
+        self.assertIsNotNone(shell.find('inertial'))
 
 
 XML = '''<mujoco>
@@ -94,6 +119,63 @@ class FastSceneTest(unittest.TestCase):
         (self.base / 'manifest.json').write_text(json.dumps(manifest))
         with self.assertRaises(ValueError):
             assemble_fast_scene(self.base)
+
+
+    def test_basket_shell_restores_arm_crate_contacts(self):
+        import mujoco
+        from treesim.kiwi_rl.fast_scene import BASKET_SHELL_BODY, reattach_basket_collision_geoms
+
+        xml = '''<mujoco>
+        <worldbody>
+          <body name="chassis" pos="0 0 0.4">
+            <freejoint/>
+            <inertial pos="0 0 0" mass="5" diaginertia="0.2 0.3 0.4"/>
+            <geom name="basket_floor" type="box" size="0.2 0.15 0.01" pos="0 0 0" contype="1" conaffinity="1"/>
+            <geom name="basket_liner" type="box" size="0.01 0.15 0.12" pos="0.19 0 0.12" contype="1" conaffinity="1"/>
+            <geom name="basket_visual_1" type="box" size="0.02 0.15 0.02" pos="0.22 0 0.2" contype="0" conaffinity="0"/>
+            <body name="arm_link_wr1" pos="0.19 0 0.12">
+              <joint name="arm" type="slide" axis="1 0 0" range="-0.5 0.5"/>
+              <geom name="hand" type="sphere" size="0.05" mass="0.2" contype="1" conaffinity="1"/>
+            </body>
+          </body>
+        </worldbody>
+        <contact>
+          <exclude body1="chassis" body2="arm_link_wr1"/>
+        </contact>
+        </mujoco>'''
+        before = mujoco.MjModel.from_xml_string(xml)
+        before_data = mujoco.MjData(before)
+        mujoco.mj_forward(before, before_data)
+        self.assertEqual(_arm_basket_contacts(before, before_data), 0)
+        self.assertAlmostEqual(float(before.body_mass[before.body('chassis').id]), 5.0, places=5)
+
+        patched = reattach_basket_collision_geoms(xml)
+        self.assertEqual(reattach_basket_collision_geoms(patched), patched)
+        after = mujoco.MjModel.from_xml_string(patched)
+        after_data = mujoco.MjData(after)
+        mujoco.mj_forward(after, after_data)
+        self.assertGreater(_arm_basket_contacts(after, after_data), 0)
+        self.assertEqual(after.body(BASKET_SHELL_BODY).parentid, after.body('chassis').id)
+        self.assertEqual(int(after.geom_bodyid[after.geom('basket_floor').id]),
+                         after.body(BASKET_SHELL_BODY).id)
+        self.assertEqual(int(after.geom_bodyid[after.geom('basket_visual_1').id]),
+                         after.body('chassis').id)
+        self.assertAlmostEqual(float(after.body_mass[after.body('chassis').id]), 5.0, places=5)
+        self.assertFalse(any(after.eq_type[i] == mujoco.mjtEq.mjEQ_WELD for i in range(after.neq)))
+
+
+def _arm_basket_contacts(model, data):
+    count = 0
+    for i in range(data.ncon):
+        names = (model.geom(int(data.contact[i].geom1)).name,
+                 model.geom(int(data.contact[i].geom2)).name)
+        bodies = (model.body(model.geom_bodyid[int(data.contact[i].geom1)]).name,
+                  model.body(model.geom_bodyid[int(data.contact[i].geom2)]).name)
+        basket = any(n.startswith(('basket_floor', 'basket_liner')) for n in names)
+        arm = any('arm_link' in b for b in bodies)
+        if basket and arm:
+            count += 1
+    return count
 
 
 if __name__ == '__main__':
