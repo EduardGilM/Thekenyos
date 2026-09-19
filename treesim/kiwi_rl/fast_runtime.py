@@ -32,6 +32,22 @@ _OVERFLOW_BITS = {
     'TACTILE': 1 << 11,
 }
 
+# MJWarp 3.13.0's convex narrowphase uses this constant to size a per-step
+# EPA horizon buffer. Doubling the scratch capacity handles larger valid
+# polytope boundaries; overflow remains enabled and latched by `_latch_state`.
+_EPA_HORIZON_CAPACITY = 48
+
+
+def _configure_epa_horizon(mjwarp, collision_convex):
+    """Increase only the pinned MJWarp 3.13.0 scratch buffer capacity."""
+    if getattr(mjwarp, '__version__', None) != '3.13.0':
+        return None
+    capacity = int(collision_convex.MJ_MAX_EPAHORIZON)
+    if capacity < _EPA_HORIZON_CAPACITY:
+        collision_convex.MJ_MAX_EPAHORIZON = _EPA_HORIZON_CAPACITY
+        capacity = _EPA_HORIZON_CAPACITY
+    return capacity
+
 
 @wp.kernel
 def _action_increment(actions: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
@@ -139,7 +155,7 @@ class FastRuntime:
 
     def __init__(self, directory, worlds=64, control_dt=.02, camera=None,
                  resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0',
-                 arm_speed_rad_s=2.5, solver_iterations=100):
+                 arm_speed_rad_s=2.5, solver_iterations=100, jaw_cap_Nm=1.0):
         if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
             raise ValueError('worlds must be an integer in [1, 4096]')
         if not np.isfinite(control_dt) or control_dt <= 0:
@@ -150,10 +166,16 @@ class FastRuntime:
             raise ValueError('arm_speed_rad_s must be finite and positive')
         if int(solver_iterations) < 1 or int(solver_iterations) > 1000:
             raise ValueError('solver_iterations must be an integer in [1, 1000]')
+        if not np.isfinite(jaw_cap_Nm) or jaw_cap_Nm <= 0:
+            raise ValueError('jaw_cap_Nm must be finite and positive')
         from .fast_scene import load_fast_scene
         import mujoco
         import mujoco_warp as mw
         wp.init()
+        # Do this before any Warp collision kernels compile. The 3.13.0
+        # narrowphase sizes its EPA horizon scratch from this module constant.
+        from mujoco_warp._src import collision_convex
+        self.epa_horizon_capacity = _configure_epa_horizon(mw, collision_convex)
         self.model, initial, self.manifest = load_fast_scene(Path(directory))
         # MJWarp does not implement the legacy disabled-midphase path.  Fast
         # scenes are assembled for the supported native/GPU midphase path.
@@ -166,6 +188,7 @@ class FastRuntime:
         self.worlds, self.control_dt = worlds, float(control_dt)
         self.arm_speed_rad_s = float(arm_speed_rad_s)
         self.solver_iterations = int(solver_iterations)
+        self.jaw_cap_Nm = float(jaw_cap_Nm)
         self.model.opt.iterations = self.solver_iterations
         self.dt = float(self.model.opt.timestep)
         self.substeps = round(self.control_dt / self.dt)
@@ -177,6 +200,9 @@ class FastRuntime:
                                     nconmax=int(nconmax), njmax=int(njmax))
             self.device = self.data.qpos.device
             self.control = WarpSpotControl(self.model, self.data, self.manifest['robot'])
+            if self.jaw_cap_Nm > self.control.contract.limits[-1]:
+                raise ValueError(f'jaw_cap_Nm exceeds the actuator limit of {self.control.contract.limits[-1]:g} Nm')
+            self.control.set_jaw_caps(np.full(self.worlds, self.jaw_cap_Nm, dtype=np.float32))
             self._initial_targets = wp.array(self.control.contract.targets, dtype=float, device=self.device)
             self._initial_qpos = wp.array(initial.qpos, dtype=float, device=self.device)
             self._initial_qvel = wp.array(initial.qvel, dtype=float, device=self.device)

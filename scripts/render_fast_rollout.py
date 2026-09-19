@@ -26,6 +26,8 @@ def main():
     p.add_argument('--gait-checkpoint', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--steps', type=int, default=300)
+    p.add_argument('--role', choices=('student', 'teacher'), default='student',
+                   help='Teacher uses privileged state; video is labelled accordingly')
     p.add_argument('--replay', type=Path, help='Re-render recorded states without another physics rollout')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=False)
@@ -40,13 +42,21 @@ def main():
         stream = torch.cuda.Stream()
         states = []
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
-            policy = build_policy().cuda().eval()
+            if a.role == 'teacher':
+                from treesim.kiwi_rl.fast_teacher import build_privileged_policy, privileged_observation
+                policy = build_privileged_policy().cuda().eval()
+            else:
+                policy = build_policy().cuda().eval()
             scene_manifest = json.loads((a.scene/'manifest.json').read_text())
-            saved = load_checkpoint(a.checkpoint, {'student': policy}, expected_meta={
-                'camera': 'hand_camera', 'camera_profile': scene_manifest['cameras']})
+            expected = ({'role': 'teacher', 'model_sha256': scene_manifest['model_sha256']}
+                        if a.role == 'teacher' else
+                        {'camera': 'hand_camera', 'camera_profile': scene_manifest['cameras']})
+            saved = load_checkpoint(a.checkpoint, {a.role: policy}, expected_meta=expected)
             arm_speed = saved['meta'].get('config', {}).get('arm_speed_rad_s', 2.5)
             solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
-            rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
+            jaw_cap = saved['meta'].get('config', {}).get('jaw_cap_Nm', .3)
+            rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,
+                             solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap)
             gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
             memory = torch.zeros(1,64,device='cuda')
             with torch.no_grad():
@@ -55,14 +65,15 @@ def main():
                         rgbd = rt.pixels()
                         states.append(rt.data.qpos.numpy()[0].copy())
                     obs = rt.observe()
-                    mean, _, _, memory = policy(rgbd, obs, memory)
+                    inputs = privileged_observation(rt) if a.role == 'teacher' else rgbd
+                    mean, _, _, memory = policy(inputs, obs, memory)
                     rt.set_gait_actions(gait(obs))
                     _, _, done, info = rt.step(mean.tanh())
                     if bool(done.any()):
                         states.append(rt.data.qpos.numpy()[0].copy())
                         break
             numerical = rt.check()
-            metadata = dict(checkpoint=str(a.checkpoint), scene=str(a.scene), frames=len(states), fps=25,
+            metadata = dict(checkpoint=str(a.checkpoint), role=a.role, scene=str(a.scene), frames=len(states), fps=25,
                             simulated_seconds=(i+1)*.02, terminated=bool(done.any()),
                             success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
                             numerical=numerical,
@@ -106,7 +117,8 @@ def main():
                 draw.text((944,y+3),label,font=font,fill='white')
             draw = ImageDraw.Draw(image)
             draw.rectangle((0,0,1280,35),fill='#17202b')
-            draw.text((16,7),f'LEARNED POLICY ROLLOUT  |  {a.checkpoint.stem}  |  t = {index/25:.2f} s',font=font,fill='white')
+            label = 'PRIVILEGED TEACHER' if metadata.get('role', a.role) == 'teacher' else 'SENSOR-ONLY POLICY'
+            draw.text((16,7),f'{label} ROLLOUT  |  {a.checkpoint.stem}  |  t = {index/25:.2f} s',font=font,fill='white')
             if index == 0: image.save(a.output/'preview.png')
             encoder.stdin.write(image.tobytes())
     finally:

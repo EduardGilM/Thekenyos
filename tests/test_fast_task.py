@@ -21,6 +21,7 @@ class FastTaskGpuTest(unittest.TestCase):
         cls.xml = '''<mujoco><option timestep=".005"/><worldbody>
           <geom name="floor" type="plane" size="2 2 .1"/>
           <body name="robot" pos="0 0 .5"><freejoint/><geom name="chassis" type="box" size=".1 .1 .1" mass="1"/>
+            <body name="arm_link_wr1"><geom name="palm" contype="0" conaffinity="0" type="box" size=".01 .01 .01"/></body>
             <body name="arm_link_fngr"><geom name="finger_pad" contype="0" conaffinity="0" type="box" size=".01 .01 .01"/></body>
             <body name="arm_link_jaw"><geom name="jaw_pad" contype="0" conaffinity="0" type="box" size=".01 .01 .01"/></body>
           </body>
@@ -59,13 +60,13 @@ class FastTaskGpuTest(unittest.TestCase):
         worldid = np.zeros(32, np.int32)
         dim = np.ones(32, np.int32)
         address = np.zeros((32, 4), np.int32)
-        geom[:4] = [[fruit, finger], [fruit, jaw], [fruit, finger], [fruit, jaw]]
-        worldid[:4] = [0, 0, 1, 1]
+        geom[:8] = [[fruit, finger], [fruit, jaw], [fruit, finger], [fruit, jaw]] * 2
+        worldid[:8] = [0, 0, 0, 0, 1, 1, 1, 1]
         self.data.contact.geom.assign(geom)
         self.data.contact.worldid.assign(worldid)
         self.data.contact.dim.assign(dim)
         self.data.contact.efc_address.assign(address)
-        self.data.nacon.assign(np.array([4], np.int32))
+        self.data.nacon.assign(np.array([8], np.int32))
         self.data.nefc.assign(np.ones(2, np.int32))
         forces = np.zeros((2, 256), np.float32); forces[:, 0] = .3
         self.data.efc.force.assign(forces)
@@ -86,6 +87,39 @@ class FastTaskGpuTest(unittest.TestCase):
             self.wp.synchronize()
             np.testing.assert_array_equal(self.task.ever_grasped.numpy(), [0, 1])
             np.testing.assert_array_equal(self.task.stable_grasp.numpy(), [0, 1])
+
+    def test_jaw_load_limit_is_per_pad_and_total_hand_load_is_diagnostic(self):
+        with self.wp.ScopedDevice('cuda:0'):
+            self._set_pad_contacts()
+            forces = np.zeros((2, 256), np.float32)
+            forces[:, 0] = 7.0
+            self.data.efc.force.assign(forces)
+            self.task.record()
+            self.wp.synchronize()
+            np.testing.assert_allclose(self.task.finger_load.numpy(), [14., 14.])
+            np.testing.assert_allclose(self.task.jaw_load.numpy(), [14., 14.])
+            np.testing.assert_allclose(self.task.hand_load.numpy(), [28., 28.])
+            np.testing.assert_array_equal(self.task.failed.numpy(), [0, 0])
+
+    def test_nonpad_palm_overload_still_fails(self):
+        with self.wp.ScopedDevice('cuda:0'):
+            fruit = self.model.geom('fruit_geom').id
+            palm = self.model.geom('palm').id
+            geom = np.zeros((32, 2), np.int32)
+            geom[0] = [fruit, palm]
+            self.data.contact.geom.assign(geom)
+            self.data.contact.worldid.assign(np.zeros(32, np.int32))
+            self.data.contact.dim.assign(np.ones(32, np.int32))
+            self.data.contact.efc_address.assign(np.zeros((32, 4), np.int32))
+            self.data.nacon.assign(np.array([1], np.int32))
+            self.data.nefc.assign(np.ones(2, np.int32))
+            forces = np.zeros((2, 256), np.float32)
+            forces[0, 0] = 16.0
+            self.data.efc.force.assign(forces)
+            self.task.record()
+            self.wp.synchronize()
+            np.testing.assert_allclose(self.task.palm_load.numpy(), [16., 0.])
+            np.testing.assert_array_equal(self.task.failed.numpy(), [1, 0])
 
     def test_gravity_scale_force_does_not_release(self):
         with self.wp.ScopedDevice('cuda:0'):

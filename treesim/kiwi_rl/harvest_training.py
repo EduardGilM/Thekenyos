@@ -77,10 +77,17 @@ class EpisodeProgress:
 
 class HarvestCollector:
     """Keep simulation state and GRU memory across optimizer batch boundaries."""
-    def __init__(self, runtime, *, stall_seconds=4., max_episode_seconds=30., guidance=1.):
+    def __init__(self, runtime, *, stall_seconds=4., max_episode_seconds=30., guidance=1.,
+                 role='student', teacher_policy=None):
+        if role not in ('teacher', 'student'):
+            raise ValueError("role must be 'teacher' or 'student'")
+        if role == 'teacher' and teacher_policy is not None:
+            raise ValueError('A teacher run cannot also load a teacher checkpoint')
         self.runtime = runtime
+        self.role, self.teacher_policy = role, teacher_policy
         runtime.reset()
         self.memory = torch.zeros(runtime.worlds,64,device=runtime.device_name)
+        self.teacher_memory = (torch.zeros_like(self.memory) if teacher_policy is not None else None)
         self.reset_mask = torch.ones(runtime.worlds,dtype=torch.bool,device=runtime.device_name)
         self.progress = EpisodeProgress(signals(runtime),
             stall_steps=round(stall_seconds/runtime.control_dt),
@@ -92,15 +99,27 @@ class HarvestCollector:
         from .ppo import tanh_logprob
         rt = self.runtime
         rows, episodes = [], []
+        from .fast_teacher import privileged_observation
         with torch.no_grad():
             initial_memory = self.memory.clone()
             for _ in range(steps):
                 obs = rt.observe().clone()
-                if self.rgbd is None or self.tick % 2 == 0:
+                privileged = privileged_observation(rt, obs) if self.role == 'teacher' or self.teacher_policy is not None else None
+                if self.role == 'student' and (self.rgbd is None or self.tick % 2 == 0):
                     self.rgbd = rt.pixels().clone()
                 self.memory *= (~self.reset_mask)[:,None]
-                mean,logstd,value,self.memory = policy(self.rgbd,obs,self.memory)
+                if self.role == 'teacher':
+                    policy_input = privileged
+                else:
+                    policy_input = self.rgbd
+                mean,logstd,value,self.memory = policy(policy_input,obs,self.memory)
                 raw = mean if deterministic else mean + logstd.exp()*torch.randn_like(mean)
+                teacher_action = None
+                if self.teacher_policy is not None:
+                    self.teacher_memory *= (~self.reset_mask)[:,None]
+                    teacher_mean,_,_,self.teacher_memory = self.teacher_policy(
+                        privileged,obs,self.teacher_memory)
+                    teacher_action = teacher_mean.tanh()
                 rt.set_gait_actions(gait(obs))
                 _,_,done,_ = rt.step(raw.tanh())
                 now = signals(rt)
@@ -108,13 +127,26 @@ class HarvestCollector:
                 ending = terminated | truncated
                 timeout_value = torch.zeros_like(value)
                 if bool(truncated.any()):
-                    _,_,timeout_value,_ = policy(rt.pixels(),rt.observe(),self.memory)
+                    final_obs = rt.observe()
+                    final_input = (privileged_observation(rt,final_obs) if self.role == 'teacher'
+                                   else (rt.pixels() if (self.tick + 1) % 2 == 0 else self.rgbd))
+                    _,_,timeout_value,_ = policy(final_input,final_obs,self.memory)
                 if store:
-                    rows.append(dict(rgbd=self.rgbd,r84=obs,raw=raw,
+                    row = dict(r84=obs,raw=raw,
                         logp=tanh_logprob(raw,mean,logstd),value=value,
                         reward=reward,terminated=terminated,truncated=truncated,
-                        timeout_value=timeout_value,reset=self.reset_mask.clone()))
+                        timeout_value=timeout_value,reset=self.reset_mask.clone(),role=self.role,
+                        kind='factual_on_policy')
+                    if self.role == 'teacher':
+                        row['privileged'] = privileged
+                    else:
+                        row['rgbd'] = self.rgbd
+                    if teacher_action is not None:
+                        row['teacher_action'] = teacher_action
+                    rows.append(row)
                 if bool(ending.any()):
+                    # Do not erase a numerically failed world's state in a reset.
+                    rt.check()
                     # Summaries are episode outcomes; each world contributes once.
                     ids = ending.nonzero(as_tuple=False).flatten()
                     packed = torch.stack((ids, now['success'][ids],
@@ -127,11 +159,20 @@ class HarvestCollector:
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
                     rt.reset(ending)
                     self.memory[ending] = 0
+                    if self.teacher_memory is not None:
+                        self.teacher_memory[ending] = 0
                     self.progress.reset(ending,signals(rt))
-                    self.rgbd = rt.pixels().clone()
+                    if self.role == 'student':
+                        # Only reset worlds receive a fresh initial frame. Do
+                        # not change another world's 25 Hz sensor delivery.
+                        self.rgbd = torch.where(ending[:,None,None,None],
+                                                rt.pixels(), self.rgbd)
                 self.reset_mask = ending
                 self.tick += 1
-            _,_,bootstrap,_ = policy(rt.pixels(),rt.observe(),self.memory)
+            final_obs = rt.observe()
+            final_input = (privileged_observation(rt,final_obs) if self.role == 'teacher'
+                           else (rt.pixels() if self.tick % 2 == 0 else self.rgbd))
+            _,_,bootstrap,_ = policy(final_input,final_obs,self.memory)
         if rows:
             rows[0]['initial_memory'] = initial_memory
         rt.check()

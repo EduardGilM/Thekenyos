@@ -204,6 +204,15 @@ Grasp metrics require sustained loaded contact on both actual finger/jaw bodies.
 Run `tests.test_harvest_training`, `tests.test_fast_ppo`, and `tests.test_fast_task`
 in the JP GPU environment with FAST_SCENE and GAIT_CHECKPOINT set after changes.
 
+The fast profile uses a 1 N·m jaw cap and a 15 N limit per jaw/non-pad contact
+group; legacy controller defaults remain separate. Teacher training uses the
+explicit `--role teacher` privileged actor/critic. Student distillation requires
+the exact teacher checkpoint and successful unguided evaluation report. Keep
+student observations RGB-D/R84 only and teacher parameters frozen during
+distillation. Run `tests.test_fast_teacher` for changes to this path.
+CTI remains gated on a competent executor and replay acceptance; process-local
+snapshots are a prerequisite, not evidence of CTI policy training or benefit.
+
 ## Continuous visual leaf roof
 
 The reproducible local capture and generation details are in README.md under

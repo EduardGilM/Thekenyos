@@ -779,6 +779,19 @@ The wall-time training budget excludes startup compilation and initial evaluatio
 the final evaluation can add a few seconds. No successful harvest is claimed by
 the launcher itself.
 
+The fast profile now uses a 1 N·m jaw torque cap. The previous 0.3 N·m cap failed
+the actual-mesh rigid-fruit hold fixture at both 200 and 500 Hz. The 1 N·m native
+fixture held within 7.6 mm; the GPU fixture held within 7.4 mm with bilateral
+contact throughout the hold and released on opening at both rates. The GPU
+matrix latched no numerical failures. Reproduce it with
+`python scripts/check_fast_grip.py --relic /path/to/relic --output /path/to/new-grip-report.json`.
+The matrix deliberately retains the failing 0.3 N·m cases. This is a grip
+bench result, not a full harvesting demonstration. The 15 N engineering limit
+applies separately to each jaw and to the non-pad robot-contact group. Previously
+the combined load from both jaws was compared against this per-jaw limit.
+Legacy controller defaults remain unchanged. The checkpoint records the fast
+torque and force-limit profile.
+
 Harvest training limits joint-target increments to 0.5 rad/s by default
 (`--arm-speed-rad-s`), compared with 2.5 rad/s in the historical reaching
 benchmark. This reduces abrupt approaches without changing the robot's collision
@@ -796,6 +809,13 @@ error report. Nonfinite state, capacity overflow and solver-limit failures still
 stop training. Checkpoints record this runtime solver override; older video replays
 retain their original 20-iteration setting.
 
+The later retry exhausted MJWarp 3.13.0's 24-edge EPA horizon scratch buffer.
+The fast runtime increases only that pinned convex-collision allocation to 48;
+it does not suppress overflow or change collision surfaces. The original failing
+state was not saved, so passing short checks does not prove long-run stability.
+New training failures preserve up to eight flagged worlds at detection before
+episode reset; these are diagnostic states, not exact first-failure substeps.
+
 Camera audit after the retry found a dynamic-rendering bug: the GPU sensor did
 not refit its scene BVH after motion, so moved fingers or fruit could be missed.
 `WarpRGBDRig.capture` now refits before each render. The moving-occluder regression
@@ -805,14 +825,45 @@ runs therefore do not validate realistic moving occlusion. At replay frame 23
 sees the fruit through it. The corrected GPU view restores the occlusion. This
 does not validate the imported finger mesh against physical camera footage.
 
-The fast harvesting launcher trains the sensor-only reaching architecture directly
-with PPO. Privileged simulator state supplies rewards and evaluation, not teacher
-actions or distillation targets. It is not the teacher-to-student pipeline in the
-Devin Megaplan (`~/.devin/plans/plan-79cd63f6dc176fcc.md`, work package H includes
-counterfactual replay). Teacher/student and intent components elsewhere in this
-repository are not evidence that the fast launcher uses them. Establish a verified
-harvesting executor and complete snapshot replay before evaluating counterfactual
-decision targets under a matched simulation budget.
+The historical fast harvesting runs trained the sensor-only reaching architecture
+directly with PPO. Privileged simulator state supplied rewards and evaluation,
+not teacher actions or distillation targets. Those runs were not the planned
+teacher-to-student pipeline. The new explicit teacher role trains a privileged
+recurrent actor and critic with the same seven actions and physical evaluator.
+Student distillation uses a frozen learned teacher on states visited by the
+sensor-only student. It requires successful evaluation evidence for the exact
+teacher checkpoint; an unverified scripted controller is not a substitute.
+
+Counterfactual training remains disabled until there is a successful harvesting
+executor and verified continuation replay. `treesim/kiwi_rl/counterfactual.py`
+provides process-local snapshot checks for the fast profile, not a trained CTI
+decision head. Work package H in the Devin Megaplan requires matched initial
+state and randomness, a frozen continuation policy, final physical outcomes,
+separate counterfactual data, and equal-compute comparisons. Snapshot code alone
+does not establish any CTI learning benefit.
+
+Train the privileged recurrent teacher on a training scene and evaluate it on a
+distinct held-out scene. The report includes the exact checkpoint hash, episode
+count and unguided physical success. Student DAgger requires that report to show
+at least 32 held-out episodes, at least 50% success and no numerical failures;
+it does not start automatically.
+The current farther-pose evaluation scene has the same orchard layout; passing
+that screen alone does not establish generalization to new orchard geometry.
+
+```bash
+python scripts/train_harvest_fast.py --role teacher --scene /path/to/train-scene \
+  --eval-scene /path/to/held-out-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --output /path/to/teacher-run --eval-worlds 32 --teacher-min-eval-episodes 32
+python scripts/train_harvest_fast.py --role student --scene /path/to/train-scene \
+  --eval-scene /path/to/held-out-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --teacher-checkpoint /path/to/teacher-run/checkpoint-000123.pt \
+  --teacher-report /path/to/teacher-run/report.json --output /path/to/student-run
+```
+
+`scripts/probe_fast_harvest.py` tests privileged scripted IK waypoints through
+the actual fast runtime. It never changes fruit poses or adds a hand attachment.
+Its reports distinguish sustained grasp, detachment and physical success; its
+recorded states are diagnostic evidence, not accepted imitation demonstrations.
 
 On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
 about 157,000 policy transitions/s including PPO updates (three-update screen,

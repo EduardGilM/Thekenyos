@@ -30,7 +30,8 @@ FORCE_CHECKS = {
 
 @wp.kernel
 def _clear_contacts(hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=int), ground_hits: wp.array(dtype=int),
-                     finger_hits: wp.array(dtype=int), jaw_hits: wp.array(dtype=int), hand_load: wp.array(dtype=float)):
+                     finger_hits: wp.array(dtype=int), jaw_hits: wp.array(dtype=int), hand_load: wp.array(dtype=float),
+                     finger_load: wp.array(dtype=float), jaw_load: wp.array(dtype=float), palm_load: wp.array(dtype=float)):
     world = wp.tid()
     hand_hits[world] = 0
     basket_hits[world] = 0
@@ -38,6 +39,9 @@ def _clear_contacts(hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=
     finger_hits[world] = 0
     jaw_hits[world] = 0
     hand_load[world] = 0.
+    finger_load[world] = 0.
+    jaw_load[world] = 0.
+    palm_load[world] = 0.
 
 
 @wp.kernel
@@ -46,7 +50,9 @@ def _contact_pass(
     dim: wp.array(dtype=int), address: wp.array2d(dtype=int), efc_force: wp.array2d(dtype=float),
     nefc: wp.array(dtype=int), fruit_geom: wp.array(dtype=int), kind: wp.array(dtype=int),
     hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=int), ground_hits: wp.array(dtype=int),
-    finger_hits: wp.array(dtype=int), jaw_hits: wp.array(dtype=int), hand_load: wp.array(dtype=float), rows_per_contact: int,
+    finger_hits: wp.array(dtype=int), jaw_hits: wp.array(dtype=int), hand_load: wp.array(dtype=float),
+    finger_load: wp.array(dtype=float), jaw_load: wp.array(dtype=float), palm_load: wp.array(dtype=float),
+    rows_per_contact: int,
 ):
     contact = wp.tid()
     if contact >= nacon[0]:
@@ -70,13 +76,21 @@ def _contact_pass(
         row = address[contact, row_index]
         if row >= 0 and row < nefc[world]:
             load += wp.abs(efc_force[world, row])
-    if group == HAND_GROUP or group == FNGR_GROUP or group == JAW_GROUP:
+    if group == HAND_GROUP:
         wp.atomic_add(hand_hits, world, 1)
         wp.atomic_add(hand_load, world, load)
-        if group == FNGR_GROUP and load > 0.2:
-            wp.atomic_add(finger_hits, world, 1)
-        elif group == JAW_GROUP and load > 0.2:
-            wp.atomic_add(jaw_hits, world, 1)
+        wp.atomic_add(palm_load, world, load)
+    elif group == FNGR_GROUP or group == JAW_GROUP:
+        wp.atomic_add(hand_hits, world, 1)
+        wp.atomic_add(hand_load, world, load)
+        if group == FNGR_GROUP:
+            wp.atomic_add(finger_load, world, load)
+            if load > 0.2:
+                wp.atomic_add(finger_hits, world, 1)
+        elif group == JAW_GROUP:
+            wp.atomic_add(jaw_load, world, load)
+            if load > 0.2:
+                wp.atomic_add(jaw_hits, world, 1)
     elif group == 2:
         wp.atomic_add(basket_hits, world, 1)
     elif group == 3:
@@ -90,7 +104,8 @@ def _record(
     subtree_com: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33), cvel: wp.array2d(dtype=wp.spatial_vector),
     eq_active: wp.array2d(dtype=wp.bool), fruit_body: wp.array(dtype=int), equality_index: wp.array(dtype=int),
     hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=int), ground_hits: wp.array(dtype=int),
-    hand_load: wp.array(dtype=float), dt: float, detached: wp.array(dtype=wp.uint8),
+    finger_load: wp.array(dtype=float), jaw_load: wp.array(dtype=float), palm_load: wp.array(dtype=float),
+    dt: float, detached: wp.array(dtype=wp.uint8),
     hand_contact: wp.array(dtype=wp.uint8), basket_contact: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
     bilateral_contact: wp.array(dtype=wp.uint8), stable_grasp: wp.array(dtype=wp.uint8), ever_grasped: wp.array(dtype=wp.uint8),
     grasp_time: wp.array(dtype=float), finger_hits: wp.array(dtype=int), jaw_hits: wp.array(dtype=int),
@@ -103,7 +118,9 @@ def _record(
         return
     fruit_body_id = fruit_body[0]
     target_eq = equality_index[0]
-    jaws = hand_load[world]
+    jaws = wp.max(finger_load[world], jaw_load[world])
+    nonpad_load = palm_load[world]
+    maximum_load = wp.max(jaws, nonpad_load)
     hand_contact[world] = wp.uint8(hand_hits[world] > 0)
     bilateral_contact[world] = wp.uint8(finger_hits[world] > 0 and jaw_hits[world] > 0)
     if bilateral_contact[world] != 0:
@@ -115,8 +132,8 @@ def _record(
         ever_grasped[world] = wp.uint8(1)
     basket_contact[world] = wp.uint8(basket_hits[world] > 0)
     ground_contact[world] = wp.uint8(ground_contact[world] != 0 or ground_hits[world] > 0)
-    if jaws > JAW_FORCE_LIMIT_N:
-        damage_proxy[world] = wp.max(damage_proxy[world], (jaws - JAW_FORCE_LIMIT_N) / JAW_FORCE_LIMIT_N)
+    if maximum_load > JAW_FORCE_LIMIT_N:
+        damage_proxy[world] = wp.max(damage_proxy[world], (maximum_load - JAW_FORCE_LIMIT_N) / JAW_FORCE_LIMIT_N)
 
     stem_squared = float(0.)
     target_eq = equality_index[0]
@@ -160,7 +177,7 @@ def _record(
         settle_time[world] = 0.
     up = chassis_rotation[2, 2]
     fallen = xpos[world, chassis][2] < .30 or up < .6967067
-    if ground_contact[world] != 0 or fallen or jaws > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
+    if ground_contact[world] != 0 or fallen or maximum_load > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
     elif settle_time[world] >= SETTLE_TIME_S and detached[world] != 0 and hand_contact[world] == 0:
         success[world] = wp.uint8(1)
@@ -170,7 +187,9 @@ def _record(
 def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), hand_contact: wp.array(dtype=wp.uint8),
            basket_contact: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
            bilateral_contact: wp.array(dtype=wp.uint8), stable_grasp: wp.array(dtype=wp.uint8), ever_grasped: wp.array(dtype=wp.uint8),
-           grasp_time: wp.array(dtype=float), hand_load: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
+           grasp_time: wp.array(dtype=float), hand_load: wp.array(dtype=float), finger_load: wp.array(dtype=float),
+           jaw_load: wp.array(dtype=float), palm_load: wp.array(dtype=float),
+           damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
            stem_force: wp.array(dtype=float),
            success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), eq_active: wp.array2d(dtype=wp.bool),
            target_eq: int):
@@ -186,6 +205,9 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
         grasp_time[world] = 0.
         stem_force[world] = 0.
         hand_load[world] = 0.
+        finger_load[world] = 0.
+        jaw_load[world] = 0.
+        palm_load[world] = 0.
         damage_proxy[world] = 0.
         settle_time[world] = 0.
         success[world] = wp.uint8(0)
@@ -248,6 +270,9 @@ class FastHarvestTask:
         self.grasp_time = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.stem_force = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.hand_load = wp.zeros(self.worlds, dtype=float, device=self.device)
+        self.finger_load = wp.zeros(self.worlds, dtype=float, device=self.device)
+        self.jaw_load = wp.zeros(self.worlds, dtype=float, device=self.device)
+        self.palm_load = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.damage_proxy = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.settle_time = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.success = wp.zeros_like(self.detached)
@@ -267,17 +292,17 @@ class FastHarvestTask:
     def record(self):
         wp.launch(_clear_contacts, dim=self.worlds,
                   inputs=[self._hand_hits, self._basket_hits, self._ground_hits, self._finger_hits, self._jaw_hits,
-                          self.hand_load], device=self.device)
+                          self.hand_load, self.finger_load, self.jaw_load, self.palm_load], device=self.device)
         wp.launch(_contact_pass, dim=self.data.contact.geom.shape[0], inputs=[
             self.data.nacon, self.data.contact.geom, self.data.contact.worldid, self.data.contact.dim,
             self.data.contact.efc_address, self.data.efc.force, self.data.nefc, self.fruit_geom, self.kind,
             self._hand_hits, self._basket_hits, self._ground_hits, self._finger_hits, self._jaw_hits,
-            self.hand_load, self.rows_per_contact], device=self.device)
+            self.hand_load, self.finger_load, self.jaw_load, self.palm_load, self.rows_per_contact], device=self.device)
         wp.launch(_record, dim=self.worlds, inputs=[
             self.data.nefc, self.data.efc.force, self._efc_type, self._efc_id, self.data.xpos, self.data.xipos,
             self.data.subtree_com, self.data.xmat, self.data.cvel, self.eq_active,
             self.fruit_body, self.equality_index, self._hand_hits, self._basket_hits, self._ground_hits,
-            self.hand_load, float(self.model.opt.timestep), self.detached, self.hand_contact,
+            self.finger_load, self.jaw_load, self.palm_load, float(self.model.opt.timestep), self.detached, self.hand_contact,
             self.basket_contact, self.ground_contact, self.bilateral_contact, self.stable_grasp, self.ever_grasped,
             self.grasp_time, self._finger_hits, self._jaw_hits, self.stem_force, self.damage_proxy, self.settle_time,
             self.success, self.failed, self.chassis, wp.vec3(*RADII_M), wp.vec3(*CENTER),
@@ -299,11 +324,13 @@ class FastHarvestTask:
                 raise ValueError('mask must be a Warp array or CUDA Torch tensor')
         wp.launch(_reset, dim=self.worlds, inputs=[mask, self.detached, self.hand_contact, self.basket_contact,
                    self.ground_contact, self.bilateral_contact, self.stable_grasp, self.ever_grasped, self.grasp_time,
-                   self.stem_force, self.hand_load, self.damage_proxy, self.settle_time,
+                   self.hand_load, self.finger_load, self.jaw_load, self.palm_load, self.damage_proxy,
+                   self.settle_time, self.stem_force,
                    self.success, self.failed, self.eq_active, self.equality_id], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,
                 'damage_proxy': self.damage_proxy, 'hand_contact': self.hand_contact,
                 'bilateral_contact': self.bilateral_contact, 'stable_grasp': self.stable_grasp,
-                'ever_grasped': self.ever_grasped}
+                'ever_grasped': self.ever_grasped, 'finger_load_N': self.finger_load,
+                'jaw_load_N': self.jaw_load, 'palm_load_N': self.palm_load, 'hand_load_N': self.hand_load}

@@ -12,9 +12,22 @@ class FastRuntimeContractTest(unittest.TestCase):
         params = inspect.signature(FastRuntime).parameters
         self.assertEqual(params['arm_speed_rad_s'].default, 2.5)
         self.assertEqual(params['solver_iterations'].default, 100)
+        self.assertEqual(params['jaw_cap_Nm'].default, 1.0)
         self.assertEqual(_OVERFLOW_BITS['NJMAX_NNZ'], 2)
         self.assertEqual(_OVERFLOW_BITS['BROADPHASE'], 4)
         self.assertEqual(_OVERFLOW_BITS['NARROWPHASE'], 8)
+
+    @unittest.skipUnless(importlib.util.find_spec('warp'), 'Warp required')
+    def test_epa_horizon_workaround_is_pinned_and_only_resizes_scratch(self):
+        from types import SimpleNamespace
+        from treesim.kiwi_rl.fast_runtime import _configure_epa_horizon
+
+        convex = SimpleNamespace(MJ_MAX_EPAHORIZON=24)
+        self.assertEqual(_configure_epa_horizon(SimpleNamespace(__version__='3.13.0'), convex), 48)
+        self.assertEqual(convex.MJ_MAX_EPAHORIZON, 48)
+        other = SimpleNamespace(MJ_MAX_EPAHORIZON=24)
+        self.assertIsNone(_configure_epa_horizon(SimpleNamespace(__version__='3.14.0'), other))
+        self.assertEqual(other.MJ_MAX_EPAHORIZON, 24)
 
     @unittest.skipUnless(importlib.util.find_spec('warp'), 'Warp required')
     def test_diagnostics_decode_backend_bits_without_world_dump(self):
@@ -64,6 +77,8 @@ class FastRuntimeTest(unittest.TestCase):
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
             runtime=FastRuntime(os.environ['FAST_SCENE'],worlds=2)
+            np.testing.assert_allclose(runtime.control.jaw_cap.numpy(), [1., 1.])
+            self.assertEqual(runtime.epa_horizon_capacity, 48)
             before=runtime.control.targets.numpy().copy()
             actions=torch.full((2,7),.5,device='cuda:0')
             runtime.step(actions)

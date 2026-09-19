@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import json
+import math
 import sys
 import time
 
@@ -44,10 +45,17 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False):
     return rows, bootstrap
 
 
-def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.99, check_replay=True):
+def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.99, check_replay=True,
+           teacher_coef=0.):
     import torch
     from treesim.kiwi_rl.ppo import compute_gae_torch, tanh_logprob
+    if any(row.get('kind', 'factual_on_policy') != 'factual_on_policy' for row in rows):
+        raise ValueError('PPO update accepts factual on-policy rows only')
+    if teacher_coef and any('teacher_action' not in row for row in rows):
+        raise ValueError('teacher_coef requires teacher actions on every rollout row')
     rewards = torch.stack([r['reward'] for r in rows])
+    if not math.isfinite(teacher_coef) or teacher_coef < 0:
+        raise ValueError('teacher_coef must be finite and nonnegative')
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
     truncated = torch.stack([r.get('truncated', torch.zeros_like(r['terminated'])) for r in rows])
@@ -60,17 +68,24 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
     advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
     # Sequence minibatches bound camera activation memory as worlds scale.
     batch_size = min(minibatch_worlds, rewards.shape[1])
+    role = rows[0].get('role', 'student')
+    if any(row.get('role', role) != role for row in rows):
+        raise ValueError('PPO update cannot mix teacher and student rows')
+    observation_key = 'privileged' if role == 'teacher' else 'rgbd'
+    if any(observation_key not in row for row in rows):
+        raise ValueError(f'{role} PPO rows are missing {observation_key} observations')
     metrics = []
     optimizer.zero_grad(set_to_none=True)
     for start in range(0, rewards.shape[1], batch_size):
         sl = slice(start, start + batch_size)
         memory = rows[0].get('initial_memory', torch.zeros_like(rows[0]['r84'][:, :64]))[sl].detach()
-        logps, predictions = [], []
+        logps, predictions, bounded_actions = [], [], []
         for row in rows:
             memory = memory * (~row['reset'][sl])[:, None]
-            mean, logstd, value, memory = policy(row['rgbd'][sl], row['r84'][sl], memory)
+            mean, logstd, value, memory = policy(row[observation_key][sl], row['r84'][sl], memory)
             logps.append(tanh_logprob(row['raw'][sl], mean, logstd))
             predictions.append(value)
+            bounded_actions.append(mean.tanh())
         logratio = torch.stack(logps) - torch.stack([r['logp'][sl] for r in rows])
         ratio = logratio.exp()
         kl = ((ratio - 1.) - logratio).mean()
@@ -84,13 +99,22 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
         actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
         critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
         loss = actor + .5 * critic
+        teacher_loss = rewards.new_zeros(())
+        if teacher_coef and 'teacher_action' in rows[0]:
+            teacher = torch.stack([r['teacher_action'][sl] for r in rows])
+            if not torch.isfinite(teacher).all():
+                raise ValueError('teacher actions must be finite')
+            distill = (torch.stack(bounded_actions) - teacher).square().mean()
+            teacher_loss = distill
+            loss = loss + teacher_coef * distill
         # Accumulate across every world before stepping: a KL stop after the
         # first tiny minibatch would waste nearly all collected experience.
         (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
-        metrics.append((float(loss.detach()), float(kl.detach())))
+        metrics.append((float(loss.detach()), float(kl.detach()), float(teacher_loss.detach())))
     grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
     optimizer.step()
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
+                teacher_mse=sum(m[2] for m in metrics)/len(metrics),
                 grad_norm=float(grad), minibatches=len(metrics), optimized_transitions=int(rewards.numel()),
                 reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)))
 

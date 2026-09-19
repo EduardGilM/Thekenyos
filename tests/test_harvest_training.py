@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 import torch
 from treesim.kiwi_rl.harvest_training import EpisodeProgress
 
@@ -78,6 +79,96 @@ class ProgressTest(unittest.TestCase):
         intact=dict(success=0.,physical_failure=0.,grasp=0.,closest_distance_m=.2)
         destructive=dict(success=0.,physical_failure=1.,grasp=1.,closest_distance_m=.01)
         self.assertGreater(evaluation_score(intact),evaluation_score(destructive))
+
+
+class _CameraRuntime:
+    """Small CPU fake for collector camera delivery and reset semantics."""
+    def __init__(self, *, end_first_world=False):
+        self.worlds, self.device_name, self.control_dt = 2, 'cpu', .02
+        self.chassis, self.fruit_body = 0, 1
+        self.data = type('Data', (), {})()
+        self.data.xpos = torch.tensor([[[0., 0., 0.], [.2, 0., 0.]],
+                                       [[0., 0., 0.], [.2, 0., 0.]]])
+        self.data.xmat = torch.eye(3).repeat(2, 2, 1, 1)
+        self._distance = torch.tensor([.2, .2])
+        self.task = type('Task', (), {})()
+        for name in ('ever_grasped', 'stable_grasp', 'detached', 'hand_contact',
+                     'success', 'failed'):
+            setattr(self.task, name, torch.zeros(2, dtype=torch.bool))
+        self.task.stem_force = torch.zeros(2)
+        self.camera_frames = 0
+        self.step_count = 0
+        self.end_first_world = end_first_world
+
+    def reset(self, mask=None):
+        if mask is None:
+            mask = torch.ones(2, dtype=torch.bool)
+        self.task.success[mask] = False
+        self.task.failed[mask] = False
+
+    def observe(self):
+        return torch.zeros(2, 84)
+
+    def pixels(self):
+        self.camera_frames += 1
+        return torch.stack([torch.full((5, 2, 2), self.camera_frames * 10 + world)
+                            for world in range(self.worlds)])
+
+    def set_gait_actions(self, actions):
+        pass
+
+    def step(self, actions):
+        done = torch.zeros(2, dtype=torch.bool)
+        if self.end_first_world and self.step_count == 0:
+            self.task.success[0] = True
+            done[0] = True
+        self.step_count += 1
+        return None, None, done, {}
+
+    def check(self):
+        pass
+
+
+class _CameraPolicy:
+    def __init__(self):
+        self.inputs = []
+
+    def __call__(self, rgbd, obs, memory):
+        self.inputs.append(rgbd.clone())
+        return torch.zeros(2, 7), torch.zeros(7), torch.zeros(2), memory
+
+
+class CameraClockTest(unittest.TestCase):
+    def setUp(self):
+        import warp as wp
+        self.wp_patch = patch.object(wp, 'to_torch', side_effect=lambda value: value)
+        self.wp_patch.start()
+
+    def tearDown(self):
+        self.wp_patch.stop()
+
+    @staticmethod
+    def gait(obs):
+        return torch.zeros(2, 12)
+
+    def test_masked_episode_reset_keeps_other_world_camera_frame(self):
+        from treesim.kiwi_rl.harvest_training import HarvestCollector
+        runtime = _CameraRuntime(end_first_world=True)
+        policy = _CameraPolicy()
+        collector = HarvestCollector(runtime, role='student', stall_seconds=10., max_episode_seconds=20.)
+        collector.collect(policy, self.gait, 2, deterministic=True)
+        self.assertTrue(torch.equal(policy.inputs[0][1], policy.inputs[1][1]))
+        self.assertTrue(torch.all(policy.inputs[1][0] == 20))
+        self.assertTrue(torch.all(policy.inputs[1][1] == 11))
+
+    def test_odd_tick_bootstrap_uses_held_camera_frame(self):
+        from treesim.kiwi_rl.harvest_training import HarvestCollector
+        runtime = _CameraRuntime()
+        policy = _CameraPolicy()
+        collector = HarvestCollector(runtime, role='student', stall_seconds=10., max_episode_seconds=20.)
+        collector.collect(policy, self.gait, 1, deterministic=True)
+        self.assertEqual(runtime.camera_frames, 1)
+        self.assertTrue(torch.equal(policy.inputs[0], policy.inputs[1]))
 
 
 @unittest.skipUnless(os.environ.get('FAST_SCENE') and os.environ.get('GAIT_CHECKPOINT'),'JP scene and gait required')
