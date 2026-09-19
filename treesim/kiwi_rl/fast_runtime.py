@@ -146,7 +146,10 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     episode_time[world] = episode_time[world] + dt
     timed_out[world] = wp.uint8(episode_time[world] >= timeout_s[world])
     terminated[world] = wp.uint8(fallen or failed[world] != 0 or success[world] != 0 or timed_out[world] != 0)
-    if terminated[world] != 0 and success[world] == 0 and fail_paid[world] == 0:
+    # Ground dumps already pay W_LOSS and end the episode. Putting the
+    # −10000 miss on every spill taught easy33 to flee (basket XY 0.42→1.23 m).
+    # Keep the jackpot for a true timeout without a settled deposit.
+    if timed_out[world] != 0 and success[world] == 0 and fail_paid[world] == 0:
         r = r + fail_w[world]
         fail_paid[world] = wp.uint8(1)
     reward[world] = r

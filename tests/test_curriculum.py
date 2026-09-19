@@ -274,6 +274,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('self._shaping_length', src)
         self.assertIn('self._deposit_w', src)
         self.assertIn('self._fail_w', src)
+        self.assertIn('timed_out[world] != 0 and success[world] == 0', src)
         self.assertIn('[1, 10000]', src)
         self.assertIn('[-10000, 0]', src)
         self.assertIn('[0, 50]', src)

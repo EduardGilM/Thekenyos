@@ -142,6 +142,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('self._deposit_w', runtime_src)
         self.assertIn('self._fail_w', runtime_src)
         self.assertIn('fail_paid', runtime_src)
+        self.assertIn('timed_out[world] != 0 and success[world] == 0', runtime_src)
         self.assertIn('HOLD_SWEEP_CLEARANCE_M', runtime_src)
         self.assertIn('start_over_opening', runtime_src)
         self.assertIn('easy_over_opening_local_m', runtime_src)

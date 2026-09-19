@@ -102,8 +102,9 @@ EASY_PRESET = {
     'start_z_span_m': 0.08,
     # +20 lost to -25 ground; +500 still vanished after advantage
     # normalization and the 0.2 PPO clip. ±10000 is an engineering
-    # jackpot / miss so a rare settled deposit or a timeout can move
-    # the student. Not a measured value.
+    # jackpot / miss so a rare settled deposit or a *timeout* can move
+    # the student. Ground dumps keep W_LOSS only: paying −10000 on every
+    # spill made easy33 flee the crate. Not a measured value.
     'deposit_reward': 10000.0,
     'fail_reward': -10000.0,
     # Clip 0.5, low entropy, high LR and more epochs: push π toward
