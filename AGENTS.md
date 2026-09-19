@@ -38,7 +38,13 @@ already present. State a short plan before substantial implementation.
 - A force-only stem or rendered line does not establish physical stem contact.
   Native stalk changes require hand/stalk and fruit/stalk contact checks at two
   timesteps, including after detachment. Keep native and orchard/GPU support
-  separate: the current collidable stalk exists only in the native bench.
+  separate: the collidable stalk exists in the native bench and standalone full-Spot
+  assisted fixture, not the default orchard/GPU environment.
+- Full-cycle assisted changes require `scripts/assisted_harvest_cycle.py` at
+  20 and 10 microseconds, numerical result checks and video inspection. Preserve
+  load-triggered detachment, assist removal before gravity deposition and the
+  final settled-in-basket gate. A successful assisted cycle is not an RL or
+  contact-only grasp demonstration.
 - A stem must transmit load at its attachment site. Apply equal/opposite forces
   and moment arms. Detachment must respond to physical contact as well as pulls.
 - Damage and spill state must be irreversible within an episode. Penalize a
