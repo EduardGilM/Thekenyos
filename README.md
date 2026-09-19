@@ -381,6 +381,110 @@ Agent integration rules:
   images, videos, metrics and external robot assets out of Git. Do not change
   the pinned physics dependencies to make a run pass.
 
+### Spot A-to-B terrain navigation
+
+This separate, terrain-only task walks the floating-base Spot with its arm in
+RELIC's ready pose, without canopy obstacles, basket or fruit. It reuses the
+physical seeded noise heightfield and existing torque-limited pretrained gait.
+A scripted goal tracker supplies body-frame velocity commands; **this is
+pretrained inference, not a newly trained navigation policy**. No chassis poses
+are prescribed during the rollout.
+
+```bash
+python -m pip install gymnasium==1.3.0
+python scripts/navigate_spot.py --relic ../relic --device cuda:0 \
+  --start -2 0 --goal 2 0 --seed 42 --terrain-amplitude .05 \
+  --output output/spot-navigation
+```
+
+The launcher uses NVIDIA EGL without a desktop display and refuses a rendering
+fallback. Physics runs on the selected device (CUDA by default); the small ONNX
+network runs on CPU. Outputs are `navigation.mp4` (1280×720, 25 fps, real time),
+`start.png`, `final.png`, `metrics.json`, and a 50 Hz `trajectory.json` containing
+observations, actions, next observations, reward terms and termination flags.
+Metrics include dependency versions, source hashes and the external RELIC revision.
+The render-only model uses RELIC's original visual meshes, copies the exact
+physical heightfield and mirrors every simulated body pose; it never steps
+physics or commands the robot. Use a new output directory for each run;
+existing outputs are never overwritten. Add
+`--no-video` for numerical runs, `--device cpu` for native CPU physics,
+`--physics-hz 2000` for timestep comparison, or `--stand` for the matched-seed
+zero-command baseline. A failed navigation exits nonzero and keeps diagnostics.
+
+Terrain controls are `--terrain-amplitude` (height range, metres),
+`--terrain-wavelength` (metres), and `--terrain-extent` (half-width, metres).
+`--seed` seeds an episode RNG which samples the terrain seed; both are recorded.
+Spawn height covers a sampled 1.4×1.4 m footprint. Endpoints and the moving
+chassis must stay at least 1 m from the heightfield edge. These terrain and
+clearance choices are engineering assumptions, not calibrated traversability.
+
+The independent Gymnasium interface prepares **high-level navigation RL**:
+
+```python
+import gymnasium as gym
+import treesim.spot_navigation
+
+env = gym.make('Thekenyos/SpotNavigation-v0', relic='../relic', device='cuda:0')
+obs, info = env.reset(seed=42)
+obs, reward, terminated, truncated, info = env.step([0.5, 0.0, 0.0])
+env.close()
+```
+
+- `NavigationTask` configures A/B, terrain, horizon and physics rate. Each reset
+  rebuilds terrain, robot, solver, gait history and CUDA graph. Reusing a seed
+  reproduces initialization; GPU trajectories are not bitwise deterministic.
+- Actions are normalized `[forward, lateral, yaw]` in `[-1,1]`, scaled to
+  `[0.4 m/s, 0.25 m/s, 0.7 rad/s]`, at 50 Hz. RELIC remains the frozen low-level
+  gait. This interface does not train leg torques or the harvesting arm.
+- Observations contain the body-frame goal offset, base velocity, projected
+  gravity, 19 joint positions/velocities, previous navigation and gait actions,
+  goal-hold duration and remaining time. The base-velocity vector stores linear
+  m/s first, angular rad/s second; joint order is `treesim.spot.LEGS + ARM`.
+  They are ideal simulator localization/proprioception, not validated sensors;
+  no terrain map or hidden terrain parameters are actor observations.
+- Success requires distance ≤0.20 m, horizontal speed <0.10 m/s, yaw rate
+  <0.15 rad/s and tilt <0.35 rad for 0.5 s. Falls (clearance <0.25 m or tilt
+  >1 rad) and boundary exits terminate. The 30 s horizon truncates. Fall,
+  boundary and nonfinite-body flags latch at physics substeps on-device and
+  are reported at the next 50 Hz step; numerical failures raise rather than
+  returning a usable training transition. The harvesting substep oracle is
+  unchanged.
+- Reward terms are distance progress in metres, −0.002 per control step,
+  −0.001 times squared action change, +10 success, and −10 fall/boundary failure.
+  These are provisional navigation shaping choices. Evaluate actual goal/fall
+  rates, not reward alone. No trainer or trained checkpoint is included.
+- This is a correctness-first single-environment interface with host transfers
+  for gait inference/observations and rebuilding resets, not a GPU-vectorized
+  training system. Rougher terrain, randomized goals, sensing noise, obstacles,
+  payloads and many-seed evaluation remain separate validation work.
+
+```bash
+SPOT_NAV_RELIC=../relic SPOT_NAV_DEVICE=cuda:0 \
+  python -m unittest discover -s tests -p test_spot_navigation.py -v
+python scripts/navigate_spot.py --relic ../relic --seed 42 --stand \
+  --seconds 15 --no-video --output output/spot-navigation-stand
+python scripts/navigate_spot.py --relic ../relic --seed 42 --physics-hz 2000 \
+  --no-video --output output/spot-navigation-halfstep
+```
+
+Navigation screen on an NVIDIA L4, 19 September 2026 (5 cm terrain height range):
+
+| Episode | Physics timestep | Outcome | Simulated time | Final goal error |
+|---|---|---|---|---|
+| Seed 42, A=(-2,0), B=(2,0) | 1 ms | Success | 16.30 s | 9.93 cm |
+| Same seed and route | 0.5 ms | Success | 15.72 s | 9.92 cm |
+| Seed 43, A=(-2,-1), B=(2,1) | 1 ms | Success | 14.40 s | 13.46 cm |
+| Seed 42, zero-command baseline | 1 ms | Upright through horizon | 20 s | Not a goal attempt |
+
+The recorded seed-42 run travelled 4.13 m with maximum sampled tilt 4.66°.
+The standing baseline drifted about 9.5 cm net. Both timestep runs passed the
+same goal/settling criteria; this is not a claim of identical trajectories or
+formal contact convergence. Earlier EGL initialization failure diagnostics were
+retained before correcting import order. Full visual meshes and the final
+MP4 were inspected. The [local video](output/spot-navigation-visual/navigation.mp4)
+and [metrics](output/spot-navigation-visual/metrics.json) are generated artifacts,
+not tracked files. Many-seed robustness and rougher-terrain training remain untested.
+
 ### Spot with a loaded basket
 
 ```bash

@@ -151,3 +151,20 @@ In mixed rigid/flex GPU contacts, valid geom IDs take precedence over stale flex
 IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
 than identifying fruit contact from `contact.flex` alone. Numerical overflow,
 nonfinite states and element inversion must remain latched across substeps.
+
+## Terrain navigation checks
+
+`treesim.spot_navigation` is separate from harvesting: frozen RELIC gait plus
+high-level velocity actions. Test with:
+
+```bash
+SPOT_NAV_RELIC=../relic SPOT_NAV_DEVICE=cuda:0 python -m unittest discover -s tests -p test_spot_navigation.py -v
+```
+
+Use the registered Gymnasium spec for its GPU nondeterminism declaration;
+keep explicit seeded-reset and graph-versus-eager numerical comparisons.
+For this pinned stack, the navigation launcher must set `MUJOCO_GL=egl` before
+importing MuJoCo. Native solver conversion omits visual-only robot meshes;
+the navigation renderer mirrors original URDF visuals and the exact physical
+heightfield into a separate, never-stepped model. Preserve the render/physics
+pose and terrain equivalence checks rather than changing collisions for looks.
