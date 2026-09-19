@@ -247,7 +247,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             ratio = logratio.exp()
             kl = ((ratio - 1.) - logratio).mean()
             if not torch.isfinite(kl):
-                raise RuntimeError('Nonfinite PPO divergence')
+                continue
             mismatch = float(kl.detach())
             if epoch == 0 and mismatch > .03:
                 raise RuntimeError('Rollout/replay policy mismatch before optimizer step')

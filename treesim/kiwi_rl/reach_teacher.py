@@ -136,6 +136,22 @@ def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer
     return tcp + (delta / dist) * min(max(dist, min_d), max_d)
 
 
+def _joint_actuator_id(model, qposadr):
+    """Actuator transmitting to the joint that owns ``qposadr``, or None."""
+    qposadr = int(qposadr)
+    joint_id = None
+    for index in range(int(model.njnt)):
+        if int(model.jnt_qposadr[index]) == qposadr:
+            joint_id = int(index)
+            break
+    if joint_id is None:
+        return None
+    for index in range(int(model.nu)):
+        if int(model.actuator_trnid[index, 0]) == joint_id:
+            return int(index)
+    return None
+
+
 def _pad_geom_ids(model):
     """Collision geoms on the moving finger vs the fixed jaw. Visuals are skipped."""
     jaw, finger = [], []
@@ -324,6 +340,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
     try:
         steps = max(1, min(80, int(round(hold_time / float(model.opt.timestep)))))
         hand_geoms = _hand_geom_ids(model)
+        jaw_act = _joint_actuator_id(model, jaw_qposadr)
         data = mujoco.MjData(model)
         eq = None if fruit_equality is None else int(fruit_equality)
         rows = []
@@ -336,17 +353,20 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 data.eq_active[eq] = 0
             data.qpos[arm_qids] = start
             data.qpos[int(jaw_qposadr)] = hold
+            if jaw_act is not None:
+                data.ctrl[jaw_act] = hold
             mujoco.mj_forward(model, data)
             pocket = grasp_pocket_world_m(model, data, tcp_site)
-            data.qpos[int(jaw_qposadr)] = jaw_open
             data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
-            mujoco.mj_forward(model, data)
             data.qpos[int(jaw_qposadr)] = hold
             max_load = 0.0
             for _ in range(steps):
                 data.qpos[arm_qids] = start
+                data.qpos[int(jaw_qposadr)] = hold  # kinematic jaw hold during sweep
+                if jaw_act is not None:
+                    data.ctrl[jaw_act] = hold
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)
