@@ -70,18 +70,18 @@ EASY_PRESET = {
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
     # Student starts over the opening so the 1.28 s window only has to lower
-    # and release. 0.10 m over the hole put the wrist through the liner;
-    # 0.16 m plus a +X inset keeps TCP in the 15 cm opening while the wrist
-    # sits on the robot side of the front wall. Flip start_over_opening to
-    # restore the 0.32 m outside-crate carry. The hold sweep stays at
-    # 0.40 m / 0.28 m so a closer student pose cannot poison close-fraction.
+    # and release. 0.16 m / +6 cm inset had no IK-safe pose on the live
+    # scene; the already-solved hover at 0.28 m does. Flip
+    # start_over_opening to restore the 0.32 m outside-crate carry. The
+    # hold sweep stays at 0.40 m / 0.28 m so a closer student pose cannot
+    # poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
     # not a measured length.
     'start_over_opening': True,
-    'start_open_radius_m': 0.08,
-    'start_inset_x_m': 0.06,
+    'start_open_radius_m': 0.06,
+    'start_inset_x_m': 0.0,
     'start_margin_m': 0.32,
-    'start_clearance_m': 0.16,
+    'start_clearance_m': 0.28,
     'shaping_length_m': 0.60,
     'n_start_poses': 24,
     'start_x_span_m': 0.08,

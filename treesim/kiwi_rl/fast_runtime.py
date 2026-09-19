@@ -810,6 +810,10 @@ class FastRuntime:
         start_qs = []
         start_errs = []
         q_init = drop_q.astype(np.float64) if over_opening else q_home.copy()
+        if (over_opening and np.isfinite(drop_q).all() and np.isfinite(drop_err)
+                and float(drop_err) <= accept):
+            start_qs.append(np.asarray(drop_q, dtype=np.float32).reshape(6))
+            start_errs.append(float(drop_err))
         rng = np.random.default_rng(7)
         attempts = 0
         max_attempts = n * 8
