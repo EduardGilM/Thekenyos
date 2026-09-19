@@ -188,6 +188,25 @@ def _hand_link_ids(model):
     return jaw_body, finger_body
 
 
+def grasp_local_near_tcp(local, tcp_local, *, max_offset_m=0.08):
+    """True if a body-frame pocket sits near the TCP, not at the knuckle origin.
+
+    Pad collision centres are ~15 cm from the jaw-body origin. A 12 cm
+    origin-norm gate therefore rejects the real pocket and falls back to the
+    TCP tip. Compare against the TCP site local pose instead.
+    """
+    pocket = np.asarray(local, dtype=np.float64).reshape(3)
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    max_off = float(max_offset_m)
+    if pocket.shape != (3,) or tcp.shape != (3,):
+        raise ValueError('grasp local frames must be length-3')
+    if not np.isfinite(max_off) or not 0.0 < max_off <= 0.12:
+        raise ValueError('max_offset_m must be finite in (0, 0.12] m')
+    if not np.isfinite(pocket).all() or not np.isfinite(tcp).all():
+        return False
+    return float(np.linalg.norm(pocket - tcp)) <= max_off
+
+
 def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.0):
     """TCP in the site body frame. Spot's tool centre already sits between the pads."""
     inset = float(inset_m)

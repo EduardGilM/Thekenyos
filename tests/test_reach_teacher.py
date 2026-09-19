@@ -3,7 +3,7 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
-    basket_chassis_aabb_m, easy_start_local_m,
+    basket_chassis_aabb_m, easy_start_local_m, grasp_local_near_tcp,
     hold_close_fracs, jaw_hold_q, offset_grasp_local, select_hold_close,
     tcp_outside_basket,
 )
@@ -102,6 +102,18 @@ class ReachTeacherMathTest(unittest.TestCase):
         np.testing.assert_allclose(near, [0.0, 0.0, 0.09], atol=1e-9)
         with self.assertRaises(ValueError):
             offset_grasp_local(tcp, [np.nan, 0.0, 0.0])
+
+    def test_grasp_local_gate_uses_tcp_offset_not_body_origin(self):
+        tcp = np.array([0.165, 0.0, 0.004])
+        pad = np.array([0.140, 0.0, 0.010])
+        knuckle = np.zeros(3)
+        self.assertTrue(grasp_local_near_tcp(tcp, tcp))
+        self.assertTrue(grasp_local_near_tcp(pad, tcp))
+        self.assertFalse(grasp_local_near_tcp(knuckle, tcp))
+        self.assertGreater(float(np.linalg.norm(pad)), 0.12)
+        self.assertFalse(grasp_local_near_tcp([np.nan, 0.0, 0.0], tcp))
+        with self.assertRaises(ValueError):
+            grasp_local_near_tcp(tcp, tcp, max_offset_m=0.0)
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

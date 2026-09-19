@@ -190,6 +190,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('self._easy_jaw_hold_next.assign', src)
         self.assertIn('fruit_equality', src)
         self.assertIn('grasp_local', src)
+        self.assertIn('grasp_local_near_tcp', src)
+        self.assertNotIn('norm(local)) > 0.12', src)
         self.assertIn('use_pocket', src)
         self.assertIn('set_easy_progress', src)
         self.assertNotIn('def _easy_airdrop', src)

@@ -159,6 +159,12 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertTrue(easy['easy'])
         self.assertEqual(easy['reset_mode'], 1)
         self.assertEqual(easy['easy_far_frac'], 0.25)
+        self.assertAlmostEqual(easy['hold_close_frac'], 0.75)
+        held = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'deposit_pixels'},
+            'config': {'easy': True, 'easy_far_frac': 0.25, 'hold_close_frac': 0.9},
+        })
+        self.assertAlmostEqual(held['hold_close_frac'], 0.9)
         from treesim.kiwi_rl.training_monitor import (
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
@@ -168,6 +174,7 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))
         self.assertIn('grasp_pocket_world_m', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('hold_close_frac', inspect.getsource(apply_native_skill_reset))
         self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
         html_easy_video = render_dashboard_html(dict(
             schema='training-monitor/v1', training_ready=False, run='x', rows=1,

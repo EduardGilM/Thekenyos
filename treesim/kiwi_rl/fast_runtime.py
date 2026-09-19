@@ -776,14 +776,15 @@ class FastRuntime:
             self._easy_jaw_hold_next.assign(holds)
         if self._easy:
             self._use_pocket = 1
+            from .reach_teacher import grasp_local_fallback_m, grasp_local_near_tcp
+            tcp_local = np.asarray(grasp_local_fallback_m(self.model, self.tcp_site), dtype=np.float64)
             local = self._hold_sweep.get('grasp_local_m') if self._hold_sweep is not None else None
             if local is None:
-                from .reach_teacher import grasp_local_fallback_m
-                local = grasp_local_fallback_m(self.model, self.tcp_site)
-            local = np.asarray(local, dtype=np.float64).reshape(3)
-            if not np.isfinite(local).all() or float(np.linalg.norm(local)) > 0.12:
-                from .reach_teacher import grasp_local_fallback_m
-                local = np.asarray(grasp_local_fallback_m(self.model, self.tcp_site), dtype=np.float64)
+                local = tcp_local
+            else:
+                local = np.asarray(local, dtype=np.float64).reshape(3)
+            if not grasp_local_near_tcp(local, tcp_local):
+                local = tcp_local
             self._grasp_local_host = np.asarray(local, dtype=np.float64).reshape(3)
             self._grasp_local = wp.vec3(float(self._grasp_local_host[0]),
                                        float(self._grasp_local_host[1]),

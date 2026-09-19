@@ -588,18 +588,25 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     name = meta.get('curriculum_stage') or config.get('stage')
     easy = bool(config.get('easy', False))
     far_frac = 0.0
+    hold_frac = 0.75
     if easy:
         raw = config.get('easy_far_frac', 0.0)
         far_frac = float(raw)
         if not math.isfinite(far_frac) or not 0.0 <= far_frac <= 1.0:
             raise ValueError('easy_far_frac must be finite in [0, 1]')
+        raw_hold = config.get('hold_close_frac', 0.75)
+        if raw_hold is None:
+            raw_hold = 0.75
+        hold_frac = float(raw_hold)
+        if not math.isfinite(hold_frac) or not 0.0 <= hold_frac <= 1.0:
+            raise ValueError('hold_close_frac must be finite in [0, 1]')
     if not name:
         return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
-                    easy_far_frac=far_frac)
+                    easy_far_frac=far_frac, hold_close_frac=hold_frac)
     stage = stage_named(str(name))
     return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
                 allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy,
-                easy_far_frac=far_frac)
+                easy_far_frac=far_frac, hold_close_frac=hold_frac)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -707,7 +714,7 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
 
 def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
                              approach_offset_m: float = 1.0, easy: bool = False,
-                             far_frac: float = 0.0) -> None:
+                             far_frac: float = 0.0, hold_close_frac: float | None = None) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
     import numpy as np
@@ -739,7 +746,10 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         if easy:
             pocket = grasp_pocket_world_m(model, data, tcp_site)
             data.qpos[qposadr:qposadr + 3] = pocket
-            hold = jaw_hold_q(0.75, opened, closed)
+            frac = 0.75 if hold_close_frac is None else float(hold_close_frac)
+            if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+                raise ValueError('hold_close_frac must be finite in [0, 1]')
+            hold = jaw_hold_q(frac, opened, closed)
         else:
             tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
             data.qpos[qposadr:qposadr + 3] = tcp
@@ -851,7 +861,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     preview = curriculum_preview_from_checkpoint(info)
     apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'],
                              easy=bool(preview.get('easy')),
-                             far_frac=float(preview.get('easy_far_frac') or 0.0))
+                             far_frac=float(preview.get('easy_far_frac') or 0.0),
+                             hold_close_frac=preview.get('hold_close_frac'))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
     basket_local = np.asarray(CENTER, dtype=np.float64)
