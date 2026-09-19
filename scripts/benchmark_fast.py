@@ -27,9 +27,9 @@ def main():
     torch.set_num_threads(1)
     torch.manual_seed(42)
     torch.backends.cuda.matmul.allow_tf32=False
-    gait=load_gait_artifact(a.gait_checkpoint).to('cuda:0').eval()
+    gait=load_gait_artifact(a.gait_checkpoint, precision_profile='cuda-fp32').to('cuda:0').eval()
     policy=build_policy().to('cuda:0').eval() if a.camera else None
-    runtime=FastRuntime(a.scene,worlds=a.worlds,camera='body_camera' if a.camera else None)
+    runtime=FastRuntime(a.scene,worlds=a.worlds,camera='hand_color_sensor' if a.camera else None)
     actions=torch.zeros(a.worlds,7,device='cuda:0')
     memory=torch.zeros(a.worlds,64,device='cuda:0')
     failures=torch.zeros(a.worlds,device='cuda:0',dtype=torch.bool)

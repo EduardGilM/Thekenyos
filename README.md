@@ -703,7 +703,9 @@ and a load-triggered point connection. It retains the robot, basket, cameras,
 collisions and gravity from a base scene, with static canopy supports. It omits
 volumetric fruit deformation; the 8 N stem threshold and 15 N force-based damage
 limit are explicit engineering assumptions. It currently supports one target
-fruit per independent world.
+fruit per independent world. Training pixels come from the nominal gripper
+`hand_color_sensor`, not an invented body mast. On a 24 GB RTX 4090 start
+below the 5090 4096-world profile.
 
 ```bash
 python scripts/export_fast_scene.py --base-scene /path/to/base-scene \

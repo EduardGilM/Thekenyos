@@ -187,7 +187,8 @@ The user explicitly approved a separate rigid-fruit bulk-training profile to
 maximize learning per GPU hour. Use `export_fast_scene.py`, `FastRuntime`, and
 `train_fast.py`: 200 Hz physics, 50 Hz policy/gait, and 25 Hz RGBD cameras by
 default. 500 Hz physics is also supported. Use CUDA FP32 pretrained gait in
-this profile. The existing detailed flex and legacy CPU profiles stay separate.
+this profile. Training cameras are the nominal RELIC gripper RGB/ToF frames;
+do not invent a body mast. The existing detailed flex and legacy CPU profiles stay separate.
 Do not reopen tissue calibration or the older rigid/flex agreement gate as a
 blocker for this approved approximate profile. Do keep numerical failures,
 overflow, real collision loads, gravity, stem release, and world-local resets.

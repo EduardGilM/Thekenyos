@@ -144,6 +144,14 @@ class FastRuntime:
         self.substeps = round(self.control_dt / self.dt)
         if self.substeps not in (4, 10) or not math.isclose(self.substeps * self.dt, self.control_dt, abs_tol=1e-9):
             raise ValueError('FastRuntime requires four or ten integral physics substeps')
+        if camera is not None:
+            from .spot_cameras import GRIPPER_FRAMES, require_mujoco_gripper_cameras
+            require_mujoco_gripper_cameras(self.model, self.manifest.get('robot'))
+            if camera not in GRIPPER_FRAMES:
+                raise ValueError(f'FastRuntime camera must be a RELIC gripper sensor, not {camera!r}')
+            self.policy_camera = camera
+        else:
+            self.policy_camera = None
         with wp.ScopedDevice(device):
             self.gpu_model = mw.put_model(self.model)
             self.data = mw.put_data(self.model, initial, nworld=worlds,
@@ -207,12 +215,10 @@ class FastRuntime:
                 self._measure_reward()
             self.graph = capture.graph
             self.rig = None
-            if camera is not None:
-                if camera != 'body_camera':
-                    raise ValueError("FastRuntime supports only camera='body_camera'")
+            if self.policy_camera is not None:
                 from .sensors_warp import WarpRGBDRig
                 size = (resolution, resolution) if isinstance(resolution, int) else tuple(resolution)
-                self.rig = WarpRGBDRig(self.model, self.data, cameras=('body_camera',), resolution=size)
+                self.rig = WarpRGBDRig(self.model, self.data, cameras=(self.policy_camera,), resolution=size)
 
     def _refresh(self, mw):
         mw.kinematics(self.gpu_model, self.data)
@@ -273,12 +279,12 @@ class FastRuntime:
                       inputs=[self.control.previous, self.control.home, self.control.targets], device=self.device)
 
     def pixels(self):
-        if self.rig is None:
-            raise RuntimeError("FastRuntime was created without camera='body_camera'")
+        if self.rig is None or self.policy_camera is None:
+            raise RuntimeError('FastRuntime was created without a gripper camera')
         import mujoco_warp as mw
         self._refresh(mw)
         self.rig.capture(self.gpu_model, self.data, 0.0)
-        return self.rig.tensor('body_camera')
+        return self.rig.tensor(self.policy_camera)
 
     def reset(self, mask=None):
         import mujoco_warp as mw
