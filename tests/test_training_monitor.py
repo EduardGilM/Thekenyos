@@ -36,6 +36,7 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertIn('Monitor de entrenamiento', html)
             self.assertIn('Curriculum TK-RL-003', html)
             self.assertIn('entropía es diferencial', html)
+            self.assertIn('overflow', html)
             self.assertIn('training_ready', html)
             self.assertIn('evaluation/mean_closest_distance_m', html)
             self.assertNotIn('http-equiv="refresh"', html)

@@ -132,6 +132,26 @@ def next_stage(stage: Stage) -> Stage | None:
     return nxt if nxt.index == stage.index + 1 else None
 
 
+def first_unsatisfied_stage(stage: Stage, n_fruits: int) -> Stage | None:
+    """First remaining stage whose fruit_count exceeds the assembled scene."""
+    if not isinstance(n_fruits, int) or isinstance(n_fruits, bool) or n_fruits < 0:
+        raise ValueError('n_fruits must be a non-negative integer')
+    for item in STAGES:
+        if item.index >= stage.index and item.fruit_count > n_fruits:
+            return item
+    return None
+
+
+def fruit_block_reason(stage: Stage, n_fruits: int) -> str | None:
+    blocked = first_unsatisfied_stage(stage, n_fruits)
+    if blocked is None:
+        return None
+    return (
+        f'scene has {n_fruits} fruit bodies; {blocked.name} needs {blocked.fruit_count}. '
+        f'Re-export with --fruit-count {blocked.fruit_count}.'
+    )
+
+
 def reset_mode_for_goal(goal: str, stage: Stage) -> int:
     if goal not in GOALS:
         raise ValueError(f'unknown goal {goal!r}')

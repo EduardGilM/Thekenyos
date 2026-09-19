@@ -29,6 +29,7 @@ PRIORITY_CHARTS = (
     'evaluation/closest_distance_m', 'evaluation/harvest_successes',
     'evaluation/success_rate', 'evaluation/harvest_fraction', 'evaluation/detach_rate', 'evaluation/grasp_rate',
     'harvest_successes', 'grasp_events', 'detach_events', 'harvested_mean',
+    'recovered_worlds', 'overflow_worlds', 'evaluation/recovered_worlds', 'evaluation/overflow_worlds',
     'evaluation/terminal_transitions', 'terminal_transitions',
     'curriculum_index', 'guidance_weight',
     'training_transitions_per_second', 'rollout_transitions_per_second',
@@ -366,7 +367,7 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
   <header>
     <h1>Monitor de entrenamiento</h1>
     <div class="sub" id="sub">{run} · etapa {stage} · {rows} filas · actualizado {generated}</div>
-    <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página. La entropía es diferencial (nats) de una tanh-Gaussiana; con logstd negativo puede ser &lt; 0 y no es un fallo numérico.</div>
+    <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página. La entropía es diferencial (nats) de una tanh-Gaussiana; con logstd negativo puede ser &lt; 0 y no es un fallo numérico. Un overflow (flag 2) o acción no finita (flag 4) reinicia ese mundo; qpos/qvel no finito aborta el trabajo.</div>
     <div class="cards" id="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
   </header>
   <main>

@@ -21,6 +21,13 @@ from .rewards import (
     W_LOSS, W_SMOOTH, W_TIME_PER_S,
 )
 
+# Latched per-world bits. Nonfinite qpos/qvel abort the job; overflow and a
+# nonfinite action reset that world so one solver stall does not kill the batch.
+FLAG_NONFINITE = 1
+FLAG_OVERFLOW = 2
+FLAG_BAD_ACTION = 4
+FLAG_RECOVERABLE = FLAG_OVERFLOW | FLAG_BAD_ACTION
+
 
 @wp.kernel
 def _action_increment(actions: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
@@ -128,6 +135,13 @@ def _latch_state(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
         wp.atomic_or(flags, world, 1)
     if index == 0 and overflow[world] != 0:
         wp.atomic_or(flags, world, 2)
+
+
+@wp.kernel
+def _clear_masked_int(mask: wp.array(dtype=wp.uint8), values: wp.array(dtype=int)):
+    world = wp.tid()
+    if mask[world] != 0:
+        values[world] = 0
 
 
 @wp.kernel
@@ -573,6 +587,37 @@ class FastRuntime:
                               self.task.goal, self.task.detached, self._shaping_ref,
                               self._basket_distance, self._episode_time, self._timed_out], device=self.device)
         return self.observe()
+
+    def drain_faults(self):
+        """Reset overflow/bad-action worlds. Abort only on nonfinite qpos/qvel.
+
+        ``check()`` still raises on any latched flag so tests and the final
+        report keep the strict contract. Training calls this instead.
+        """
+        import torch
+        flags = wp.to_torch(self._flags)
+        nonfinite = (flags & FLAG_NONFINITE) != 0
+        if bool(nonfinite.any()):
+            raise RuntimeError(f'GPU numerical failure flags={self._flags.numpy().tolist()}')
+        recoverable = (flags & FLAG_RECOVERABLE) != 0
+        overflow_worlds = int(((flags & FLAG_OVERFLOW) != 0).sum().item())
+        bad_action_worlds = int(((flags & FLAG_BAD_ACTION) != 0).sum().item())
+        recovered = int(recoverable.sum().item())
+        if recovered:
+            mask = recoverable.to(dtype=torch.uint8)
+            self.reset(mask)
+            mask_wp = wp.from_torch(mask)
+            with wp.ScopedDevice(self.device):
+                wp.launch(_clear_masked_int, dim=self.worlds,
+                          inputs=[mask_wp, self._flags], device=self.device)
+                wp.launch(_clear_masked_int, dim=self.worlds,
+                          inputs=[mask_wp, self.data.overflow], device=self.device)
+        return {
+            'recovered_worlds': recovered,
+            'overflow_worlds': overflow_worlds,
+            'bad_action_worlds': bad_action_worlds,
+            'mask': recoverable,
+        }
 
     def check(self):
         flags = self._flags.numpy()

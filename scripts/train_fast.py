@@ -10,8 +10,8 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    STAGES, evaluate_skills, evaluation_horizon_steps, next_stage, promotion_ready,
-    sample_world_skills, stage_named, summarise_stage,
+    evaluate_skills, evaluation_horizon_steps, fruit_block_reason, next_stage,
+    promotion_ready, sample_world_skills, stage_named, summarise_stage,
 )
 
 
@@ -38,6 +38,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
         carry['rgbd'] = runtime.pixels().clone()
     memory, reset, rgbd = carry['memory'], carry['reset'], carry['rgbd']
     memory0 = memory.clone()
+    recovered_total = 0
+    overflow_total = 0
     rows = []
     for index in range(steps):
         r84 = runtime.observe().clone()
@@ -52,8 +54,17 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             runtime.set_base_commands(base.contiguous())
             runtime.set_gait_actions(gait(r84))
             _, reward, done, info = runtime.step(arm.contiguous())
+            faults = runtime.drain_faults()
+            recovered_total += faults['recovered_worlds']
+            overflow_total += faults['overflow_worlds']
+            if faults['recovered_worlds']:
+                reward = reward.clone()
+                reward[faults['mask']] = 0
+                done = done | faults['mask']
             physical = info['success'].bool() | info['failed'].bool() | info['fallen']
             timeout = info['timed_out']
+            if faults['recovered_worlds']:
+                timeout = timeout | faults['mask']
             rows.append(dict(rgbd=rgbd, r84=r84, raw=raw, logp=logp, value=value,
                 reward=reward.clone(), terminated=physical.clone(), truncated=timeout.clone(),
                 reset=reset.clone(), distance=info['distance_m'].clone(),
@@ -68,8 +79,9 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 rgbd = runtime.pixels().clone()
     with torch.no_grad():
         _, _, bootstrap, _ = policy(runtime.pixels(), runtime.observe(), memory * (~reset)[:, None])
-    runtime.check()
     carry['memory'], carry['reset'], carry['rgbd'] = memory, reset, rgbd
+    carry['recovered_worlds'] = recovered_total
+    carry['overflow_worlds'] = overflow_total
     return rows, bootstrap, carry
 
 
@@ -184,6 +196,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     harvested_peak = torch.zeros(worlds, device='cuda:0')
     required = torch.ones(worlds, device='cuda:0')
     terminals = 0
+    recovered_total = 0
+    overflow_total = 0
     for index in range(horizon):
         r84 = runtime.observe()
         if index % camera_every == 0:
@@ -195,6 +209,11 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
             runtime.set_base_commands(base.contiguous())
             runtime.set_gait_actions(gait(r84))
             _, reward, done, info = runtime.step(arm.contiguous())
+            faults = runtime.drain_faults()
+            recovered_total += faults['recovered_worlds']
+            overflow_total += faults['overflow_worlds']
+            if faults['recovered_worlds']:
+                done = done | faults['mask']
             dist = info['distance_m']
             closest = torch.minimum(closest, dist)
             final_distance = dist.clone()
@@ -211,7 +230,6 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
             if bool(reset.any()):
                 runtime.reset(reset)
                 rgbd = runtime.pixels().clone()
-    runtime.check()
     harvest_fraction = harvested_peak / required
     return {
         'evaluation/horizon_s': float(horizon * control_dt),
@@ -226,6 +244,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/grasp_rate': float(grasp_any.float().mean()),
         'evaluation/harvest_fraction': float(harvest_fraction.mean()),
         'evaluation/mean_harvested': float(harvested_peak.mean()),
+        'evaluation/recovered_worlds': recovered_total,
+        'evaluation/overflow_worlds': overflow_total,
         'evaluation/worlds': worlds,
     }
 
@@ -276,16 +296,20 @@ def run(args):
     stage = stage_named(args.stage)
     manifest = json.loads((args.scene / 'manifest.json').read_text())
     n_fruits = len(manifest.get('fruits') or [])
-    needed = max(item.fruit_count for item in STAGES[stage.index - 1:])
-    if n_fruits < needed:
+    if n_fruits < 1:
+        raise ValueError('fast scene has no fruit bodies')
+    if n_fruits < stage.fruit_count:
         raise ValueError(
-            f'fast scene has {n_fruits} fruit bodies; remaining curriculum through stage 6 needs {needed}. '
-            f'Re-export with --fruit-count {needed}.')
+            f'stage {stage.name} needs {stage.fruit_count} fruit bodies; scene has {n_fruits}. '
+            f'Re-export with --fruit-count {stage.fruit_count}.')
+    blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
                   curriculum=summarise_stage(stage),
                   training_ready=False,
                   entropy_kind='tanh_gaussian_differential_nats',
+                  scene_fruit_count=n_fruits,
+                  curriculum_blocked_reason=blocked_reason,
                   rates={'physics_hz': manifest['numerical_profile']['frequency_hz'],
                          'policy_hz':50, 'camera_hz':50/args.camera_every})
     config = {k: str(v) if isinstance(v, Path) else v for k,v in config.items()}
@@ -351,6 +375,8 @@ def run(args):
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
+                recovered_worlds=int(carry.get('recovered_worlds', 0)),
+                overflow_worlds=int(carry.get('overflow_worlds', 0)),
                 curriculum_stage=stage.name, curriculum_index=stage.index,
                 guidance_weight=stage.guidance_weight,
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
@@ -374,19 +400,28 @@ def run(args):
                     best_distance, best_checkpoint = distance, str(checkpoint)
                 if promotion_ready(eval_success_rates, stage, episodes_seen=eval_episodes):
                     nxt = next_stage(stage)
-                    metrics['curriculum_promoted'] = True
-                    if nxt is not None:
-                        stage = nxt
-                        config['curriculum'] = summarise_stage(stage)
-                        config['stage'] = stage.name
-                        (args.output / 'config.json').write_text(
-                            json.dumps(config, indent=2, default=str) + '\n')
-                        eval_success_rates = []
-                        eval_episodes = 0
-                        carry = {}
+                    if nxt is not None and nxt.fruit_count > n_fruits:
+                        metrics['curriculum_promoted'] = False
+                        metrics['curriculum_blocked'] = 1
+                        metrics['curriculum_blocked_reason'] = fruit_block_reason(nxt, n_fruits)
                         apply_stage(runtime, stage, numpy_rng)
-                        metrics['curriculum_stage'] = stage.name
-                        metrics['curriculum_index'] = stage.index
+                        carry = {}
+                    else:
+                        metrics['curriculum_promoted'] = True
+                        metrics['curriculum_blocked'] = 0
+                        if nxt is not None:
+                            stage = nxt
+                            config['curriculum'] = summarise_stage(stage)
+                            config['stage'] = stage.name
+                            config['curriculum_blocked_reason'] = fruit_block_reason(stage, n_fruits)
+                            (args.output / 'config.json').write_text(
+                                json.dumps(config, indent=2, default=str) + '\n')
+                            eval_success_rates = []
+                            eval_episodes = 0
+                            carry = {}
+                            apply_stage(runtime, stage, numpy_rng)
+                            metrics['curriculum_stage'] = stage.name
+                            metrics['curriculum_index'] = stage.index
                 else:
                     apply_stage(runtime, stage, numpy_rng)
                     carry = {}

@@ -719,9 +719,12 @@ gate after 200 evaluated worlds; this is not a field robot and `training_ready`
 stays false. The compact RGB-D actor is still 64×64 with a shared GRU, not V3
 ResNet-18 at 240×320 or separate N3/M3 networks. Stage 01–03 keep base velocity
 at zero; stage 04 unmasks the 3 locomotion commands. Stages 05–06 require five
-free fruit bodies and `continue_after_success`. Reported `entropy` is differential
-entropy (nats) of the 10-D tanh-Gaussian; with `logstd≈-1.6` it is typically
-negative and is not a numerical failure.
+free fruit bodies and `continue_after_success`. A one-fruit scene still trains
+01–04; promotion into 05 is blocked until the assembled scene has five independent
+bodies. Solver overflow (flag 2) or a nonfinite action (flag 4) on one world
+resets that world; nonfinite qpos/qvel (flag 1) still aborts the job. Reported
+`entropy` is differential entropy (nats) of the 10-D tanh-Gaussian; with
+`logstd≈-1.6` it is typically negative and is not a numerical failure.
 
 ```bash
 python scripts/export_fast_scene.py --base-scene /path/to/base-scene \

@@ -3,8 +3,9 @@ import unittest
 import numpy as np
 
 from treesim.kiwi_rl.curriculum import (
-    STAGES, evaluate_skills, evaluation_horizon_s, next_stage, promotion_ready,
-    sample_world_skills, stage_named,
+    STAGES, evaluate_skills, evaluation_horizon_s, first_unsatisfied_stage,
+    fruit_block_reason, next_stage, promotion_ready, sample_world_skills,
+    stage_named,
 )
 
 
@@ -76,6 +77,20 @@ class CurriculumTest(unittest.TestCase):
         self.assertTrue(promotion_ready([0.91, 0.92], stage, episodes_seen=200))
         with self.assertRaises(ValueError):
             promotion_ready([1.2, 1.0], stage)
+
+    def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
+        start = stage_named('deposit_pixels')
+        self.assertIsNone(first_unsatisfied_stage(start, 5))
+        blocked = first_unsatisfied_stage(start, 1)
+        self.assertEqual(blocked.name, 'multi_harvest')
+        self.assertEqual(first_unsatisfied_stage(stage_named('visual_approach'), 1).name,
+                         'multi_harvest')
+        self.assertEqual(first_unsatisfied_stage(stage_named('multi_harvest'), 1).name,
+                         'multi_harvest')
+        self.assertIsNone(first_unsatisfied_stage(stage_named('multi_harvest'), 5))
+        reason = fruit_block_reason(start, 1)
+        self.assertIn('--fruit-count 5', reason)
+        self.assertIsNone(fruit_block_reason(start, 5))
 
 
 if __name__ == '__main__':

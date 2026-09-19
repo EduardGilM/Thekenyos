@@ -60,7 +60,11 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn("default='deposit_pixels'", source)
         self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
         self.assertIn('evaluate_mission', source)
-        self.assertIn('fruit-count', inspect.getsource(train_fast.run))
+        self.assertIn('drain_faults', source)
+        run_src = inspect.getsource(train_fast.run)
+        self.assertIn('fruit-count', run_src)
+        self.assertIn('curriculum_blocked', run_src)
+        self.assertNotIn('remaining curriculum through stage 6 needs', run_src)
 
 
 if __name__ == '__main__':
