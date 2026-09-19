@@ -6,6 +6,31 @@ import numpy as np
 
 @unittest.skipUnless(importlib.util.find_spec('mujoco_warp') and importlib.util.find_spec('torch'), 'CUDA sensing stack required')
 class RGBDTest(unittest.TestCase):
+    def test_spot_housing_is_omitted_only_in_sensor_context(self):
+        import mujoco
+        import mujoco_warp as mw
+        import warp as wp
+        from treesim.kiwi_rl.sensors_warp import WarpRGBDRig
+        wp.init()
+        model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+        <geom type="plane" size="10 10 .1"/>
+        <body name="spot_arm_link_wr1" pos="0 0 2">
+          <camera name="hand_camera"/>
+          <geom type="sphere" size=".01" contype="0" conaffinity="0" group="2"/>
+        </body></worldbody></mujoco>''')
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        groups, pos = model.geom_group.copy(), model.cam_pos.copy()
+        with wp.ScopedDevice('cuda:0'):
+            gm = mw.put_model(model)
+            gd = mw.put_data(model, data, nworld=1, nconmax=64, njmax=256)
+            mw.forward(gm, gd)
+            rig = WarpRGBDRig(model, gd, cameras=('hand_camera',), resolution=(32, 24))
+            rig.capture(gm, gd, 0.)
+            np.testing.assert_allclose(rig.depth[0].numpy(), 2., atol=2e-5)
+        np.testing.assert_array_equal(model.geom_group, groups)
+        np.testing.assert_array_equal(model.cam_pos, pos)
+
     def test_metric_planar_depth_range_masks_and_frame_ownership(self):
         import mujoco
         import mujoco_warp as mw

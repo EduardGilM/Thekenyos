@@ -108,6 +108,8 @@ def assemble_deformable_scene(directory, *, count=9, timestep_s=.00002, contact_
     if base.nflex or not manifest['anchors']:
         raise ValueError('Expected an unassembled base with canopy attachment markers')
     root = ET.fromstring(xml)
+    from .spot_camera import install_spot_gripper_camera
+    cameras = install_spot_gripper_camera(root, manifest['robot'])
     root.remove(root.find('keyframe'))
     option = root.find('option')
     if option is None:
@@ -211,7 +213,7 @@ def assemble_deformable_scene(directory, *, count=9, timestep_s=.00002, contact_
     keys = ET.SubElement(root, 'keyframe')
     ET.SubElement(keys, 'key', name='home', qpos=' '.join(map(str, data.qpos)))
     xml = ET.tostring(root, encoding='unicode')
-    manifest = dict(manifest, schema='deformable-training-scene/v1', base_model_sha256=manifest['model_sha256'],
+    manifest = dict(manifest, cameras=cameras, schema='deformable-training-scene/v1', base_model_sha256=manifest['model_sha256'],
         model_sha256=hashlib.sha256(xml.encode()).hexdigest(), attachments=attachments,
         requires_deformable_assembly=False, training_ready=False, mesh_normalization=normalization,
         assembler_source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), mujoco_version=mujoco.__version__,

@@ -102,6 +102,8 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     mujoco.mj_forward(base, base_data)
 
     root = ET.fromstring(xml)
+    from .spot_camera import install_spot_gripper_camera
+    cameras = install_spot_gripper_camera(root, base_manifest['robot'])
     keyframe = root.find('keyframe')
     if keyframe is not None:
         root.remove(keyframe)
@@ -194,7 +196,7 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     if model.nflex or model.nu != base.nu:
         raise RuntimeError('Fast scene changed base topology')
     root = ET.fromstring(assembled_xml)
-    manifest = dict(base_manifest, schema=SCHEMA, base_model_sha256=base_manifest['model_sha256'],
+    manifest = dict(base_manifest, cameras=cameras, schema=SCHEMA, base_model_sha256=base_manifest['model_sha256'],
         model_sha256=hashlib.sha256(assembled_xml.encode()).hexdigest(), fruits=fruits,
         requires_deformable_assembly=False, training_ready=False,
         canopy_dynamics='fixed support', mesh_normalization=normalization,

@@ -50,7 +50,8 @@ class BatchedDeformableRuntime:
             self.rig = None
             self.reset()
             if resolution is not None:
-                self.rig = WarpRGBDRig(self.model, self.data, resolution=resolution)
+                self.rig = WarpRGBDRig(self.model, self.data,
+                    cameras=tuple(c['name'] for c in self.manifest['cameras']), resolution=resolution)
 
     def refresh(self):
         import mujoco_warp as mw

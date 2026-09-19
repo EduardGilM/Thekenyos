@@ -122,13 +122,13 @@ def run(args):
         wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
         wandb_name=args.wandb_name, upload_checkpoints=args.upload_checkpoints)
     try:
-        runtime = FastRuntime(args.scene, worlds=args.worlds, camera='body_camera',
+        runtime = FastRuntime(args.scene, worlds=args.worlds, camera='hand_camera',
                               nconmax=args.nconmax, njmax=args.njmax)
         gait = load_gait_artifact(args.gait_checkpoint).to('cuda:0').eval()
         policy = build_policy().to('cuda:0')
         if args.initialize_from:
             load_checkpoint(args.initialize_from, {'student':policy}, None,
-                            expected_meta={'camera':'body_camera'})
+                            expected_meta={'camera':'hand_camera', 'camera_profile':manifest['cameras']})
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
         # Compilation and warmup are outside measured rollout throughput.
         collect(runtime, policy, gait, 4, args.camera_every)
@@ -138,7 +138,7 @@ def run(args):
         initial_checkpoint = args.output / 'checkpoint-0000.pt'
         save_checkpoint(initial_checkpoint, {'student':policy}, {'student':optimizer},
             {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()},
-            dict(schema='fast-reach-rgbd-r84/v1', camera='body_camera',
+            dict(schema='fast-reach-rgbd-r84/v1', camera='hand_camera', camera_profile=manifest['cameras'],
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0))
         baseline = evaluate(runtime, policy, gait, args.steps, args.camera_every)
         log.log(baseline, step=0)
@@ -164,7 +164,7 @@ def run(args):
                 harvest_successes=int(torch.stack([r['success'] for r in rows]).sum()),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
             checkpoint = args.output / f'checkpoint-{iteration+1:04d}.pt'
-            meta = dict(schema='fast-reach-rgbd-r84/v1', camera='body_camera',
+            meta = dict(schema='fast-reach-rgbd-r84/v1', camera='hand_camera', camera_profile=manifest['cameras'],
                         model_sha256=manifest['model_sha256'], config=config, completed_updates=iteration+1)
             save_checkpoint(checkpoint, {'student':policy}, {'student':optimizer},
                 {'torch':torch.get_rng_state(),'cuda':torch.cuda.get_rng_state_all()}, meta)

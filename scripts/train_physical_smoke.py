@@ -187,7 +187,7 @@ def _run(args, training_log):
     gait = lambda obs: gait_cpu_inference(gait_actor, obs)
     policy = build_policy().to('cuda:0')
     optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
-    meta = dict(schema=SCHEMA, model_sha256=manifest['model_sha256'], seed=args.seed, camera=args.camera,
+    meta = dict(schema=SCHEMA, model_sha256=manifest['model_sha256'], seed=args.seed, camera=args.camera, camera_profile=manifest.get('cameras'),
                 action='seven bounded joint-target increments, maximum 0.10 rad per control step',
                 algorithm=args.algorithm, imitation_epochs=args.imitation_epochs if args.algorithm == 'imitation' else 0,
                 control_dt_s=args.control_dt, gait_sha256=hashlib.sha256(args.gait_checkpoint.read_bytes()).hexdigest(),
@@ -201,7 +201,7 @@ def _run(args, training_log):
     initialized_source_model_sha256 = None
     if args.resume:
         saved = load_checkpoint(args.resume, {'student': policy}, {'student': optimizer},
-            expected_meta={key: meta[key] for key in ('schema', 'model_sha256', 'gait_sha256', 'control_dt_s', 'camera')})
+            expected_meta={key: meta[key] for key in ('schema', 'model_sha256', 'gait_sha256', 'control_dt_s', 'camera', 'camera_profile')})
         saved_algorithm = saved['meta'].get('algorithm', 'ppo')
         if saved_algorithm != args.algorithm and not args.allow_algorithm_change:
             raise RuntimeError('Checkpoint algorithm differs; pass --allow-algorithm-change explicitly')
@@ -210,7 +210,7 @@ def _run(args, training_log):
         completed = saved['meta']['completed_updates']
     elif args.initialize_from:
         saved = load_checkpoint(args.initialize_from, {'student': policy}, None,
-            expected_meta={key: meta[key] for key in ('schema', 'gait_sha256', 'control_dt_s', 'camera')})
+            expected_meta={key: meta[key] for key in ('schema', 'gait_sha256', 'control_dt_s', 'camera', 'camera_profile')})
         initialized_from = str(args.initialize_from)
         initialized_source_model_sha256 = saved['meta'].get('model_sha256')
         meta['initialized_from'] = initialized_from
@@ -341,7 +341,7 @@ def main():
     parser.add_argument('--algorithm', choices=('ppo', 'imitation'), default='ppo')
     parser.add_argument('--allow-algorithm-change', action='store_true')
     parser.add_argument('--imitation-epochs', type=int, default=32)
-    parser.add_argument('--camera', choices=('hand_camera', 'body_camera'), default='body_camera')
+    parser.add_argument('--camera', choices=('hand_camera', 'body_camera'), default='hand_camera')
     add_training_log_args(parser)
     args = parser.parse_args()
     if not 1 <= args.imitation_epochs <= 1000:

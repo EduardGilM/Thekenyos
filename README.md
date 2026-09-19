@@ -842,9 +842,15 @@ then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
 restores optimizer and RNG state and starts a fresh episode in a new output
 directory. Mid-contact replay is not implemented. The final `report.json`
 contains deterministic sensor-only evaluation and `policy-camera.png` shows
-the actual policy input. Updated virtual camera mounts include a body-mounted
-0.55 m camera mast to keep the basket out of view; no hardware calibration is
-implied. The legacy `train_kiwi.py` remains a separate scaffold.
+the actual policy input. New exports use the integrated Spot gripper RGB camera
+on the wrist, from the pinned RELIC nominal sensor frame and published
+60.2° horizontal × 46.4° vertical FOV. The invented mast camera is removed.
+Fast training samples this view at 64 × 48. This is nominal geometry, not
+per-robot calibration; depth remains ideal registered geometric depth, not
+a calibrated ToF sensor. The sensor renderer omits the sealed wrist visual
+housing because the simplified mesh has no camera aperture; collisions and
+external renders retain it. Historical mast-camera checkpoints are incompatible
+with the new training camera. The legacy `train_kiwi.py` remains a separate scaffold.
 
 Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
 one physical teacher rollout with 100 supervised passes. On the one-segment

@@ -120,7 +120,7 @@ class FastRuntime:
     """
 
     def __init__(self, directory, worlds=64, control_dt=.02, camera=None,
-                 resolution=64, nconmax=128, njmax=512, device='cuda:0'):
+                 resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0'):
         if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
             raise ValueError('worlds must be an integer in [1, 4096]')
         if not np.isfinite(control_dt) or control_dt <= 0:
@@ -137,6 +137,7 @@ class FastRuntime:
         if self.model.opt.disableflags & int(mujoco.mjtDisableBit.mjDSBL_MIDPHASE):
             raise ValueError('Re-export the fast scene with supported midphase enabled')
         self.device_name = device
+        self.camera = camera
         if self.manifest.get('schema') != 'fast-training-scene/v1':
             raise ValueError('Invalid fast-training scene schema')
         self.worlds, self.control_dt = worlds, float(control_dt)
@@ -208,11 +209,20 @@ class FastRuntime:
             self.graph = capture.graph
             self.rig = None
             if camera is not None:
-                if camera != 'body_camera':
-                    raise ValueError("FastRuntime supports only camera='body_camera'")
+                cameras = self.manifest.get('cameras', ())
+                if isinstance(cameras, dict):
+                    camera_names = set(cameras)
+                else:
+                    camera_names = {entry.get('name') if isinstance(entry, dict) else str(entry)
+                                    for entry in cameras}
+                if camera not in camera_names:
+                    raise ValueError(f"Camera {camera!r} is not declared in the fast-scene manifest")
+                native_camera_names = {self.model.camera(i).name for i in range(self.model.ncam)}
+                if camera not in native_camera_names:
+                    raise ValueError(f"Camera {camera!r} is not present in the native model") from None
                 from .sensors_warp import WarpRGBDRig
                 size = (resolution, resolution) if isinstance(resolution, int) else tuple(resolution)
-                self.rig = WarpRGBDRig(self.model, self.data, cameras=('body_camera',), resolution=size)
+                self.rig = WarpRGBDRig(self.model, self.data, cameras=(camera,), resolution=size)
 
     def _refresh(self, mw):
         mw.kinematics(self.gpu_model, self.data)
@@ -274,11 +284,11 @@ class FastRuntime:
 
     def pixels(self):
         if self.rig is None:
-            raise RuntimeError("FastRuntime was created without camera='body_camera'")
+            raise RuntimeError('FastRuntime was created without a camera')
         import mujoco_warp as mw
         self._refresh(mw)
         self.rig.capture(self.gpu_model, self.data, 0.0)
-        return self.rig.tensor('body_camera')
+        return self.rig.tensor(self.camera)
 
     def reset(self, mask=None):
         import mujoco_warp as mw

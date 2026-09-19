@@ -33,7 +33,7 @@ class MeshFrameTest(unittest.TestCase):
         <body name="arm_link_wr1"/><body name="arm_link_fngr"/><body name="arm_link_jaw"/>
         </worldbody><keyframe><key name="home"/></keyframe></mujoco>'''
         manifest = dict(schema='training-base-scene/v1', model_sha256=hashlib.sha256(xml.encode()).hexdigest(),
-            robot=dict(prefix='', initial_position_rad={}),
+            robot=dict(prefix='', wrist='arm_link_wr1', initial_position_rad={}),
             anchors=[dict(site=f'anchor{i}', parent_body='canopy', world_position_m=[.1 * (i + 1), 0., 1.6]) for i in range(2)])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -70,7 +70,7 @@ class MeshFrameTest(unittest.TestCase):
         <body name="arm_link_wr1"/><body name="arm_link_fngr"/><body name="arm_link_jaw"/>
         </worldbody><keyframe><key name="home"/></keyframe></mujoco>'''
         manifest = dict(schema='training-base-scene/v1', model_sha256=hashlib.sha256(xml.encode()).hexdigest(),
-            robot=dict(prefix='', initial_position_rad={}),
+            robot=dict(prefix='', wrist='arm_link_wr1', initial_position_rad={}),
             anchors=[dict(site='anchor0', parent_body='canopy', world_position_m=[0., 0., 0.])])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)

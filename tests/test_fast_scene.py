@@ -32,7 +32,7 @@ class FastSceneTest(unittest.TestCase):
         manifest = {
             'schema': 'training-base-scene/v1',
             'model_sha256': hashlib.sha256(XML.encode()).hexdigest(),
-            'robot': {'prefix': '', 'initial_position_rad': {}},
+            'robot': {'prefix': '', 'wrist': 'robot', 'initial_position_rad': {}},
             'anchors': [
                 {'site': 'anchor0', 'parent_body': 'canopy', 'world_position_m': [.1, 0, 1.6]},
                 {'site': 'anchor1', 'parent_body': 'canopy', 'world_position_m': [-.1, 0, 1.6]},
@@ -54,6 +54,8 @@ class FastSceneTest(unittest.TestCase):
         self.assertFalse(model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_MIDPHASE)
         self.assertEqual(len(manifest['fruits']), 2)
         self.assertEqual(model.nflex, 0)
+        self.assertEqual(model.ncam, 1)
+        self.assertEqual(manifest['cameras'][0]['name'], 'hand_camera')
         self.assertEqual(model.nq, 7 + 2 * 7)
         for fruit in manifest['fruits']:
             self.assertAlmostEqual(model.body_mass[model.body(fruit['body']).id], .105, places=8)

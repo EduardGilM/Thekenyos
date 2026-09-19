@@ -1,10 +1,15 @@
 import importlib.util
+import inspect
 import os
 import unittest
 
 @unittest.skipUnless(os.environ.get('FAST_SCENE') and all(importlib.util.find_spec(n) for n in
                      ('torch','warp','mujoco','mujoco_warp')), 'FAST_SCENE and GPU stack required')
 class FastRuntimeTest(unittest.TestCase):
+    def test_camera_default_is_four_to_three(self):
+        from treesim.kiwi_rl.fast_runtime import FastRuntime
+        self.assertEqual(inspect.signature(FastRuntime).parameters['resolution'].default, (64, 48))
+
     def test_actions_masked_reset_and_latched_failure(self):
         import numpy as np
         import torch
