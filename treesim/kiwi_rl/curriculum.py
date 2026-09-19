@@ -68,7 +68,7 @@ EASY_PRESET = {
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.12,
-    'drop_offset_m': 0.06,
+    'drop_offset_m': 0.10,
     'default_shaping_coef': 2.0,
 }
 

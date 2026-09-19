@@ -107,6 +107,7 @@ def _record(
     grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
     retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
     grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
+    goal: wp.array(dtype=int),
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
@@ -121,7 +122,9 @@ def _record(
     hand_contact[world] = wp.uint8(hand_hits[world] > 0)
     basket_contact[world] = wp.uint8(basket_hits[world] > 0)
     ground_contact[world] = wp.uint8(ground_contact[world] != 0 or ground_hits[world] > 0)
-    if jaws > JAW_FORCE_LIMIT_N:
+    # DEPOSIT_ONLY fruit starts detached; rigid jaw/hand overlap while it falls
+    # past the gripper is not a grasp overload and must not end the episode.
+    if jaws > JAW_FORCE_LIMIT_N and goal[world] != 0:
         damage_proxy[world] = wp.max(damage_proxy[world], (jaws - JAW_FORCE_LIMIT_N) / JAW_FORCE_LIMIT_N)
 
     stem_squared = float(0.)
@@ -165,7 +168,8 @@ def _record(
         settle_time[world] = 0.
     up = chassis_rotation[2, 2]
     fallen = xpos[world, chassis][2] < .30 or up < .6967067
-    if ground_contact[world] != 0 or fallen or jaws > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
+    jaw_overload = (goal[world] != 0) and (jaws > JAW_FORCE_LIMIT_N)
+    if ground_contact[world] != 0 or fallen or jaw_overload or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
     elif settle_time[world] >= SETTLE_TIME_S and detached[world] != 0 and hand_contact[world] == 0:
         if deposited[world, idx] == 0:
@@ -358,7 +362,7 @@ class FastHarvestTask:
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.chassis]),
             self.grasped, self.grasp_time, self.retain_time, self.retained_detach,
-            self.grasp_paid, self.detach_paid], device=self.device)
+            self.grasp_paid, self.detach_paid, self.goal], device=self.device)
         wp.launch(_apply_goal, dim=self.worlds, inputs=[
             self.goal, float(self.model.opt.timestep), self.detached, self.hand_contact, self.grasped,
             self.grasp_time, self.retain_time, self.retained_detach, self.success, self.failed],
@@ -388,4 +392,5 @@ class FastHarvestTask:
                 'damage_proxy': self.damage_proxy, 'grasped': self.grasped,
                 'retained_detach': self.retained_detach, 'hand_contact': self.hand_contact,
                 'ground_contact': self.ground_contact, 'harvested': self.harvested,
-                'required_harvests': self.required_harvests, 'active_fruit': self.active_fruit}
+                'required_harvests': self.required_harvests, 'active_fruit': self.active_fruit,
+                'hand_load_N': self.hand_load}

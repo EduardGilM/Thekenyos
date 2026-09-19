@@ -130,7 +130,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertGreater(float(local[2]), float(CENTER[2] + SIZE[2]))
         drop_z = float(local[2] - EASY_PRESET['drop_offset_m'])
         self.assertGreater(drop_z, float(CENTER[2] + SIZE[2]))
-        self.assertEqual(EASY_PRESET['drop_offset_m'], 0.06)
+        self.assertEqual(EASY_PRESET['drop_offset_m'], 0.10)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(0.0)
         with self.assertRaises(ValueError):

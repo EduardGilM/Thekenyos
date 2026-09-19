@@ -15,6 +15,8 @@ class FastTaskKernelSourceTest(unittest.TestCase):
         self.assertIn('fruit_index = int(-1)', text)
         self.assertIn('next_i = int(-1)', text)
         self.assertIn('rows = int(1)', text)
+        self.assertIn('jaw_overload', text)
+        self.assertIn('goal[world] != 0', text)
 
 
 @unittest.skipUnless(GPU, 'MJWarp and Warp required')

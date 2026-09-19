@@ -174,6 +174,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['failed'] = info['failed'].clone()
             if 'ground_contact' in info:
                 row['ground_contact'] = info['ground_contact'].clone()
+            if 'hand_load_N' in info:
+                row['hand_load_N'] = info['hand_load_N'].clone()
             rows.append(row)
             if index == 0:
                 rows[0]['memory0'] = memory0
@@ -547,6 +549,10 @@ def run(args):
             if 'ground_contact' in rows[0]:
                 metrics['ground_contact_worlds'] = int(
                     (torch.stack([r['ground_contact'] for r in rows]).max(dim=0).values > 0).sum())
+            if 'hand_load_N' in rows[0]:
+                load = torch.stack([r['hand_load_N'] for r in rows])
+                metrics['hand_load_mean_N'] = float(load.mean())
+                metrics['hand_load_max_N'] = float(load.max())
             del rows, bootstrap
             promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
