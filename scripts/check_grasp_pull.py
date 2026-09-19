@@ -95,18 +95,19 @@ def run(a):
             angle=fruit_stem_angle(-axis,stem_direction) if not detached else break_angle;threshold=float(detachment_force(angle));load=0.
             if a.target_fsa is not None and t>=2:
                 if rotation_pivot is None: rotation_pivot=site.copy()
-                if not detached:
+                if not detached and pull_start is None:
                     error=angle-a.target_fsa
                     feedback_roll=float(np.clip(feedback_roll+np.clip(3*np.deg2rad(error),-a.roll_speed,a.roll_speed)*a.timestep,0,np.pi))
                     angle_hold=angle_hold+a.timestep if abs(error)<=3 else 0.
-                    if angle_hold>=.1 and pull_start is None: pull_start=t;angle_at_pull=angle
+                    if (a.pull_after is not None and t>=a.pull_after) or (a.pull_after is None and angle_hold>=.1):
+                        pull_start=t;angle_at_pull=angle
                 roll=feedback_roll
                 cosine,sine=np.cos(roll),np.sin(roll)
                 rotation=np.array([[1,0,0],[0,cosine,-sine],[0,sine,cosine]])
                 pull=0. if pull_start is None else .009*np.clip(t-pull_start,0,3)
                 d.mocap_pos[0]=rotation_pivot+rotation@(np.array([0,0,.24])-rotation_pivot)+[0,0,-pull]
                 d.mocap_quat[0]=[np.cos((np.pi/2+roll)/2),np.sin((np.pi/2+roll)/2),0,0]
-                phase='RETAIN' if detached else ('ROTATE TO TARGET' if pull_start is None else 'PULL')
+                phase='RETAIN' if detached else ('ROTATE' if pull_start is None else 'PULL VERTICALLY')
             f=np.zeros(3)
             if not detached:
                 # body1 is fruit: connect rows are the world-space force on fruit.
@@ -148,7 +149,7 @@ def run(a):
                 if not a.rigid:
                     tet=d.flexvert_xpos[elems];minvol=min(minvol,float(np.min(np.linalg.det(tet[:,1:]-tet[:,:1])/6/vol0)))
                     if minvol<=.1:raise RuntimeError('Collapsed tissue element')
-                rows.append(dict(time_s=t,stem_load_N=load,threshold_N=threshold,angle_deg=angle,site_m=site.tolist(),anchor_m=anchor.tolist(),stem_force_N=f.tolist() if not detached else [0.,0.,0.],wrist_roll_deg=float(np.rad2deg(roll)),jaw_force_N=loads[:2].tolist(),palm_force_N=float(loads[2]),detached=detached,center_m=center.tolist()))
+                rows.append(dict(wrist_position_m=d.mocap_pos[0].tolist(),wrist_quaternion=d.mocap_quat[0].tolist(),time_s=t,stem_load_N=load,threshold_N=threshold,angle_deg=angle,site_m=site.tolist(),anchor_m=anchor.tolist(),stem_force_N=f.tolist() if not detached else [0.,0.,0.],wrist_roll_deg=float(np.rad2deg(roll)),jaw_force_N=loads[:2].tolist(),palm_force_N=float(loads[2]),detached=detached,center_m=center.tolist()))
                 next_sample+=.01
             if renderer and t>=next_frame:
                 renderer.update_scene(d,cam,scene_option=opt)
@@ -170,7 +171,7 @@ def run(a):
         stem_model='four collidable beam segments with breakable fruit connection',
         peak_stem_hand_contact_N=peak_stem_hand,peak_stem_fruit_contact_N=peak_stem_fruit,
         max_attachment_error_m=max_attachment_error,max_stem_contact_penetration_m=max_stem_penetration,
-        numerically_completed=abort_reason is None, abort_reason=abort_reason, executed_duration_s=float(d.time), duration_s=duration, target_fsa_deg=a.target_fsa, angle_at_pull_deg=angle_at_pull, pull_start_s=pull_start,
+        numerically_completed=abort_reason is None, abort_reason=abort_reason, executed_duration_s=float(d.time), duration_s=duration, target_fsa_deg=a.target_fsa,scheduled_pull_after_s=a.pull_after, angle_at_pull_deg=angle_at_pull, pull_start_s=pull_start,
         grip_force_target_N=a.grip_force,roll_speed_rad_s=a.roll_speed,rigid=a.rigid, grasp_x_m=a.grasp_x, roll_deg=a.roll_deg, contact_time_s=a.contact_time,
         jaw_kp=20., jaw_kv=.2, timestep_s=a.timestep,
         max_contact_penetration_m=max_penetration,
@@ -203,6 +204,7 @@ if __name__=='__main__':
     p.add_argument('--grip-force',type=float,help='Optional force-feedback setpoint in N; not a calibrated damage limit')
     p.add_argument('--roll-speed',type=float,default=1.2,help='Maximum ideal-controller roll speed, rad/s')
     p.add_argument('--grasp-x',type=float,default=.195,help='Fruit centre along the jaw, metres')
+    p.add_argument('--pull-after',type=float,help='Start vertical pull at this time and freeze wrist orientation; bypasses the FSA gate')
     p.add_argument('--target-fsa',type=float,help='Privileged feedback target for this scripted ideal test only')
     p.add_argument('--roll-deg',type=float,default=0.)
     p.add_argument('--contact-time',type=float,default=.002)
@@ -215,4 +217,5 @@ if __name__=='__main__':
     if not np.isfinite(a.roll_speed) or not 0<a.roll_speed<=1.2:p.error('Roll speed must be in (0,1.2] rad/s')
     if a.grip_force is not None and (not np.isfinite(a.grip_force) or not 0<a.grip_force<=50):p.error('Grip-force target must be in (0,50] N')
     if a.duration is not None and (not np.isfinite(a.duration) or a.duration<a.timestep):p.error('Duration must be finite and at least one timestep')
+    if a.pull_after is not None and (not np.isfinite(a.pull_after) or not 2<a.pull_after< (a.duration or 10)-1 or a.target_fsa is None):p.error('pull-after requires target-fsa and time after closure with at least 1s remaining')
     run(a)

@@ -703,9 +703,9 @@ Do not claim orchard or GPU parity from these native checks.
 ```bash
 MUJOCO_GL=egl python scripts/check_grasp_pull.py --relic ../relic \
   --output output/grasp-pull --torque 3 --grasp-x .175 \
-  --target-fsa 60 --grip-force 15 --roll-speed .4 --video
+  --target-fsa 60 --pull-after 5.8 --grip-force 15 --roll-speed .4 --video
 # Add --rigid for the diagnostic surrogate; repeat with --timestep .00001.
-# --duration 1 is a numerical smoke check, not a harvest-success test.
+# For a numerical smoke check, omit --pull-after and add --duration 1.
 
 # Generate a rigid scene with the command above plus --rigid, then:
 MUJOCO_GL=egl python scripts/check_stem_contacts.py \
@@ -713,9 +713,20 @@ MUJOCO_GL=egl python scripts/check_stem_contacts.py \
 # Repeat at --timestep .00001 and with a generated elastic-fruit scene.
 ```
 
-The ideal controller closes the jaws, rotates around the observed attachment
-and waits for measured fruit–stem angle to remain within 3° of its target for
-100 ms before pulling at 9 mm/s. Wrist rotation is not fruit–stem angle.
+The ideal controller closes the jaws and rotates around the observed attachment.
+With `--pull-after 5.8`, it stops rotating at 5.8 s and pulls straight down in
+world Z at 9 mm/s, keeping wrist XY and orientation fixed. The measured angle
+is recorded but does not block the pull. Without `--pull-after`, the earlier
+angle-gated diagnostic waits within 3° of its target for 100 ms before pulling.
+Wrist rotation is not fruit–stem angle.
+A rigid diagnostic with the transition at 4.8 s verified 27 mm downward travel,
+zero wrist XY/orientation change, and no contact-limit abort over 10 s. The
+fruit remained attached: correct pull direction is not extraction success.
+The elastic run with the 5.8 s transition also completed 10 s and verified
+27 mm vertical travel with fixed wrist XY/orientation. It remained attached
+and slipped out of the jaws (71 mm net fruit-centre motion relative to the
+wrist); peak stem load was 27.82 N and maximum contact overlap 0.814 mm.
+Reports and motion traces are in `output/extraction-vertical-pull` on JP.
 The contact-force setpoint is neither a hard force bound nor a measured safe
 fruit limit. This privileged controller is separate from the outcome-only RL
 evaluator; no angle target or prescribed motion is added to the RL reward.
