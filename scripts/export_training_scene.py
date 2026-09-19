@@ -57,15 +57,8 @@ def export_scene(args):
     bodies = {body.get('name'): body for body in root.findall('.//body')}
     ET.SubElement(bodies[robot['wrist']], 'site', name='hand_tcp',
                   pos=' '.join(map(str, robot['tcp_offset_m'])), size='.001', rgba='0 0 0 0', group='5')
-    cameras = [dict(name='hand_camera', body=robot['wrist'], position_m=[.12, 0., .03],
-                    quaternion_wxyz=[.16650903, .68254873, .69134472, .16865483]),
-               dict(name='body_camera', body=robot['chassis'], position_m=[.45, 0., .55],
-                    quaternion_wxyz=[-.08435573, -.68444457, .71873019, .08858133])]
-    for camera in cameras:
-        camera.update(fovy_degrees=60., calibration='fixed virtual mount; body camera on 0.55 m mast; not hardware calibrated')
-        ET.SubElement(bodies[camera['body']], 'camera', name=camera['name'],
-                      pos=' '.join(map(str, camera['position_m'])),
-                      quat=' '.join(map(str, camera['quaternion_wxyz'])), fovy='60')
+    from treesim.kiwi_rl.spot_cameras import attach_mujoco_cameras, load_relic_gripper_cameras
+    cameras = attach_mujoco_cameras(bodies, robot, load_relic_gripper_cameras(relic))
     keyframes = root.find('keyframe')
     if keyframes is not None:
         root.remove(keyframes)
@@ -112,7 +105,8 @@ def export_scene(args):
         requires_deformable_assembly=True, training_ready=False,
         scope='Floating-base robot, basket, canopy, visual foliage and attachment markers; no fruit yet',
         producer_sources_sha256={name: hashlib.sha256((Path(__file__).resolve().parents[1] / name).read_bytes()).hexdigest()
-            for name in ('scripts/export_training_scene.py', 'scripts/assisted_harvest_cycle.py', 'treesim/harvest_env.py')},
+            for name in ('scripts/export_training_scene.py', 'scripts/assisted_harvest_cycle.py',
+                         'treesim/harvest_env.py', 'treesim/kiwi_rl/spot_cameras.py')},
         producer_versions={name: importlib.metadata.version(name) for name in ('newton', 'warp-lang', 'mujoco')})
     (args.output / 'base.xml').write_text(xml)
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2, allow_nan=False) + '\n')

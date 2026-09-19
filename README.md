@@ -689,6 +689,128 @@ uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
 python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
 ```
 
+W&B logging is available in `scripts/train_physical_smoke.py`. Add
+`--wandb-mode online --wandb-project Thekenyos --wandb-entity juampab`
+to the training command after authenticating with `wandb login` on the host.
+Logs include losses, rewards, policy transitions per second, evaluation distance,
+and fall fraction. Every run also appends local `training.jsonl`; `offline`
+queues W&B data locally, and `disabled` needs no W&B connection. Checkpoint
+uploads require `--upload-checkpoints`. Run outputs and W&B caches stay under
+`--output`; credentials are never stored in the repository.
+
+The approved fast hackathon profile uses rigid fruit with compliant contacts
+and a load-triggered point connection. It retains the robot, basket, cameras,
+collisions and gravity from a base scene, with static canopy supports. It omits
+volumetric fruit deformation; the 8 N stem threshold and 15 N force-based damage
+limit are explicit engineering assumptions. Export `--fruit-count 5` so stages
+01–06 share independent free fruit bodies (deposited kiwis stay in the basket;
+they are not visual ballast). Training pixels come from the nominal gripper
+`hand_color_sensor`, not an invented body mast. On a 24 GB RTX 4090 start
+below the 5090 4096-world profile; 2560 worlds fit, 3072 currently OOMs.
+
+`scripts/train_fast.py` follows the [TK-RL-003 task curriculum](docs/rl-blueprint.html)
+on that rigid runtime: **deposit from pixels → grasp/detach → stationary harvest
+→ visual approach → multi-fruit mission → generalisation**. Reward/v3 terms
+(deposit +20, grasp +0.5, retained detach +2, loss −25, fall −100, time, smoothness
+and potential shaping) replace the old TCP Δdistance hover. Evaluation uses
+`guidance_weight=0` and the stage budget capped at 45 s (90 s when `fruit_count>1`)
+without stacking RGBD. Promotion needs two consecutive evals at the blueprint
+gate after 200 evaluated worlds; this is not a field robot and `training_ready`
+stays false. The compact RGB-D actor is still 64×64 with a shared GRU, not V3
+ResNet-18 at 240×320 or separate N3/M3 networks. Stage 01–03 keep base velocity
+at zero; stage 04 unmasks the 3 locomotion commands. Stages 05–06 require five
+free fruit bodies and `continue_after_success`. A one-fruit scene still trains
+01–04; promotion into 05 is blocked until the assembled scene has five independent
+bodies. Solver overflow (flag 2) or a nonfinite action (flag 4) on one world
+resets that world; nonfinite qpos/qvel (flag 1) still aborts the job. Reported
+`entropy` is differential entropy (nats) of the 10-D tanh-Gaussian; with
+`logstd≈-1.6` it is typically negative and is not a numerical failure.
+
+```bash
+python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
+  --output /path/to/fast-scene --timestep .005 --fruit-count 5
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/new-run \
+  --stage deposit_pixels --worlds 2560 --steps 64 --updates 2000 \
+  --minibatch-worlds 256 --eval-every 50 --entropy-coef 0.005 --ppo-epochs 2 \
+  --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
+FAST_SCENE=/path/to/fast-scene python -B -m unittest \
+  tests.test_fast_scene tests.test_fast_task tests.test_fast_runtime \
+  tests.test_fast_ppo tests.test_training_log tests.test_curriculum -v
+```
+
+`--speedrun` is the wall-clock preset for that same 1→6 chain: eval every 100 updates, checkpoints every 50, entropy 0.01, and eval horizons 8/15/20/20/45/45 s. Training episode timeouts stay 30–900 s. Stages 01–03 still hold the chassis; PPO then drops the three N3 dimensions from log-prob and entropy (the env already zeros those commands). Promotion gates stay two consecutive evals at the blueprint rates after 200 evaluated worlds. Pass `--video-every 0` with `--speedrun` when a CPU sidecar records clips. This is not a teacher, a weld, or field harvest; `training_ready` stays false.
+
+`--easy` starts a **free** kiwi between the pads at a random IK-safe pose outside the crate, then runs a **jaw-only script**: hold the tightest contacting close-fraction still under the 15 N fruit-contact gate, tighten if TCP-fruit slip exceeds 4 cm, and open once fruit XY is over the basket. A light static keeper (close 0.25–0.30) dumps as soon as the arm moves. Open/closed come from pad-gap (Spot `arm_f1x` is closed near 0, open at −π/2), not from `jnt_range` order. The student arm is ordinary PPO. This is not a weld, not an arm teacher, and not a tissue-safe force. Eval still has `guidance_weight=0` and `teacher_mix=0`; the jaw script stays on because `--easy` is still enabled. Promotion gates do not change. `training_ready` stays false.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/speedrun \
+  --stage deposit_pixels --worlds 4096 --steps 64 --updates 2000 \
+  --minibatch-worlds 512 --speedrun \
+  --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/easy-run \
+  --stage deposit_pixels --worlds 4096 --steps 64 --updates 2000 \
+  --minibatch-worlds 512 --speedrun --easy --video-every 0 --seed 7
+```
+
+`--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
+weights with a fresh optimizer. The GPU runtime captures each 50 Hz control
+interval and evaluates contact/release outcomes at every physics substep. The
+CLIs share a non-default Torch/Warp stream; use that same stream contract when
+embedding the runtime. PPO accumulates gradients across all world minibatches
+before updating, and resets recurrent memory only in terminated worlds.
+`--eval-every 10` records deterministic baseline and periodic evaluations.
+Average closest distance per world avoids selecting a batch just because its
+single best sample is closer. Initial and subsequent checkpoints are preserved;
+`best_reach_checkpoint` remains a reaching diagnostic, not proof of harvesting.
+Curriculum promotion is logged separately from that distance.
+
+Every update appends `training.jsonl` and rewrites `monitor/index.html` with
+inline SVG charts of every numeric field. `--video-every 10` (0 disables)
+spawns a **CPU** MuJoCo clip of that checkpoint so recording does not sit on
+the training GPU: third-person viewer plus a yellow-boxed overlay of the
+gripper `hand_color_sensor` RGB the policy sees. Clips are labelled as a
+progress preview, not a harvest demonstration. A sidecar can attach to a run
+that is already writing jsonl:
+
+```bash
+python -B scripts/watch_training.py --run /path/to/run \
+  --hub /path/to/training/monitor --video-every 10 --poll-seconds 2
+```
+
+The page updates charts from `metrics.json` every two seconds without reloading,
+and shows only the latest CPU progress clip. Default clips are 256 policy steps
+(~10 s at 25 fps). `--http-port 8090` binds `0.0.0.0` so Vast Caddy can proxy
+external port 10100. The live hub on this instance is
+`/workspace/training/monitor-live/index.html`. Open Instance Portal →
+Applications → Training Dashboard, or Jupyter
+`/files/workspace/training/monitor-live/index.html`. Fetch and video URLs keep
+`?token=` when the page was opened with one. A mapped-port 401 is Caddy auth;
+set `AUTH_EXCLUDE=10100` in `${WORKSPACE}/.env` and restart Caddy if the Vast
+Open button should skip that token. Distance, loss and `harvest_successes` on
+the dashboard are still not harvest proof.
+
+`benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
+and `--camera`. It reports policy transitions/s separately from physics steps/s.
+Training reports also include optimizer time, entropy, log-std and optimized
+sample count. A transition is one policy action in one world, not a complete
+harvesting episode. W&B losses, rewards and throughput are not proof of improved
+harvesting. CPU progress clips prefer OSMesa so recording does not steal the
+training GPU; they remain a native-MuJoCo preview and can disagree with GPU
+rollouts.
+
+On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
+about 157,000 policy transitions/s including PPO updates (three-update screen,
+64 steps per rollout, 200 Hz physics, 25 Hz 64x64 RGBD). All collected samples
+were used for optimization. This is a single-fruit approximate reaching workload;
+more fruit, higher camera resolution or longer episodes can change throughput.
+The numerical checks passed, but no successful harvest was observed. A ten-update
+screen also showed worse reaching distance despite lower loss; do not select a
+policy by loss alone. Live experiment metrics are in
+[W&B](https://wandb.ai/juampab/Thekenyos).
+
 `scripts/check_deformable_backend.py` checks real flex contact against ground,
 other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
 jaw, applies gravity, holds, opens, and checks release. Device-side checks latch
@@ -722,6 +844,11 @@ Export with the unchanged legacy simulation environment:
 python scripts/export_training_scene.py --relic /path/to/relic \
   --output /path/to/new-base-scene --fruit-count 1
 ```
+
+Base export attaches the nominal gripper RGB and ToF frames from the pinned
+RELIC URDF (`hand_color_sensor`, `hand_depth_sensor`). Existing scenes that
+still contain the invented `hand_camera` / 0.55 m `body_camera` mast must be
+regenerated before training.
 
 Assemble and check with the isolated deformable environment:
 
@@ -786,9 +913,14 @@ then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
 restores optimizer and RNG state and starts a fresh episode in a new output
 directory. Mid-contact replay is not implemented. The final `report.json`
 contains deterministic sensor-only evaluation and `policy-camera.png` shows
-the actual policy input. Updated virtual camera mounts include a body-mounted
-0.55 m camera mast to keep the basket out of view; no hardware calibration is
-implied. The legacy `train_kiwi.py` remains a separate scaffold.
+the actual policy input. Training cameras are the **nominal Spot gripper RGB
+and ToF frames** from the pinned RELIC URDF (`hand_color_sensor`,
+`hand_depth_sensor` on `arm_link_wr1`). Boston Dynamics optical axes are
+converted to MuJoCo (look along −Z, +Y up). Vertical FOV is the published
+maximum, 46.4° colour and 44° depth; this is factory-nominal geometry, not
+per-unit calibration. The invented 0.55 m body mast is not exported. Body
+fisheye extrinsics are not in that URDF and are not invented to keep the
+basket out of view. The legacy `train_kiwi.py` remains a separate scaffold.
 
 Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
 one physical teacher rollout with 100 supervised passes. On the one-segment
@@ -803,8 +935,9 @@ records both checkpoint and evaluated scene hashes when transferring weights.
 The GPU RGB-D rig reads metric planar depth directly. The renderer's public
 `get_depth` utility is display-normalized and clipped, so it must not be used as
 metric sensor depth. Tests cover a plane beyond one metre, inactive camera-ID
-mapping, range masks, and frame-buffer ownership. Camera mounts and range
-parameters remain virtual engineering assumptions, not hardware calibration.
+mapping, range masks, and frame-buffer ownership. Gripper camera mounts come
+from the pinned RELIC URDF; range limits remain an engineering clip, not a
+hardware calibration.
 
 MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
 miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by

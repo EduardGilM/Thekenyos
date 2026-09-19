@@ -14,7 +14,7 @@ def render_views(model, data, output):
     from PIL import Image
     result = {}
     with mujoco.Renderer(model, height=128, width=128) as renderer:
-        for name in ('hand_camera', 'body_camera'):
+        for name in ('hand_color_sensor', 'hand_depth_sensor'):
             renderer.disable_depth_rendering()
             renderer.update_scene(data, camera=name)
             rgb = renderer.render().copy()
@@ -42,6 +42,8 @@ def run(args):
     from treesim.kiwi_rl.control import NativeSpotControl, load_gait_artifact
     from treesim.kiwi_rl.physics import NativeFlexContactObserver, tetrahedra
     model, data, manifest = load_scene_artifact(args.scene)
+    from treesim.kiwi_rl.spot_cameras import require_mujoco_gripper_cameras
+    require_mujoco_gripper_cameras(model, manifest['robot'])
     actor = load_gait_artifact(args.gait_checkpoint) if args.gait_checkpoint else None
     controller = NativeSpotControl(model, manifest['robot'], actor)
     observer = NativeFlexContactObserver(model, data)
