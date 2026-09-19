@@ -97,13 +97,14 @@ def checkpoint_compatible(saved, manifest, mode):
     if mode not in ('resume', 'warm_start'):
         raise ValueError('Unknown checkpoint loading mode')
     expected = manifest['source_sha256']
-    names = tuple(expected) if mode == 'resume' else ENV_SOURCES
+    names = tuple(name for name in expected if mode == 'resume' or name != 'scripts/train_assisted_kiwi.py')
     if any(name not in saved['source_sha256'] or saved['source_sha256'][name] != expected[name] for name in names):
         raise ValueError('Checkpoint source mismatch; environment and physics compatibility are required')
     old_task, new_task = dict(saved['task']), dict(manifest['task'])
     if mode == 'warm_start':
-        old_task.pop('stage', None)
-        new_task.pop('stage', None)
+        for name in ('stage', 'start_phase', 'picks'):
+            old_task.pop(name, None)
+            new_task.pop(name, None)
     if old_task != new_task:
         raise ValueError('Checkpoint task mismatch; capture/retention/physics settings must agree')
     if mode == 'resume' and saved.get('training_config') != manifest['training_config']:
@@ -129,13 +130,17 @@ class Curriculum:
 
 
 def score(report):
-    return (report['successes']/report['episodes'], report.get('combined_successes', 0)/report['episodes'],
+    return (report['successes']/report['episodes'], report.get('mean_retained_count', 0.),
+            report.get('combined_successes', 0)/report['episodes'],
             -report.get('mean_best_workspace_error_m', 0.), -report['mean_best_distance_m'])
 
 
-def make_env(relic, task, workspace_weight=0.):
+def make_env(relic, task, workspace_weight=0., basket=False):
     from stable_baselines3.common.monitor import Monitor
     from treesim.assisted_kiwi_env import AssistedKiwiEnv, AssistedTask
+    if basket:
+        from treesim.basket_kiwi_env import BasketKiwiEnv, BasketTask
+        return Monitor(BasketKiwiEnv(relic, task=BasketTask(**task)))
     return Monitor(WorkspaceApproach(AssistedKiwiEnv(relic, task=AssistedTask(**task)), workspace_weight))
 
 
@@ -148,8 +153,10 @@ def frame(env, label):
     draw.text((15, 8), 'ASSISTED RL | pretrained gait | artificial grip | NOT contact-only grasp', fill='white', font=font)
     draw.text((15, 36), label, fill='white', font=font)
     info = env._info()
+    detail = (f"{info['phase']} | deposited {info['deposited_count']} | start {info['start_phase']}" if 'phase' in info else
+              f"workspace {info.get('workspace_error_m', 0.):.2f} m")
     draw.text((15, 64), f"target {info['target_index']} | gap {info['distance_m']:.3f} m | body {info['base_travel_m']:.2f} m | "
-              f"workspace {info.get('workspace_error_m', 0.):.2f} m | {info['outcome']}", fill='white', font=font)
+              f"{detail} | {info['outcome']}", fill='white', font=font)
     return image
 
 
@@ -165,7 +172,7 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
         obs, info = env.reset(seed=seed)
         if images and index == 0:
             snapshot(env, out/f'{label}-start.png', f'{label} | seed {seed} | initial state')
-        total = 0.
+        total, events = 0., []
         try:
             if record_video and index == 0:
                 encoder = subprocess.Popen(['ffmpeg', '-n', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
@@ -176,6 +183,7 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
                 action, _ = model.predict(obs, deterministic=True)
                 obs, reward, term, trunc, info = env.step(action)
                 total += reward
+                events.extend(info.get('events', []))
                 if encoder:
                     encoder.stdin.write(np.asarray(frame(env, f'{label} | seed {seed} | t={info["elapsed_s"]:.1f}s')).tobytes())
                 if term or trunc:
@@ -185,7 +193,7 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
                 encoder.stdin.close()
                 if encoder.wait():
                     raise RuntimeError('Evaluation video encoding failed')
-        records.append(dict(seed=seed, return_sum=total, **info))
+        records.append(dict(info, seed=seed, return_sum=total, events=events))
         if images and index == 0:
             snapshot(env, out/f'{label}-final.png', f'{label} | seed {seed} | fixed-seed evaluation')
         if images and info['success'] and not saved_success:
@@ -200,6 +208,9 @@ def evaluate(model, env, seeds, out, label, images, record_video=False):
                   combined_successes=sum(int(r.get('combined_success', False)) for r in records),
                   mean_best_workspace_error_m=float(np.mean([r.get('best_workspace_error_m', 0.) for r in records])),
                   mean_base_path_m=float(np.mean([r.get('base_path_m', 0.) for r in records])),
+                  mean_deposited_count=float(np.mean([r.get('deposited_count', 0) for r in records])),
+                  mean_retained_count=float(np.mean([r.get('retained_count', 0) for r in records])),
+                  spilled_count=sum(len(r.get('spilled_ids', [])) for r in records),
                   targets=sorted({r['target_index'] for r in records}),
                   failures={name: sum(r['outcome'] == name for r in records)
                             for name in sorted({r['outcome'] for r in records})}, records=records)
@@ -215,6 +226,9 @@ def main():
     parser.add_argument('--steps', type=int, default=32768)
     parser.add_argument('--seed', type=int, default=22)
     parser.add_argument('--stage', type=int, choices=range(3), default=0)
+    parser.add_argument('--basket', action='store_true')
+    parser.add_argument('--picks', type=int, choices=range(1, 7), default=6)
+    parser.add_argument('--start-phase', choices=('pick', 'carry', 'release'), default='pick')
     parser.add_argument('--fixed-stage', action='store_true')
     parser.add_argument('--workspace-weight', type=float, default=0.)
     parser.add_argument('--eval-all-stages', action='store_true')
@@ -228,7 +242,7 @@ def main():
     parser.add_argument('--eval-every', type=int, default=4096)
     parser.add_argument('--eval-episodes', type=int, default=8)
     parser.add_argument('--heldout-seed', type=int, default=30000)
-    parser.add_argument('--episode-seconds', type=float, default=15.)
+    parser.add_argument('--episode-seconds', type=float)
     parser.add_argument('--physics-hz', type=int, choices=(1000, 2000), default=1000)
     parser.add_argument('--policy-device', default='cpu')
     loading = parser.add_mutually_exclusive_group()
@@ -249,11 +263,22 @@ def main():
             parser.error('Learning settings must be finite and in supported ranges')
     if args.heldout_seed < 10000+args.eval_episodes or (args.no_images and args.record_video):
         parser.error('Held-out seeds must follow monitoring seeds; video requires rendering')
+    if args.basket and (args.workspace_weight or args.smoke):
+        parser.error('Basket training uses its own progress rewards; use check_basket_kiwi.py for scripted checks')
+    if not args.basket and args.start_phase != 'pick':
+        parser.error('Carry/release curriculum requires --basket')
     from treesim.assisted_kiwi_env import AssistedKiwiEnv, AssistedTask, SCOPE
+    args.episode_seconds = args.episode_seconds if args.episode_seconds is not None else (120. if args.basket else 15.)
     task = AssistedTask(time_limit_s=args.episode_seconds, physics_hz=args.physics_hz, stage=args.stage)
+    if args.basket:
+        from treesim.basket_kiwi_env import BasketKiwiEnv, BasketTask, SCOPE
+        task = BasketTask(**asdict(task), picks=args.picks, start_phase=args.start_phase)
+        if args.start_phase != 'pick':
+            args.fixed_stage = True
     args.output.mkdir(parents=True, exist_ok=False)
     source = Path(__file__).resolve().parents[1]
-    paths = [Path(__file__).resolve(), *(source/name for name in ENV_SOURCES)]
+    names = ENV_SOURCES+('treesim/basket_kiwi_env.py', 'treesim/basket.py') if args.basket else ENV_SOURCES
+    paths = [Path(__file__).resolve(), *(source/name for name in names)]
     training_config = dict(num_envs=args.num_envs, rollout_steps=args.rollout_steps, batch_size=args.batch_size,
                            learning_rate=args.learning_rate, entropy=args.entropy,
                            exploration_std=args.exploration_std, gripper_std=args.gripper_std,
@@ -273,8 +298,15 @@ def main():
                     relic_revision=subprocess.run(['git', '-C', str(args.relic.resolve()), 'rev-parse', 'HEAD'],
                                                   capture_output=True, text=True).stdout.strip(),
                     versions={n: version(n) for n in ('newton', 'warp-lang', 'mujoco', 'gymnasium', 'onnxruntime', 'numpy', 'scipy')})
-    eval_env = WorkspaceApproach(AssistedKiwiEnv(args.relic, task=replace(task),
-                                                render_mode=None if args.no_images else 'rgb_array'))
+    if args.basket:
+        manifest.update(assistance='12 cm capture and artificial stem/grip weld; actual opening removes grip; free settling deposit',
+                        observations='99 ideal target/proprioception, basket displacement, phase, deposited and remaining-fruit values',
+                        basket='Existing 1.2kg chassis-mounted geometry; independent fruit; drops/spills fail; no basket attachment',
+                        curriculum_start=args.start_phase, evaluation_guidance_weight=0.)
+    eval_env = (BasketKiwiEnv(args.relic, task=replace(task), guidance_weight=0.,
+                              render_mode=None if args.no_images else 'rgb_array') if args.basket else
+                WorkspaceApproach(AssistedKiwiEnv(args.relic, task=replace(task),
+                                                 render_mode=None if args.no_images else 'rgb_array')))
     train_env = None
     try:
         if args.smoke:
@@ -311,7 +343,7 @@ def main():
             manifest['parent_checkpoint'] = dict(path=str(parent.resolve()), sha256=hashlib.sha256(parent.read_bytes()).hexdigest(),
                                                   parent_steps=saved['steps'], mode='resume' if args.resume else 'weights_only')
         (args.output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
-        makers = [partial(make_env, str(args.relic.resolve()), asdict(task), args.workspace_weight) for _ in range(args.num_envs)]
+        makers = [partial(make_env, str(args.relic.resolve()), asdict(task), args.workspace_weight, args.basket) for _ in range(args.num_envs)]
         train_env = DummyVecEnv(makers) if args.num_envs == 1 else SubprocVecEnv(makers, start_method='spawn')
         train_env.seed(args.seed)
         model = (PPO.load(parent, env=train_env, device=args.policy_device) if args.resume else

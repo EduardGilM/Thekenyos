@@ -201,3 +201,32 @@ three distances. Preserve the action/trajectory-equivalence test, one-time bonus
 original anchor goal and frozen RELIC hash check. The workspace is a fixture-specific
 engineering heuristic, not calibrated robot reachability. Updated source snapshots
 use `/home/ubuntu/Thekenyos-assisted-training-v3`, preserving both earlier versions.
+
+## Assisted basket collection
+
+`treesim.basket_kiwi_env` adds the existing 1.2 kg rear basket without changing
+`assisted_kiwi_env` or its archived 78-value checkpoints. The basket task has
+99 observations and explicit approach/carry/settle phases. Deposits require an
+inactive grip, full-ellipsoid containment with 0.2 mm numerical tolerance,
+support contact connected to the basket, and 0.5 s below 0.05 m/s relative speed
+and 1 rad/s relative spin. Previously deposited fruit remains free and can spill;
+final success requires all requested fruit settled, not just historical counts.
+Keep the drop/spill, action/reset, two-timestep deposit, and body-frame tests:
+`ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_basket_kiwi_env -v`.
+
+MuJoCo `mj_objectVelocity(..., mjOBJ_BODY, ..., local=1)` uses the principal
+inertia frame, which changes when the basket is added. Query world velocity and
+rotate by the chassis body rotation before passing it to RELIC. Do not alter
+inertia or gait weights to compensate for a sensor-frame error. Basket contacts
+retain the existing friction values and use six-dimensional contact friction;
+Cartesian arm IK includes joint-limit and basket-clearance posture correction.
+
+`scripts/check_basket_kiwi.py --relic ../relic --output NEW_DIR --picks 6 --video`
+is a scripted physical check, not a trained harvesting policy. Repeat at
+`--physics-hz 2000`, inspect videos and keep failures. `train_assisted_kiwi.py
+--basket` uses the new task; `--start-phase release/carry` are reset-only curriculum
+fixtures with a fruit already held, not full harvesting successes. Evaluation
+turns off the new task's shaping. Warm starts between basket lessons may change
+start phase and requested count, but all environment/basket hashes and physical
+settings must match. Never load a 78-input reach checkpoint as a 99-input basket
+policy. Basket source snapshots use `/home/ubuntu/Thekenyos-assisted-training-v4`.

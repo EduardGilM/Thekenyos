@@ -763,6 +763,96 @@ Earlier failed evaluations and checkpoints remain preserved. These are small,
 fixed-fixture assisted-grasp screens with ideal sensing, not orchard robustness,
 contact-only grasp validation or physical-robot transfer. Training has stopped.
 
+### Assisted multi-kiwi basket collection
+
+`Thekenyos/BasketKiwi-v0` in `treesim/basket_kiwi_env.py` extends the isolated
+assisted task to **approach → grab → carry → release into the rear basket →
+settle → select the next kiwi**, without resetting Spot or its payload between
+fruits. It reuses `treesim.basket` geometry: a 1.2 kg chassis-mounted basket,
+0.54 × 0.38 × 0.28 m. The six rigid fruits remain independent dynamic bodies.
+Only a held fruit has grip assistance; opening the actual jaw removes that
+constraint before gravity deposition. Deposited fruit is never welded to the
+basket. Falls, drops, spills, numerical failures and arm–basket penetration
+above 1 mm end the episode. A spill reverses that fruit's deposit reward once.
+
+Success is no longer a brief assisted grasp. Each fruit must be completely
+inside the basket (0.2 mm numerical containment tolerance), supported by basket
+contact or a contact chain to it, and move below 0.05 m/s and 1 rad/s relative
+to the basket for 0.5 s after release. A counted fruit is excluded from future
+target selection. Final success requires all requested fruits still settled;
+earlier deposits do not hide later spills or unsettled payload.
+
+The task keeps frozen RELIC inference, seven 10 Hz high-level actions and
+native MuJoCo at 1 or 2 kHz. It adds collision-free reset arm poses and
+joint-limit/basket-clearance correction in the Cartesian IK controller. Basket
+mass changes the principal inertia frame, so gait velocities are explicitly
+converted from world axes to chassis axes rather than using MuJoCo's local
+inertia axes. The observation grows from 78 to **99 ideal simulator values**,
+adding basket displacement, phase and collected/remaining-fruit state. The
+old reach/grab environment and its archived policies are preserved; they are
+not directly loadable as basket policies.
+
+```bash
+ASSISTED_KIWI_RELIC=../relic python -B -m unittest tests.test_basket_kiwi_env -v
+python scripts/check_basket_kiwi.py --relic ../relic \
+  --output output/basket-sequence --picks 6 --video
+python scripts/check_basket_kiwi.py --relic ../relic \
+  --output output/basket-sequence-halfstep --picks 6 --physics-hz 2000 --video
+python scripts/train_assisted_kiwi.py --relic ../relic --basket \
+  --output output/basket-training --picks 2 --steps 32768 --num-envs 8 \
+  --eval-every 4096 --eval-episodes 8 --heldout-seed 70000 --record-video
+```
+
+The basket task defaults to six requested fruit and a 120 s horizon. `--picks`
+selects 1–6; `--episode-seconds` and the original `--stage` approach distance
+remain configurable. For incremental training, `--start-phase release` starts
+with a fruit already held above the basket, and `--start-phase carry` starts
+with an already held canopy fruit. Both are explicitly synthetic reset fixtures,
+not successful learned picks. Use one fruit for these lessons, then warm-start
+basket checkpoints with `--start-phase pick`, first one fruit and then multiple.
+Warm starts permit these sampler/count changes, but still require matching
+basket/environment hashes, physics, dwell settings, time limit and spaces;
+exact resume remains stricter. The basket task uses its own removable shaping,
+not `--workspace-weight`. All evaluations disable that shaping and report full
+success, historical deposits, retained fruit and spills separately.
+
+The check controller is **scripted**, uses the same velocity action interface,
+and records labeled videos, event histories, source/gait hashes and final state.
+A successful check establishes feasibility in that fixture, not an end-to-end
+learned policy, physical grasp, fruit safety or real-robot transfer. Full-task
+learning must be measured separately from release-only curriculum results.
+
+Recorded scripted screen (seed 11, all six hanging fruit):
+
+| Physics rate | Collected and retained | Simulated duration | Maximum arm–basket overlap |
+|---|---|---|---|
+| 1 kHz | 6/6 | 107.5 s | 0.565 mm |
+| 2 kHz | 6/6 | 106.5 s | 0.649 mm |
+
+Both runs finished with all six fruits settled and all fruit stem/grip constraints
+disabled, without drops or spills. The 1 kHz sampled body path was 5.33 m. A
+read-only check of its saved final state confirmed six independent collidable
+fruit bodies inside the basket; maximum fruit–fruit overlap was 4.04 micrometres.
+This is one seeded scene at two timesteps, not generalization or contact-force
+convergence. Earlier timeout and arm-return collision cases are preserved.
+
+All 34 assisted/basket/environment-harness tests passed, including forced spill
+and two-timestep release checks. The unchanged fixed-base full-cycle regression
+also passed at 20 and 10 microseconds, and the harvesting interface checks passed
+at 1 and 2 kHz. A 256-transition, two-worker PPO interface run verified parameter
+updates (L2 change 0.2493), checkpointing and frozen RELIC weights. It used the
+release-only reset fixture, which the untrained policy already solved 2/2;
+**no end-to-end learned basket-collection policy is established by that run**.
+
+Artifacts are under `/home/fran/Thekenyos-basket-results-01`, with full and 3x
+playback video in `six-1000hz`, the half-timestep run in `six-2000hz`, and an
+overhead final-basket image (arm hidden for visibility in that rendering only).
+The corresponding remote full runs are
+`/home/ubuntu/basket-six-final-1000` and `basket-six-final-2000`. The videos show
+a scripted controller using frozen RELIC, not learned deposit behavior. The next
+learning milestone is carrying and depositing from varied held-fruit poses,
+then full approach/pick/deposit and repeated collection with held-out evaluation.
+
 ### Fixed-base harvesting environment
 
 See the [task and runnable Gymnasium example](docs/harvest-task.md#run-the-integration-environment).
