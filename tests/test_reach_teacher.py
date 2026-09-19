@@ -2,10 +2,10 @@ import unittest
 import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
-    damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
-    basket_chassis_aabb_m, easy_start_local_m, grasp_local_near_tcp,
-    hold_close_fracs, jaw_hold_q, offset_grasp_local, select_hold_close,
-    tcp_outside_basket,
+    axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
+    hover_tcp_world_m, basket_chassis_aabb_m, easy_start_local_m,
+    grasp_local_near_tcp, hold_close_fracs, jaw_hold_q, offset_grasp_local,
+    select_hold_close, tcp_outside_basket,
 )
 
 
@@ -124,6 +124,21 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertFalse(grasp_local_near_tcp([np.nan, 0.0, 0.0], tcp))
         with self.assertRaises(ValueError):
             grasp_local_near_tcp(tcp, tcp, max_offset_m=0.0)
+
+    def test_axial_mouth_stays_on_tcp_axis_and_insets(self):
+        tcp = np.array([0.20, 0.0, 0.0])
+        np.testing.assert_allclose(axial_mouth_local(tcp), [0.18, 0.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(
+            axial_mouth_local(tcp, np.array([0.26, 0.04, 0.03])),
+            [0.18, 0.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(
+            axial_mouth_local(tcp, np.array([0.16, 0.05, 0.0])),
+            [0.16, 0.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(
+            axial_mouth_local(tcp, np.array([0.02, 0.0, 0.0])),
+            [0.15, 0.0, 0.0], atol=1e-9)
+        with self.assertRaises(ValueError):
+            axial_mouth_local(np.zeros(3))
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

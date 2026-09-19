@@ -139,6 +139,34 @@ def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.0, max_m=0.05, prefer
     return tcp + (delta / dist) * min(max(dist, min_d), max_d)
 
 
+def axial_mouth_local(tcp_local, pocket_local=None, *, inset_m=0.02, max_inset_m=0.05):
+    """Fruit COM on the TCP axis, inset into the opening, never past the teeth.
+
+    Lateral pad-geom offsets are discarded so the kiwi is not spawned beside
+    the jaws. Inset is capped at 5 cm so this is not a knuckle spawn.
+    """
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    inset = float(inset_m)
+    max_in = float(max_inset_m)
+    if tcp.shape != (3,) or not np.isfinite(tcp).all():
+        raise ValueError('TCP local frame must be a finite 3-vector')
+    n = float(np.linalg.norm(tcp))
+    if n < 1e-9:
+        raise ValueError('TCP local frame must be nonzero')
+    if not np.isfinite([inset, max_in]).all() or not 0.0 <= inset <= max_in <= 0.12:
+        raise ValueError('mouth inset must be ordered in [0, 0.12] m')
+    axis = tcp / n
+    along = n - inset
+    if pocket_local is not None:
+        pocket = np.asarray(pocket_local, dtype=np.float64).reshape(3)
+        if pocket.shape != (3,) or not np.isfinite(pocket).all():
+            raise ValueError('pocket local frame must be a finite 3-vector')
+        along = float(np.dot(pocket, axis))
+        along = min(along, n - inset)
+        along = max(along, n - max_in)
+    return axis * along
+
+
 def _joint_actuator_id(model, qposadr):
     """Actuator transmitting to the joint that owns ``qposadr``, or None."""
     qposadr = int(qposadr)
@@ -241,13 +269,13 @@ def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.02):
         raise ValueError('hand pose for the grasp pocket must be finite')
     tcp_local = rot.T @ (tcp - origin)
     jaw_geoms, finger_geoms = _pad_geom_ids(model)
+    pocket_local = None
     if jaw_geoms and finger_geoms:
         ids = _closest_geom_ids(data, jaw_geoms, tcp, 2) + _closest_geom_ids(data, finger_geoms, tcp, 2)
         mid = np.mean([np.asarray(data.geom_xpos[index], dtype=np.float64).reshape(3) for index in ids], axis=0)
         if np.isfinite(mid).all():
             pocket_local = rot.T @ (mid - origin)
-            return offset_grasp_local(tcp_local, pocket_local, min_m=0.0, max_m=0.05, prefer_m=float(inset_m))
-    return offset_grasp_local(tcp_local, tcp_local, min_m=0.0, max_m=0.05, prefer_m=float(inset_m))
+    return axial_mouth_local(tcp_local, pocket_local, inset_m=float(inset_m))
 
 
 def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.02):
@@ -337,10 +365,10 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                    hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0, fruit_equality=None):
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
-    Fruit stays a free body, spawned between the pads rather than at the TCP
-    tip. The chosen close command is not a weld and not a calibrated kiwi-safe
-    force. Uses a 5 ms CPU timestep so a 0.4 s hold does not expand into tens
-    of thousands of native substeps.
+    Fruit stays a free body. The pocket is the open-mouth axial COM, then each
+    close-fraction shuts the jaw around that same point. The chosen command is
+    not a weld and not a calibrated kiwi-safe force. Uses a 5 ms CPU timestep
+    so a 0.4 s hold does not expand into tens of thousands of native substeps.
     """
     import mujoco
     from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
@@ -366,6 +394,21 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
         jaw_act = _joint_actuator_id(model, jaw_qposadr)
         data = mujoco.MjData(model)
         eq = None if fruit_equality is None else int(fruit_equality)
+        data.qpos[:] = q0
+        data.qvel[:] = 0.0
+        data.ctrl[:] = 0.0
+        if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
+            data.eq_active[eq] = 0
+        data.qpos[arm_qids] = start
+        data.qpos[int(jaw_qposadr)] = jaw_open
+        if jaw_act is not None:
+            data.ctrl[jaw_act] = jaw_open
+        mujoco.mj_forward(model, data)
+        local = grasp_local_in_body_m(model, data, tcp_site)
+        body = int(model.site_bodyid[int(tcp_site)])
+        origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+        rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+        pocket0 = origin + rot @ local
         rows = []
         for frac in fracs:
             hold = jaw_hold_q(frac, jaw_open, jaw_closed)
@@ -375,15 +418,13 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                 data.eq_active[eq] = 0
             data.qpos[arm_qids] = start
-            data.qpos[int(jaw_qposadr)] = hold
+            data.qpos[int(jaw_qposadr)] = jaw_open
             if jaw_act is not None:
-                data.ctrl[jaw_act] = hold
-            mujoco.mj_forward(model, data)
-            pocket = grasp_pocket_world_m(model, data, tcp_site)
-            data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket
+                data.ctrl[jaw_act] = jaw_open
+            data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket0
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
-            data.qpos[int(jaw_qposadr)] = hold
+            mujoco.mj_forward(model, data)
             max_load = 0.0
             for _ in range(steps):
                 data.qpos[arm_qids] = start
@@ -396,8 +437,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
             mujoco.mj_forward(model, data)
             fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
-            pocket = grasp_pocket_world_m(model, data, tcp_site)
-            slip = float(np.linalg.norm(fruit - pocket))
+            slip = float(np.linalg.norm(fruit - pocket0))
             if not np.isfinite(slip) or not np.isfinite(max_load):
                 slip, max_load = float('inf'), float('inf')
             rows.append({
@@ -407,16 +447,6 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 'retained': bool(np.isfinite(slip) and slip <= slip_ok),
             })
         chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
-        hold = jaw_hold_q(chosen['close_frac'], jaw_open, jaw_closed)
-        data.qpos[:] = q0
-        data.qvel[:] = 0.0
-        data.ctrl[:] = 0.0
-        if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
-            data.eq_active[eq] = 0
-        data.qpos[arm_qids] = start
-        data.qpos[int(jaw_qposadr)] = hold
-        mujoco.mj_forward(model, data)
-        local = grasp_local_in_body_m(model, data, tcp_site)
     finally:
         model.opt.timestep = saved_dt
     if local is None:
