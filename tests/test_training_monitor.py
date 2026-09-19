@@ -35,7 +35,9 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertIn('Monitor de entrenamiento', html)
             self.assertIn('no demuestran cosecha', html)
             self.assertIn('evaluation/mean_closest_distance_m', html)
-            self.assertIn('meta http-equiv="refresh"', html)
+            self.assertNotIn('http-equiv="refresh"', html)
+            self.assertIn('metrics.json', html)
+            self.assertIn('Último vídeo de progreso', html)
 
     def test_compose_overlay_keeps_scene_and_nearest_gripper_patch(self):
         scene = np.zeros((180, 320, 3), dtype=np.uint8)
@@ -74,7 +76,19 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertEqual(payload['videos'][0]['step'], 10)
             self.assertIn('progress-0010.mp4', html)
             self.assertTrue((hub / 'videos').is_symlink())
-            self.assertIn('training_ready', render_dashboard_html(payload))
+            html_two = render_dashboard_html(dict(
+                schema='training-monitor/v1', training_ready=False, run=str(run), rows=1,
+                latest=payload['latest'], series=payload['series'], generated_at='now',
+                videos=[
+                    dict(step=0, file='progress-0000.mp4', url='videos/progress-0000.mp4', label='old'),
+                    dict(step=50, file='progress-0050.mp4', url='videos/progress-0050.mp4',
+                         label='CPU native progress preview; not a harvest demonstration',
+                         min_tcp_fruit_distance_m=0.21),
+                ]))
+            self.assertIn('progress-0050.mp4', html_two)
+            self.assertNotIn('progress-0000.mp4', html_two)
+            self.assertNotIn('http-equiv="refresh"', html_two)
+            self.assertIn('training_ready', html_two)
 
 
 if __name__ == '__main__':

@@ -223,7 +223,7 @@ def main():
     a = p.parse_args()
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
-    if not 0 <= a.video_every <= 10000 or not 8 <= a.video_steps <= 256:
+    if not 0 <= a.video_every <= 10000 or not 8 <= a.video_steps <= 512:
         p.error('Invalid video-every or video-steps')
     run(a)
 

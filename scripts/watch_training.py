@@ -24,6 +24,10 @@ def serve_monitor(directory: Path, port: int) -> ThreadingHTTPServer:
         def log_message(self, format, *args):
             return
 
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store')
+            super().end_headers()
+
     server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -79,7 +83,7 @@ def main():
     parser.add_argument('--hub', type=Path, help='Extra dashboard copy, e.g. /workspace/training/monitor')
     parser.add_argument('--poll-seconds', type=float, default=2.0)
     parser.add_argument('--video-every', type=int, default=10)
-    parser.add_argument('--video-steps', type=int, default=64)
+    parser.add_argument('--video-steps', type=int, default=256)
     parser.add_argument('--camera-every', type=int)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--http-port', type=int)
@@ -95,7 +99,7 @@ def main():
         return
     if args.run is None:
         parser.error('--run is required unless --record-checkpoint is set')
-    if not 0 <= args.video_every <= 10000 or not 8 <= args.video_steps <= 256:
+    if not 0 <= args.video_every <= 10000 or not 8 <= args.video_steps <= 512:
         parser.error('Invalid video-every or video-steps')
     if not (0.5 <= args.poll_seconds <= 60):
         parser.error('poll-seconds must be in [0.5, 60]')

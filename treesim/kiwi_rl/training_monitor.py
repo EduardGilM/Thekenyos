@@ -178,10 +178,121 @@ def _latest_row(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return dict(rows[-1]) if rows else {}
 
 
+def latest_progress_video(videos: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    return dict(videos[-1]) if videos else None
+
+
+def _video_figure(video: Mapping[str, Any]) -> str:
+    distance = video.get('min_tcp_fruit_distance_m')
+    extra = f" · min TCP-fruta {float(distance):.3f} m" if is_chartable(distance) else ''
+    return (
+        f'<figure><figcaption>update {html.escape(str(video.get("step")))}'
+        f'{html.escape(extra)} · {html.escape(str(video.get("label", "")))}</figcaption>'
+        f'<video controls preload="metadata" src="{html.escape(str(video.get("url")))}"></video></figure>'
+    )
+
+
+_DASHBOARD_SCRIPT = r'''
+<script>
+const CARD_KEYS = ["step", "loss", "reward_mean", "distance_mean_closest_m",
+  "evaluation/mean_closest_distance_m", "evaluation/harvest_successes",
+  "training_transitions_per_second", "torch_peak_allocated_gb"];
+const PRIORITY = ["loss", "kl", "grad_norm", "reward_mean", "reward_std",
+  "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
+  "evaluation/mean_closest_distance_m", "evaluation/final_distance_m",
+  "evaluation/closest_distance_m", "evaluation/harvest_successes",
+  "harvest_successes", "evaluation/terminal_transitions", "terminal_transitions",
+  "training_transitions_per_second", "rollout_transitions_per_second",
+  "torch_peak_allocated_gb", "rollout_seconds", "update_seconds"];
+const SKIP = new Set(["step", "update", "minibatches", "optimized_transitions", "transitions"]);
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+function chartable(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+function fmt(value) {
+  return Number(value).toPrecision(5).replace(/\.?0+$/, "").replace(/\.$/, "");
+}
+function svgChart(steps, values, title) {
+  const width = 720, height = 220;
+  if (!steps.length) {
+    return `<svg viewBox="0 0 ${width} ${height}" class="chart"><text x="20" y="28" fill="#9aa">${esc(title)}: sin datos</text></svg>`;
+  }
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const pad = 0.08 * (hi - lo);
+  lo -= pad; hi += pad;
+  const left = 64, right = width - 12, top = 32, bottom = height - 28;
+  const span = Math.max(steps[steps.length - 1] - steps[0], 1);
+  const xOf = step => left + (step - steps[0]) / span * (right - left);
+  const yOf = value => bottom - (value - lo) / (hi - lo) * (bottom - top);
+  const points = steps.map((step, i) => `${xOf(step).toFixed(1)},${yOf(values[i]).toFixed(1)}`).join(" ");
+  const ticks = [lo, (lo + hi) / 2, hi].map(value =>
+    `<text x="8" y="${yOf(value) + 4}" fill="#8a93a6" font-size="11">${esc(fmt(value))}</text>`).join("");
+  const lastX = xOf(steps[steps.length - 1]), lastY = yOf(values[values.length - 1]);
+  return `<svg viewBox="0 0 ${width} ${height}" class="chart" role="img" aria-label="${esc(title)}">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="#171a21" rx="10"/>
+    <text x="16" y="22" fill="#f2f5ff" font-size="13">${esc(title)}</text>
+    <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" stroke="#2c3344"/>
+    <line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#2c3344"/>
+    ${ticks}
+    <text x="${left}" y="${height - 8}" fill="#8a93a6" font-size="11">${esc(steps[0])}</text>
+    <text x="${right - 24}" y="${height - 8}" fill="#8a93a6" font-size="11">${esc(steps[steps.length - 1])}</text>
+    <polyline fill="none" stroke="#7dd3a0" stroke-width="2" points="${points}"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="#f4d35e"/>
+  </svg>`;
+}
+function renderCards(latest) {
+  const cards = CARD_KEYS.filter(key => chartable(latest[key])).map(key =>
+    `<div class="card"><div class="k">${esc(key)}</div><div class="v">${esc(fmt(latest[key]))}</div></div>`);
+  return cards.join("") || '<div class="card">Esperando training.jsonl</div>';
+}
+function renderCharts(series) {
+  const names = PRIORITY.filter(name => series[name])
+    .concat(Object.keys(series).filter(name => !PRIORITY.includes(name) && !SKIP.has(name)));
+  if (!names.length) return '<p class="empty">Sin métricas numéricas todavía.</p>';
+  return names.map(name => svgChart(series[name].steps, series[name].values, name)).join("\n");
+}
+function renderVideo(video) {
+  const extra = chartable(video.min_tcp_fruit_distance_m)
+    ? ` · min TCP-fruta ${Number(video.min_tcp_fruit_distance_m).toFixed(3)} m` : "";
+  return `<figure><figcaption>update ${esc(video.step)}${esc(extra)} · ${esc(video.label || "")}</figcaption>
+    <video controls preload="metadata" src="${esc(video.url)}"></video></figure>`;
+}
+let currentVideo = null;
+async function tick() {
+  const payload = await fetch("metrics.json?t=" + Date.now(), {cache: "no-store"}).then(r => r.json());
+  document.getElementById("sub").textContent =
+    `${payload.run} · ${payload.rows} filas · actualizado ${payload.generated_at}`;
+  document.getElementById("cards").innerHTML = renderCards(payload.latest || {});
+  document.getElementById("charts").innerHTML = renderCharts(payload.series || {});
+  const videos = payload.videos || [];
+  const video = videos.length ? videos[videos.length - 1] : null;
+  const slot = document.getElementById("clip");
+  if (!video) {
+    currentVideo = null;
+    slot.innerHTML = '<p class="empty">Aún no hay vídeos. El sidecar los graba cada --video-every updates.</p>';
+    return;
+  }
+  if (video.url !== currentVideo) {
+    currentVideo = video.url;
+    slot.innerHTML = renderVideo(video);
+  }
+}
+tick();
+setInterval(() => { tick().catch(() => {}); }, 2000);
+</script>
+'''
+
+
 def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     latest = payload.get('latest') or {}
     series = payload.get('series') or {}
-    videos = payload.get('videos') or []
+    videos = list(payload.get('videos') or [])
     cards = []
     for key in ('step', 'loss', 'reward_mean', 'distance_mean_closest_m',
                 'evaluation/mean_closest_distance_m', 'evaluation/harvest_successes',
@@ -193,16 +304,9 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     ordered = [name for name in PRIORITY_CHARTS if name in series]
     ordered.extend(name for name in series if name not in ordered)
     charts = '\n'.join(svg_chart(series[name]['steps'], series[name]['values'], name) for name in ordered)
-    clips = []
-    for video in videos:
-        distance = video.get('min_tcp_fruit_distance_m')
-        extra = f" · min TCP-fruta {float(distance):.3f} m" if is_chartable(distance) else ''
-        clips.append(
-            f'<figure><figcaption>update {html.escape(str(video.get("step")))}'
-            f'{html.escape(extra)} · {html.escape(str(video.get("label", "")))}</figcaption>'
-            f'<video controls preload="metadata" src="{html.escape(str(video.get("url")))}"></video></figure>')
-    if not clips:
-        clips = ['<p class="empty">Aún no hay vídeos. El sidecar los graba cada --video-every updates.</p>']
+    last = latest_progress_video(videos)
+    clip = _video_figure(last) if last is not None else (
+        '<p class="empty">Aún no hay vídeos. El sidecar los graba cada --video-every updates.</p>')
     generated = html.escape(str(payload.get('generated_at', '')))
     run = html.escape(str(payload.get('run', '')))
     rows = int(payload.get('rows', 0))
@@ -210,12 +314,11 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
-  <meta http-equiv="refresh" content="2"/>
   <title>Thekenyos · monitor de entrenamiento</title>
   <style>
     body {{ margin: 0; background: #0f1115; color: #e8edf7; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }}
     header, main {{ max-width: 1100px; margin: 0 auto; padding: 20px; }}
-    h1 {{ font-size: 22px; margin: 0 0 6px; }}
+    h1 {{ font-size: 22px; margin-bottom: 6px; }}
     .sub, .empty {{ color: #9aa3b5; }}
     .warn {{ background: #3a2a12; color: #f4d35e; padding: 10px 12px; border-radius: 8px; margin: 12px 0 18px; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }}
@@ -232,16 +335,17 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
 <body>
   <header>
     <h1>Monitor de entrenamiento</h1>
-    <div class="sub">{run} · {rows} filas · actualizado {generated}</div>
-    <div class="warn">La distancia TCP-fruta es una métrica de alcance. <code>harvest_successes = 0</code> y un vídeo de progreso no demuestran cosecha. <code>training_ready</code> sigue en false. El recuadro amarillo es la RGB del gripper RELIC, no un mástil inventado.</div>
-    <div class="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
+    <div class="sub" id="sub">{run} · {rows} filas · actualizado {generated}</div>
+    <div class="warn">La distancia TCP-fruta es una métrica de alcance. <code>harvest_successes = 0</code> y un vídeo de progreso no demuestran cosecha. <code>training_ready</code> sigue en false. El recuadro amarillo es la RGB del gripper RELIC, no un mástil inventado. Las gráficas se actualizan sin recargar la página.</div>
+    <div class="cards" id="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
   </header>
   <main>
     <h2>Gráficas</h2>
-    <div class="charts">{charts or '<p class="empty">Sin métricas numéricas todavía.</p>'}</div>
-    <h2>Vídeos de progreso</h2>
-    {''.join(clips)}
+    <div class="charts" id="charts">{charts or '<p class="empty">Sin métricas numéricas todavía.</p>'}</div>
+    <h2>Último vídeo de progreso</h2>
+    <div id="clip">{clip}</div>
   </main>
+{_DASHBOARD_SCRIPT}
 </body>
 </html>
 """
@@ -312,7 +416,8 @@ class LiveDashboard:
 def add_monitor_args(parser) -> None:
     parser.add_argument('--video-every', type=int, default=10,
                         help='Record a CPU progress clip every N updates; 0 disables')
-    parser.add_argument('--video-steps', type=int, default=64)
+    parser.add_argument('--video-steps', type=int, default=256,
+                        help='Policy steps in each CPU progress clip (about 10 s at 25 fps)')
     parser.add_argument('--monitor-hub', type=Path,
                         help='Optional extra copy of index.html for Jupyter /files')
 
@@ -376,12 +481,12 @@ def _capture_rgbd(renderer, data, camera, *, minimum_m=.05, maximum_m=4.):
 
 
 def record_progress_video(checkpoint: str | Path, output: str | Path, *,
-                          steps: int = 64, camera_every: int | None = None,
+                          steps: int = 256, camera_every: int | None = None,
                           control_dt: float = .02, width: int = 640, height: int = 360,
                           resolution: int = 64, fps: int = 25) -> dict[str, Any]:
     """Deterministic CPU rollout of one checkpoint. Not a harvest demo."""
-    if not isinstance(steps, int) or not 8 <= steps <= 256:
-        raise ValueError('video steps must be an integer in [8, 256]')
+    if not isinstance(steps, int) or not 8 <= steps <= 512:
+        raise ValueError('video steps must be an integer in [8, 512]')
     if width % 2 or height % 2:
         raise ValueError('ffmpeg yuv420p needs even width and height')
     info = checkpoint_paths(checkpoint)
@@ -516,7 +621,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
 
 
 def spawn_progress_video(checkpoint: str | Path, output: str | Path, *,
-                         steps: int = 64, camera_every: int = 2,
+                         steps: int = 256, camera_every: int = 2,
                          python: str | None = None) -> subprocess.Popen | None:
     """Start a CPU recording subprocess that leaves the training GPU alone."""
     output = Path(output)

@@ -744,10 +744,12 @@ python -B scripts/watch_training.py --run /path/to/run \
   --hub /path/to/training/monitor --video-every 10 --poll-seconds 2
 ```
 
-The page refreshes every two seconds from `training.jsonl`. If Jupyter already
-owns the tunneled port, open `monitor/index.html` through `/files/...`. Use
-`--http-port` only when that port is free. Distance, loss and
-`harvest_successes` on the dashboard are still not harvest proof.
+The page updates charts from `metrics.json` every two seconds without reloading,
+and shows only the latest CPU progress clip. Default clips are 256 policy steps
+(~10 s at 25 fps). If Jupyter already owns the tunneled port, open
+`monitor/index.html` through `/files/...`. Use `--http-port` only when that port
+is free. Distance, loss and `harvest_successes` on the dashboard are still not
+harvest proof.
 
 `benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
 and `--camera`. It reports policy transitions/s separately from physics steps/s.
