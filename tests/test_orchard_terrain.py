@@ -141,6 +141,22 @@ class OrchardTerrainTest(unittest.TestCase):
                          int(round(2.0 * half / cover["cell_m"])) + 1)
         self.assertTrue(np.isfinite(floor.ground_z(97.5, 110.0)))
 
+    def test_camera_approaches_the_row(self):
+        from scripts.record_orchard_mujoco import camera_pose
+
+        class Floor:
+            def canopy_z(self, x, y):
+                return 1.6
+            def ground_z(self, x, y):
+                return 0.04
+
+        start = camera_pose(0, 100, Floor(), 32.0, 5.0)
+        end = camera_pose(99, 100, Floor(), 32.0, 5.0)
+        self.assertGreater(start[1], 8.0)
+        self.assertLess(end[1], 4.0)
+        self.assertGreater(end[0][2], 0.2)
+        self.assertLess(end[0][2], 1.6)
+
     def test_flat_generate_unchanged(self):
         skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0)
         posts = [s for s in skel if abs(s.axis[2]) > 1.0]

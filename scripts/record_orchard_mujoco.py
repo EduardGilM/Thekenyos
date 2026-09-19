@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Native MuJoCo preview of the commercial kiwi plantation.
 
-This is a scripted flyover of the seeded pergola grid plus orchard floor,
-compiled as a MuJoCo hfield. It is not Newton GL, not Spot's URDF, and
-not a learned policy. Optional render-only kiwi leaves are massless visual
-geoms (no extra bodies). The Newton GL recording is ``scripts/record_scene.py``.
+This is a scripted approach into a row of the seeded pergola grid plus orchard
+floor, compiled as a MuJoCo hfield. The heightfield sits on a visual earth
+bulk so the hillside is not a floating card. It is not Newton GL, not Spot's
+URDF, and not a learned policy.
 
     python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
         --hillside --canopy-spacing .15 --pergola-rows 9 --pergola-columns 7 \
@@ -91,14 +91,34 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     geoms.extend(leaf_geoms)
     look_z = 0.5 * (min_z + float(floor.canopy_z(0.0, 0.0)))
     leaf_xml = "\n".join(leaf_assets)
+    # Visual earth bulk so the heightfield is a hillside cut, not a floating card.
+    bulk = max(6.0, 0.35 * elevation)
+    skirt = 0.45
+    earth = "0.27 0.17 0.08 1"
+    soil_geoms = [
+        f'    <geom name="earth_mass" type="box" size="{half + 0.8:.3f} {half + 0.8:.3f} {bulk:.3f}" '
+        f'pos="0 0 {min_z - bulk:.4f}" rgba="{earth}" contype="0" conaffinity="0"/>',
+        f'    <geom name="earth_x_pos" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
+        f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
+        f'contype="0" conaffinity="0"/>',
+        f'    <geom name="earth_x_neg" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
+        f'pos="{-half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
+        f'contype="0" conaffinity="0"/>',
+        f'    <geom name="earth_y_pos" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
+        f'pos="0 {half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
+        f'contype="0" conaffinity="0"/>',
+        f'    <geom name="earth_y_neg" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
+        f'pos="0 {-half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" rgba="{earth}" '
+        f'contype="0" conaffinity="0"/>',
+    ]
     return f'''<mujoco model="kiwi_plantation">
   <compiler angle="radian"/>
   <option gravity="0 0 -9.81"/>
   <visual>
-    <global offwidth="{int(width)}" offheight="{int(height)}" azimuth="125" elevation="-22" fovy="42"/>
+    <global offwidth="{int(width)}" offheight="{int(height)}" azimuth="125" elevation="-22" fovy="46"/>
     <headlight ambient=".18 .19 .16" diffuse=".42 .44 .38" specular=".12 .12 .10"/>
     <rgba haze=".70 .78 .86 1"/>
-    <map fogstart="40" fogend="220" znear=".15" zfar="420"/>
+    <map fogstart="35" fogend="180" znear=".05" zfar="420"/>
     <quality shadowsize="2048" offsamples="4"/>
   </visual>
   <asset>
@@ -108,7 +128,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     <material name="orchard" texture="orchard" texrepeat="1 1" texuniform="false"
               reflectance="0.02" rgba="1 1 1 1"/>
     <hfield name="orchard_ground" nrow="{nrow}" ncol="{ncol}"
-            size="{half} {half} {elevation:.5f} 0.08"/>
+            size="{half} {half} {elevation:.5f} {bulk:.3f}"/>
 {leaf_xml}
   </asset>
   <worldbody>
@@ -116,10 +136,11 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
            diffuse=".70 .66 .52" specular=".18 .16 .12"/>
     <light pos="-40 30 55" diffuse=".16 .18 .14"/>
     <camera name="orbit" pos="80 -110 60" xyaxes="0.81 0.59 0 -0.18 0.25 0.95"
-            fovy="42"/>
+            fovy="46"/>
     <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
           pos="0 0 {min_z:.5f}" rgba="1 1 1 1"
           friction="{mu:.3f} 0.01 0.001"/>
+{chr(10).join(soil_geoms)}
 {chr(10).join(geoms)}
     <geom type="sphere" pos="0 0 {look_z:.4f}" size="0.001" rgba="0 0 0 0"
           contype="0" conaffinity="0"/>
@@ -135,15 +156,20 @@ def apply_hfield(model, floor) -> None:
     model.hfield_data[:] = ((heights - min_z) / span).astype(np.float64).ravel()
 
 
-def camera_pose(frame, n_frames, floor, half_span_m: float):
-    """High flyover of the full plantation; stay steep enough to fill the frame."""
+def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0):
+    """Establish the hillside, then walk into a row and look under the canopy."""
     t = frame / max(n_frames - 1, 1)
-    s = 0.5 - 0.5 * math.cos(math.pi * t)
-    look = np.array([0.0, -0.08 * half_span_m + 0.16 * half_span_m * s,
-                     float(floor.canopy_z(0.0, 0.0))])
-    azimuth = 38.0 + 70.0 * t
-    elevation = -38.0
-    distance = 0.72 * half_span_m + 0.12 * half_span_m * (1.0 - s)
+    s = t * t * (3.0 - 2.0 * t)
+    x_in = 0.5 * float(spacing)
+    y_in = -0.15 * half_span_m * (1.0 - s) + 1.4 * s
+    canopy = float(floor.canopy_z(x_in, y_in))
+    ground = float(floor.ground_z(x_in, y_in))
+    look_out = np.array([0.0, -0.10 * half_span_m, float(floor.canopy_z(0.0, 0.0))])
+    look_in = np.array([x_in, y_in, 0.62 * ground + 0.38 * canopy])
+    look = (1.0 - s) * look_out + s * look_in
+    azimuth = 52.0 + 38.0 * s
+    elevation = -22.0 + 14.0 * s
+    distance = (0.38 * half_span_m) * (1.0 - s) + 3.4 * s
     return look, distance, azimuth, elevation
 
 
@@ -252,7 +278,7 @@ def main():
         f"drawtext=text='{args.pergola_rows} x {args.pergola_columns} posts at "
         f"{spacing:.1f} m   ~{ha:.2f} ha   fruit {len(fruit)}   leaves {len(leaf_geoms)}':"
         f"x=28:y=60:fontsize=18:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1,"
-        f"drawtext=text='scripted flyover  -  assumed {args.slope_deg:.0f} deg farm tilt  -  "
+        f"drawtext=text='scripted approach into the row  -  assumed {args.slope_deg:.0f} deg farm tilt  -  "
         f"render-only foliage  -  GL {gl_backend}  -  not Spot gait':"
         f"x=28:y=92:fontsize=16:fontcolor=white:shadowcolor=black:shadowx=1:shadowy=1"
     )
@@ -265,7 +291,7 @@ def main():
     try:
         for frame in range(args.frames):
             lookat, distance, azimuth, elevation = camera_pose(
-                frame, args.frames, floor, half)
+                frame, args.frames, floor, half, spacing)
             camera.lookat[:] = lookat
             camera.distance = distance
             camera.azimuth = azimuth
