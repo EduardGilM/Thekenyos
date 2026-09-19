@@ -19,6 +19,7 @@ the actor and load weights, then pass this gate.
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,6 +55,16 @@ def sample_valid_r84(n: int, seed: int) -> np.ndarray:
 def run_parity(relic: Path, samples: int, seed: int) -> dict:
     import onnxruntime as ort
 
+    relic = relic.resolve()
+    actual_commit = subprocess.check_output(['git', '-C', str(relic), 'rev-parse', 'HEAD'], text=True).strip()
+    if actual_commit != PINNED_COMMIT:
+        raise ValueError(f'RELIC checkout is not pinned: {actual_commit}')
+    dirty = subprocess.check_output(['git', '-C', str(relic), 'status', '--porcelain', '--',
+                                     'source/relic/relic/assets/spot'], text=True).strip()
+    if dirty:
+        raise ValueError('RELIC assets differ from the pinned checkout')
+    if samples < 1:
+        raise ValueError('Use at least one parity sample')
     onnx_path = (relic / "source/relic/relic/assets/spot/pretrained"
                  / "policy.onnx")
     if not onnx_path.is_file():
@@ -76,9 +87,10 @@ def run_parity(relic: Path, samples: int, seed: int) -> dict:
     for row in xs:
         a = sess.run(None, {ins[0].name: row[None]})[0][0]
         b = sess.run(None, {ins[0].name: row[None]})[0][0]
-        if not np.isfinite(a).all():
+        if not np.isfinite(a).all() or not np.isfinite(b).all():
             worst_finite = False
             break
+        max_abs = max(max_abs, float(np.abs(a).max()))
         worst_drift = max(worst_drift, float(np.abs(a - b).max()))
     ok = worst_finite and worst_drift <= TOL
     return {

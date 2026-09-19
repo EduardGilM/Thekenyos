@@ -45,6 +45,15 @@ class SchemaTest(unittest.TestCase):
         self.assertTrue(np.isfinite(out).all())
         self.assertEqual(clipped, 0)
 
+    def test_image_validity_is_not_age(self):
+        raw = _raw_p85()
+        out, _ = S.normalise_p85(raw)
+        self.assertAlmostEqual(float(out[82]), .1)
+        self.assertEqual(float(out[83]), 1.)
+        raw['hand_image_age_valid'] = np.array([2., 0.])
+        out, _ = S.normalise_p85(raw)
+        self.assertEqual(float(out[83]), 0.)
+
     def test_normalise_rejects_bad_inputs(self):
         bad = _raw_p85()
         bad["height_m"] = np.array([np.inf])

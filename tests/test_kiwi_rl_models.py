@@ -35,6 +35,16 @@ class ModelsTest(unittest.TestCase):
         le = M.categorical_logprob(logits, np.zeros(4, dtype=np.int64))
         self.assertTrue(np.isfinite(le).all())
 
+    def test_scale_aware_parity_preserves_near_zero_accuracy(self):
+        reference = np.full((2, 12), 50., dtype=np.float32)
+        self.assertTrue(M.onnx_pytorch_parity(reference, reference + 8e-5)['pass'])
+        reference.fill(0.)
+        self.assertFalse(M.onnx_pytorch_parity(reference, reference + 2e-5)['pass'])
+        with self.assertRaises(ValueError):
+            M.onnx_pytorch_parity(reference, reference, rtol=1e-3)
+        with self.assertRaises(ValueError):
+            M.onnx_pytorch_parity(reference, np.full_like(reference, np.nan))
+
     def test_g1_placeholder_and_parity(self):
         g1 = M.GaitPolicyG1()
         a = g1.act(np.zeros((2, 84), dtype=np.float32))

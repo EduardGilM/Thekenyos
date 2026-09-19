@@ -16,6 +16,16 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(ev.event_spill(10), -25.0)
         self.assertEqual(ev.event_spill(10), 0.0)
 
+    def test_loss_spill_cross_event_deduplication(self):
+        ev = RewardEvaluator([7, 8])
+        ev.register_preloaded(7)
+        self.assertEqual(ev.event_spill(7), -25.)
+        self.assertEqual(ev.event_loss(7), 0.)
+        self.assertEqual(ev.event_deposit(7), 0.)
+        self.assertEqual(ev.event_loss(8), -25.)
+        self.assertEqual(ev.event_spill(8), 0.)
+        self.assertEqual(ev.event_deposit(8), 0.)
+
     def test_preloaded_no_deposit_reward(self):
         ev = RewardEvaluator([7])
         ev.register_preloaded(7)

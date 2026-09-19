@@ -24,6 +24,25 @@ class ArbiterTest(unittest.TestCase):
         a.update(0.04, None, "FINISH", 0.0, 0.0, 0.1, True, verify_time_s=1.2)
         self.assertEqual(a.state.phase, "EXPLORE")
 
+    def test_settle_requires_continuous_stability(self):
+        a = Arbiter()
+        a.update(.04, 'ATTEMPT', None, 0., 0., 0., True)
+        a.update(.29, None, None, 1., 0., 0., True)
+        a.update(.01, None, None, 0., 0., 0., True)
+        self.assertEqual(a.state.phase, 'SETTLE')
+        for _ in range(30):
+            a.update(.01, None, None, 0., 0., 0., True)
+        self.assertEqual(a.state.phase, 'MANIPULATE')
+        self.assertEqual(a.state.active_policy, 'M3')
+
+    def test_stale_frame_resets_stable_dwell(self):
+        a = Arbiter()
+        a.update(.04, 'ATTEMPT', None, 0., 0., 0., True)
+        a.update(.25, None, None, 0., 0., 0., True)
+        a.update(.1, None, None, 0., 0., 2., False)
+        a.update(.05, None, None, 0., 0., 0., True)
+        self.assertEqual(a.state.phase, 'SETTLE')
+
     def test_manipulate_holds_base_command_zero(self):
         a = Arbiter()
         a.update(0.04, "ATTEMPT", None, 0.0, 0.0, 0.1, True)

@@ -113,7 +113,7 @@ class RewardEvaluator:
     def event_deposit(self, fid) -> float:
         """+W_DEPOSIT once per fruit on confirmed stored (evaluator-side)."""
         i = self.ledger._idx(fid)
-        if self.ledger.deposit_paid[i]:
+        if self.ledger.deposit_paid[i] or self.ledger.lost_once[i] or self.ledger.spilled_once[i]:
             return 0.0
         self.ledger.deposit_paid[i] = True
         return W_DEPOSIT
@@ -121,7 +121,7 @@ class RewardEvaluator:
     def event_loss(self, fid) -> float:
         """W_LOSS once per fruit lost before storage (ground/outside)."""
         i = self.ledger._idx(fid)
-        if self.ledger.lost_once[i]:
+        if self.ledger.lost_once[i] or self.ledger.spilled_once[i]:
             return 0.0
         self.ledger.lost_once[i] = True
         return W_LOSS
@@ -129,7 +129,7 @@ class RewardEvaluator:
     def event_spill(self, fid) -> float:
         """W_SPILL once per previously-stored (or preloaded) fruit spilled."""
         i = self.ledger._idx(fid)
-        if self.ledger.spilled_once[i]:
+        if self.ledger.spilled_once[i] or self.ledger.lost_once[i]:
             return 0.0
         self.ledger.spilled_once[i] = True
         return W_SPILL
