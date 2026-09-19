@@ -249,8 +249,10 @@ def _write_base_commands(src: wp.array2d(dtype=float), dst: wp.array2d(dtype=flo
 def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
                            qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
                            targets: wp.array2d(dtype=float), site_xpos: wp.array2d(dtype=wp.vec3),
+                           xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                            fruit_qposadr: wp.array(dtype=int), fruit_dofadr: wp.array(dtype=int),
-                           tcp_site: int, jaw_qposadr: int, jaw_closed: float, jaw_open: float,
+                           tcp_site: int, tcp_body: int, grasp_local: wp.vec3, use_pocket: int,
+                           jaw_qposadr: int, deposit_jaw: wp.array(dtype=float), jaw_open: float,
                            equality_index: wp.array(dtype=int),
                            eq_active: wp.array2d(dtype=wp.bool), detached: wp.array(dtype=wp.uint8),
                            grasped: wp.array(dtype=wp.uint8), grasp_paid: wp.array(dtype=wp.uint8),
@@ -265,10 +267,13 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
     fruit_dadr = fruit_dofadr[0]
     target_eq = equality_index[0]
     if mode == 1:
-        tcp = site_xpos[world, tcp_site]
-        qpos[world, fruit_qadr + 0] = tcp[0]
-        qpos[world, fruit_qadr + 1] = tcp[1]
-        qpos[world, fruit_qadr + 2] = tcp[2]
+        if use_pocket != 0:
+            pos = xpos[world, tcp_body] + xmat[world, tcp_body] @ grasp_local
+        else:
+            pos = site_xpos[world, tcp_site]
+        qpos[world, fruit_qadr + 0] = pos[0]
+        qpos[world, fruit_qadr + 1] = pos[1]
+        qpos[world, fruit_qadr + 2] = pos[2]
         qpos[world, fruit_qadr + 3] = 1.0
         qpos[world, fruit_qadr + 4] = 0.0
         qpos[world, fruit_qadr + 5] = 0.0
@@ -280,8 +285,9 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
         detached[world] = wp.uint8(1)
         grasped[world] = wp.uint8(1)
         grasp_paid[world] = wp.uint8(1)
-        qpos[world, jaw_qposadr] = jaw_closed
-        targets[world, 18] = jaw_closed
+        jaw = deposit_jaw[world]
+        qpos[world, jaw_qposadr] = jaw
+        targets[world, 18] = jaw
     if mode == 2:
         qpos[world, jaw_qposadr] = jaw_open
         targets[world, 18] = jaw_open
@@ -485,6 +491,10 @@ class FastRuntime:
             if tcp_site_name is None:
                 raise ValueError('Fast scene robot must provide tcp_site or a body with a site')
             self.tcp_site = int(self.model.site(tcp_site_name).id)
+            self._tcp_body = int(self.model.site_bodyid[self.tcp_site])
+            self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
+            self._grasp_local_host = np.zeros(3, dtype=np.float64)
+            self._use_pocket = 0
             self.chassis = self.control.chassis
             from .fast_task import FastHarvestTask
             self.task = FastHarvestTask(self.model, self.data, self.manifest)
@@ -764,6 +774,24 @@ class FastRuntime:
             holds = np.full(self.worlds, hold, dtype=np.float32)
             self._easy_jaw_hold.assign(holds)
             self._easy_jaw_hold_next.assign(holds)
+        if self._easy:
+            self._use_pocket = 1
+            local = self._hold_sweep.get('grasp_local_m') if self._hold_sweep is not None else None
+            if local is None:
+                from .reach_teacher import grasp_local_fallback_m
+                local = grasp_local_fallback_m(self.model, self.tcp_site)
+            local = np.asarray(local, dtype=np.float64).reshape(3)
+            if not np.isfinite(local).all() or float(np.linalg.norm(local)) > 0.12:
+                from .reach_teacher import grasp_local_fallback_m
+                local = np.asarray(grasp_local_fallback_m(self.model, self.tcp_site), dtype=np.float64)
+            self._grasp_local_host = np.asarray(local, dtype=np.float64).reshape(3)
+            self._grasp_local = wp.vec3(float(self._grasp_local_host[0]),
+                                       float(self._grasp_local_host[1]),
+                                       float(self._grasp_local_host[2]))
+        else:
+            self._use_pocket = 0
+            self._grasp_local_host = np.zeros(3, dtype=np.float64)
+            self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
         return {
             'easy': self._easy,
             'shaping_coef': coef,
@@ -775,9 +803,10 @@ class FastRuntime:
             'hold_close_frac': float(self._chosen_close_frac),
             'hold_sweep_slip_m': None if self._hold_sweep is None else self._hold_sweep.get('chosen_slip_m'),
             'hold_sweep_load_N': None if self._hold_sweep is None else self._hold_sweep.get('chosen_load_N'),
+            'grasp_local_m': None if not self._easy else [float(x) for x in self._grasp_local_host],
             'weld': False,
             'scope': ('experimental privileged deposit facilitation; fruit stays free; '
-                      'random outside-crate arm starts; jaw-close sweep holds then deposits'),
+                      'random outside-crate arm starts; pad-pocket jaw-close sweep holds then deposits'),
         }
 
     def _run_hold_sweep(self):
@@ -799,11 +828,17 @@ class FastRuntime:
                 fruit_equality=int(self.task.equality_id))
         except (ValueError, RuntimeError, TypeError, AttributeError) as exc:
             mid = float(self._hold_close_fracs[len(self._hold_close_fracs) // 2])
+            from .reach_teacher import grasp_local_fallback_m
+            try:
+                local = np.asarray(grasp_local_fallback_m(self.model, self.tcp_site), dtype=np.float64)
+            except (ValueError, RuntimeError, TypeError, AttributeError):
+                local = None
             return {
                 'rows': [],
                 'chosen_close_frac': mid,
                 'chosen_slip_m': None,
                 'chosen_load_N': None,
+                'grasp_local_m': local,
                 'weld': False,
                 'scope': f'hold sweep fallback; mid close-frac ({type(exc).__name__})',
             }
@@ -870,8 +905,10 @@ class FastRuntime:
                 self._refresh(mw)
             wp.launch(_configure_skill_reset, dim=self.worlds, inputs=[
                 mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
-                self.data.site_xpos, self._fruit_qposadrs, self._fruit_dofadrs, self.tcp_site,
-                self._jaw_qposadr, self._jaw_closed, self._jaw_open, self.task.equality_index,
+                self.data.site_xpos, self.data.xpos, self.data.xmat,
+                self._fruit_qposadrs, self._fruit_dofadrs, self.tcp_site, self._tcp_body,
+                self._grasp_local, int(self._use_pocket),
+                self._jaw_qposadr, self._easy_jaw_hold, self._jaw_open, self.task.equality_index,
                 self.task.eq_active, self.task.detached, self.task.grasped, self.task.grasp_paid,
                 self._chassis_qposadr, 1.0, self._randomize_layout, self._layout_dx, self._layout_dy],
                 device=self.device)

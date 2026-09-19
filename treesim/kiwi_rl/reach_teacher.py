@@ -112,6 +112,82 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
     return point
 
 
+def offset_grasp_local(tcp_local, pocket_local, *, min_m=0.015, max_m=0.06, prefer_m=0.03):
+    """Keep a grasp offset a few centimetres from the TCP, toward the pads.
+
+    Pure kinematics. The fruit stays a free body; this is not a measured grasp.
+    """
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    pocket = np.asarray(pocket_local, dtype=np.float64).reshape(3)
+    if not np.isfinite(tcp).all() or not np.isfinite(pocket).all():
+        raise ValueError('grasp offset inputs must be finite')
+    min_d, max_d, prefer = float(min_m), float(max_m), float(prefer_m)
+    if not np.isfinite([min_d, max_d, prefer]).all() or not 0.005 <= min_d <= prefer <= max_d <= 0.12:
+        raise ValueError('grasp offset bounds must be ordered in [0.005, 0.12] m')
+    delta = pocket - tcp
+    dist = float(np.linalg.norm(delta))
+    if dist < 1e-9:
+        n = float(np.linalg.norm(tcp))
+        direction = (-tcp / n) if n > 1e-9 else np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        return tcp + direction * prefer
+    return tcp + (delta / dist) * min(max(dist, min_d), max_d)
+
+
+def _hand_link_ids(model):
+    jaw_body = finger_body = None
+    for index in range(int(model.nbody)):
+        name = (model.body(index).name or '').lower()
+        if finger_body is None and any(token in name for token in ('fngr', 'finger')):
+            finger_body = int(index)
+        elif jaw_body is None and 'jaw' in name:
+            jaw_body = int(index)
+    return jaw_body, finger_body
+
+
+def grasp_local_fallback_m(model, tcp_site, *, inset_m=0.03):
+    """TCP-site body offset toward the hand origin when pad kinematics are unavailable."""
+    inset = float(inset_m)
+    if not np.isfinite(inset) or not 0.01 <= inset <= 0.08:
+        raise ValueError('grasp inset must be finite in [0.01, 0.08] m')
+    if not isinstance(tcp_site, (int, np.integer)) or int(tcp_site) < 0:
+        raise ValueError('tcp_site must be a non-negative integer')
+    tcp_local = np.asarray(model.site_pos[int(tcp_site)], dtype=np.float64).reshape(3)
+    if not np.isfinite(tcp_local).all():
+        raise ValueError('TCP site local position must be finite')
+    return offset_grasp_local(tcp_local, tcp_local, prefer_m=inset)
+
+
+def grasp_local_in_body_m(model, data, tcp_site, *, inset_m=0.03):
+    """Grasp pocket in the TCP site's body frame, between the jaw and finger."""
+    body = int(model.site_bodyid[int(tcp_site)])
+    origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+    rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+    tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64).reshape(3)
+    if not np.isfinite(origin).all() or not np.isfinite(rot).all() or not np.isfinite(tcp).all():
+        raise ValueError('hand pose for the grasp pocket must be finite')
+    tcp_local = rot.T @ (tcp - origin)
+    jaw_body, finger_body = _hand_link_ids(model)
+    if jaw_body is not None and finger_body is not None:
+        mid = 0.5 * (np.asarray(data.xpos[jaw_body], dtype=np.float64).reshape(3)
+                     + np.asarray(data.xpos[finger_body], dtype=np.float64).reshape(3))
+        if np.isfinite(mid).all():
+            pocket_local = rot.T @ (mid - origin)
+            return offset_grasp_local(tcp_local, pocket_local, prefer_m=float(inset_m))
+    return offset_grasp_local(tcp_local, tcp_local, prefer_m=float(inset_m))
+
+
+def grasp_pocket_world_m(model, data, tcp_site, *, inset_m=0.03):
+    """World COM for a free fruit sitting between the pads. Not a weld."""
+    body = int(model.site_bodyid[int(tcp_site)])
+    origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+    rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+    local = grasp_local_in_body_m(model, data, tcp_site, inset_m=inset_m)
+    pocket = origin + rot @ local
+    if not np.isfinite(pocket).all():
+        raise ValueError('grasp pocket must be finite')
+    return pocket
+
+
 def hold_close_fracs(n_levels=None, close_min=None, close_max=None):
     """Jaw close fractions for the rigid hold sweep. 0=open, 1=fully closed.
 
@@ -142,12 +218,13 @@ def jaw_hold_q(close_frac, jaw_open, jaw_closed):
 
 
 def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
-    """Pick a close-fraction that retains. Prefer staying under the 15 N gate.
+    """Pick a close-fraction that retains under the 15 N engineering gate.
 
-    If several static holds keep the fruit, take one step tighter than the
-    lightest keeper so a moving carry is less likely to drop it. If nothing
-    retains, fully close. ``max_load_N`` is a rigid-sim contact result, not a
-    tissue-safe force.
+    If several static holds keep the fruit without crossing the load gate, take
+    one step tighter than the lightest keeper so a moving carry is less likely
+    to drop it. If nothing retains, do not slam the jaw shut: keep the lightest
+    under-limit command with the smallest slip. ``max_load_N`` is a rigid-sim
+    contact result, not a tissue-safe force.
     """
     if not isinstance(rows, (list, tuple)) or not rows:
         raise ValueError('hold sweep rows must be a non-empty sequence')
@@ -169,18 +246,16 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
         if not np.isfinite([close, slip, load]).all() or not 0.0 <= close <= 1.0 or slip < 0 or load < 0:
             raise ValueError('hold sweep row values must be finite and physically ranged')
         cleaned.append({'close_frac': close, 'slip_m': slip, 'max_load_N': load, 'retained': retained})
-    retained = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok]
-    if retained:
-        under = [row for row in retained if row['max_load_N'] <= load_limit]
-        pool = under or retained
-        ordered = sorted(pool, key=lambda row: row['close_frac'])
-        # One step tighter than the lightest keeper so a moving carry does not
-        # drop a fruit that only survived a static hold.
-        idx = 1 if len(ordered) > 1 and under else 0
+    viable = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok
+              and row['max_load_N'] <= load_limit]
+    if viable:
+        ordered = sorted(viable, key=lambda row: row['close_frac'])
+        idx = 1 if len(ordered) > 1 else 0
         return ordered[idx]
-    # Nothing retained: fully close, matching the unassisted carry that already
-    # kept fruit at the TCP. DEPOSIT_ONLY still skips jaw-overload failure.
-    return max(cleaned, key=lambda row: row['close_frac'])
+    under = [row for row in cleaned if row['max_load_N'] <= load_limit]
+    if under:
+        return min(under, key=lambda row: (row['slip_m'], row['close_frac']))
+    return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
 
 
 def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qposadr,
@@ -188,9 +263,10 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                    hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0, fruit_equality=None):
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
-    Fruit stays a free body. The chosen close command is not a weld and not a
-    calibrated kiwi-safe force. Uses a 5 ms CPU timestep so a 0.4 s hold does
-    not expand into tens of thousands of native substeps.
+    Fruit stays a free body, spawned between the pads rather than at the TCP
+    tip. The chosen close command is not a weld and not a calibrated kiwi-safe
+    force. Uses a 5 ms CPU timestep so a 0.4 s hold does not expand into tens
+    of thousands of native substeps.
     """
     import mujoco
     from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
@@ -209,6 +285,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
         raise ValueError('sweep qpos must be one native configuration, not a batched world stack')
     saved_dt = float(model.opt.timestep)
     model.opt.timestep = 0.005
+    local = None
     try:
         steps = max(1, min(80, int(round(hold_time / float(model.opt.timestep)))))
         hand_geoms = _hand_geom_ids(model)
@@ -225,8 +302,8 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.qpos[arm_qids] = start
             data.qpos[int(jaw_qposadr)] = hold
             mujoco.mj_forward(model, data)
-            tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
-            data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = tcp
+            pocket = grasp_pocket_world_m(model, data, tcp_site)
+            data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
             data.qpos[int(jaw_qposadr)] = hold
@@ -240,8 +317,8 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
             mujoco.mj_forward(model, data)
             fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
-            tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
-            slip = float(np.linalg.norm(fruit - tcp))
+            pocket = grasp_pocket_world_m(model, data, tcp_site)
+            slip = float(np.linalg.norm(fruit - pocket))
             if not np.isfinite(slip) or not np.isfinite(max_load):
                 slip, max_load = float('inf'), float('inf')
             rows.append({
@@ -250,18 +327,31 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                 'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
                 'retained': bool(np.isfinite(slip) and slip <= slip_ok),
             })
+        chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
+        hold = jaw_hold_q(chosen['close_frac'], jaw_open, jaw_closed)
+        data.qpos[:] = q0
+        data.qvel[:] = 0.0
+        data.ctrl[:] = 0.0
+        if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
+            data.eq_active[eq] = 0
+        data.qpos[arm_qids] = start
+        data.qpos[int(jaw_qposadr)] = hold
+        mujoco.mj_forward(model, data)
+        local = grasp_local_in_body_m(model, data, tcp_site)
     finally:
         model.opt.timestep = saved_dt
-    chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
+    if local is None:
+        local = grasp_local_fallback_m(model, tcp_site)
     return {
         'rows': rows,
         'chosen_close_frac': float(chosen['close_frac']),
         'chosen_slip_m': float(chosen['slip_m']),
         'chosen_load_N': float(chosen['max_load_N']),
+        'grasp_local_m': np.asarray(local, dtype=np.float64).reshape(3),
         'load_limit_N': load_limit,
         'slip_ok_m': slip_ok,
         'weld': False,
-        'scope': 'rigid jaw-close sweep; not a tissue-safe force',
+        'scope': 'rigid jaw-close sweep in the pad pocket; not a tissue-safe force',
     }
 
 
@@ -332,8 +422,7 @@ def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.40, clearance_m=
 
     The near pose is on the robot side of the front wall with enough margin that
     the wrist is not spawned through the liner. A 12 cm margin still clips.
-    Fruit is not placed here; the caller puts a free body at the solved TCP
-    with the jaw closed.
+    Fruit is not placed here; the caller puts a free body in the pad pocket.
     """
     from treesim.basket import CENTER, SIZE
     frac = float(frac)

@@ -702,9 +702,7 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     if easy and reset_mode == 1:
         apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
-        tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
-        data.qpos[qposadr:qposadr + 3] = tcp
-        from treesim.kiwi_rl.reach_teacher import jaw_hold_q
+        from treesim.kiwi_rl.reach_teacher import grasp_pocket_world_m, jaw_hold_q
         jaw_joint = int(controller.joints[18])
         opened = float(model.jnt_range[jaw_joint, 1])
         closed = float(model.jnt_range[jaw_joint, 0])
@@ -712,7 +710,14 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
             opened = 0.8
         if not np.isfinite(closed):
             closed = 0.0
-        hold = jaw_hold_q(0.75 if easy else 1.0, opened, closed)
+        if easy:
+            pocket = grasp_pocket_world_m(model, data, tcp_site)
+            data.qpos[qposadr:qposadr + 3] = pocket
+            hold = jaw_hold_q(0.75, opened, closed)
+        else:
+            tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+            data.qpos[qposadr:qposadr + 3] = tcp
+            hold = jaw_hold_q(1.0, opened, closed)
         data.qpos[int(controller.qids[18])] = hold
         controller.targets[18] = hold
         data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)

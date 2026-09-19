@@ -4,7 +4,8 @@ import numpy as np
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
     basket_chassis_aabb_m, easy_start_local_m,
-    hold_close_fracs, jaw_hold_q, select_hold_close, tcp_outside_basket,
+    hold_close_fracs, jaw_hold_q, offset_grasp_local, select_hold_close,
+    tcp_outside_basket,
 )
 
 
@@ -80,14 +81,24 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 0.5, 'slip_m': 0.30, 'max_load_N': 4.0, 'retained': False},
             {'close_frac': 1.0, 'slip_m': 0.02, 'max_load_N': 22.0, 'retained': True},
         ], slip_ok_m=0.04, load_limit_n=15.0)
-        self.assertAlmostEqual(crushed['close_frac'], 1.0)
+        self.assertAlmostEqual(crushed['close_frac'], 0.5)
         slipped = select_hold_close([
             {'close_frac': 0.4, 'slip_m': 0.20, 'max_load_N': 2.0, 'retained': False},
             {'close_frac': 1.0, 'slip_m': 0.16, 'max_load_N': 40.0, 'retained': False},
         ], slip_ok_m=0.04, load_limit_n=15.0)
-        self.assertAlmostEqual(slipped['close_frac'], 1.0)
+        self.assertAlmostEqual(slipped['close_frac'], 0.4)
         with self.assertRaises(ValueError):
             select_hold_close([])
+
+    def test_grasp_offset_stays_between_pads_not_at_tcp(self):
+        tcp = np.array([0.0, 0.0, 0.10])
+        np.testing.assert_allclose(offset_grasp_local(tcp, tcp), [0.0, 0.0, 0.07], atol=1e-9)
+        pulled = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(pulled, [0.0, 0.0, 0.04], atol=1e-9)
+        near = offset_grasp_local(tcp, np.array([0.0, 0.0, 0.09]))
+        np.testing.assert_allclose(near, [0.0, 0.0, 0.085], atol=1e-9)
+        with self.assertRaises(ValueError):
+            offset_grasp_local(tcp, [np.nan, 0.0, 0.0])
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(
