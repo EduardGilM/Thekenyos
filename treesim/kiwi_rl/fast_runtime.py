@@ -725,7 +725,7 @@ class FastRuntime:
         close = float(self._chosen_close_frac)
         jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
         self._easy_start_index.assign(idx)
-        self._easy_jaw_hold.assign(np.full(self.worlds, jaw_hold, dtype=np.float32))
+        self._easy_jaw_hold_next.assign(np.full(self.worlds, jaw_hold, dtype=np.float32))
         self._easy_far_frac = frac
         return {
             'easy_far_frac': frac,
@@ -761,7 +761,9 @@ class FastRuntime:
             self._hold_sweep = self._run_hold_sweep()
             self._chosen_close_frac = float(self._hold_sweep['chosen_close_frac'])
             hold = self._jaw_open + self._chosen_close_frac * (self._jaw_closed - self._jaw_open)
-            self._easy_jaw_hold.assign(np.full(self.worlds, hold, dtype=np.float32))
+            holds = np.full(self.worlds, hold, dtype=np.float32)
+            self._easy_jaw_hold.assign(holds)
+            self._easy_jaw_hold_next.assign(holds)
         return {
             'easy': self._easy,
             'shaping_coef': coef,
@@ -782,10 +784,10 @@ class FastRuntime:
         """One CPU sweep of jaw close-fractions. Not a tissue calibration."""
         from .fast_task import JAW_FORCE_LIMIT_N
         from .reach_teacher import sweep_jaw_hold
-        qpos = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
-        if qpos.ndim > 1:
-            qpos = qpos.reshape(-1)
-        start_q = np.asarray(self._easy_start_q.numpy()[0], dtype=np.float64)
+        host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+        qpos = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+        start_host = np.asarray(self._easy_start_q.numpy(), dtype=np.float64)
+        start_q = start_host[0].copy() if start_host.ndim == 2 else start_host.reshape(6).copy()
         try:
             return sweep_jaw_hold(
                 self.model, qpos, tcp_site=self.tcp_site,
@@ -793,8 +795,9 @@ class FastRuntime:
                 jaw_qposadr=int(self._jaw_qposadr),
                 arm_qids=self.control.contract.qids[12:18], start_q=start_q,
                 jaw_open=self._jaw_open, jaw_closed=self._jaw_closed,
-                load_limit_n=float(JAW_FORCE_LIMIT_N))
-        except (ValueError, RuntimeError, TypeError):
+                load_limit_n=float(JAW_FORCE_LIMIT_N),
+                fruit_equality=int(self.task.equality_id))
+        except (ValueError, RuntimeError, TypeError, AttributeError) as exc:
             mid = float(self._hold_close_fracs[len(self._hold_close_fracs) // 2])
             return {
                 'rows': [],
@@ -802,7 +805,7 @@ class FastRuntime:
                 'chosen_slip_m': None,
                 'chosen_load_N': None,
                 'weld': False,
-                'scope': 'hold sweep fallback; mid close-frac',
+                'scope': f'hold sweep fallback; mid close-frac ({type(exc).__name__})',
             }
 
     def privileged_deposit_action(self):

@@ -81,6 +81,8 @@ class ReachTeacherMathTest(unittest.TestCase):
             {'close_frac': 1.0, 'slip_m': 0.02, 'max_load_N': 22.0, 'retained': True},
         ], slip_ok_m=0.04, load_limit_n=15.0)
         self.assertAlmostEqual(crushed['close_frac'], 0.5)
+        with self.assertRaises(ValueError):
+            select_hold_close([])
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

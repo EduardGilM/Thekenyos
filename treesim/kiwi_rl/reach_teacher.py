@@ -178,11 +178,12 @@ def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
 
 def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qposadr,
                    arm_qids, start_q, jaw_open, jaw_closed, close_fracs=None,
-                   hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0):
+                   hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0, fruit_equality=None):
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
     Fruit stays a free body. The chosen close command is not a weld and not a
-    calibrated kiwi-safe force.
+    calibrated kiwi-safe force. Uses a 5 ms CPU timestep so a 0.4 s hold does
+    not expand into tens of thousands of native substeps.
     """
     import mujoco
     from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
@@ -197,41 +198,53 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
         raise ValueError('hold_s must be finite in [0.05, 2] s')
     if not np.isfinite(q0).all() or not np.isfinite(start).all() or not np.isfinite(fracs).all():
         raise ValueError('sweep inputs must be finite')
-    dt = float(model.opt.timestep)
-    steps = max(1, int(round(hold_time / dt)))
-    hand_geoms = _hand_geom_ids(model)
-    data = mujoco.MjData(model)
-    rows = []
-    for frac in fracs:
-        hold = jaw_hold_q(frac, jaw_open, jaw_closed)
-        data.qpos[:] = q0
-        data.qvel[:] = 0.0
-        data.qpos[arm_qids] = start
-        data.qpos[int(jaw_qposadr)] = hold
-        mujoco.mj_forward(model, data)
-        tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
-        data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = tcp
-        data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
-        data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
-        data.qpos[int(jaw_qposadr)] = hold
-        max_load = 0.0
-        for _ in range(steps):
+    if q0.shape[0] != int(model.nq):
+        raise ValueError('sweep qpos must be one native configuration, not a batched world stack')
+    saved_dt = float(model.opt.timestep)
+    model.opt.timestep = 0.005
+    try:
+        steps = max(1, min(80, int(round(hold_time / float(model.opt.timestep)))))
+        hand_geoms = _hand_geom_ids(model)
+        data = mujoco.MjData(model)
+        eq = None if fruit_equality is None else int(fruit_equality)
+        rows = []
+        for frac in fracs:
+            hold = jaw_hold_q(frac, jaw_open, jaw_closed)
+            data.qpos[:] = q0
+            data.qvel[:] = 0.0
+            data.ctrl[:] = 0.0
+            if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
+                data.eq_active[eq] = 0
             data.qpos[arm_qids] = start
             data.qpos[int(jaw_qposadr)] = hold
-            mujoco.mj_step(model, data)
-            max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
-        mujoco.mj_forward(model, data)
-        fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
-        tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
-        slip = float(np.linalg.norm(fruit - tcp))
-        if not np.isfinite(slip) or not np.isfinite(max_load):
-            slip, max_load = float('inf'), float('inf')
-        rows.append({
-            'close_frac': float(frac),
-            'slip_m': slip if np.isfinite(slip) else 1.0,
-            'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
-            'retained': bool(np.isfinite(slip) and slip <= slip_ok),
-        })
+            mujoco.mj_forward(model, data)
+            tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+            data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = tcp
+            data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
+            data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
+            data.qpos[int(jaw_qposadr)] = hold
+            max_load = 0.0
+            for _ in range(steps):
+                data.qpos[arm_qids] = start
+                data.qpos[int(jaw_qposadr)] = hold
+                if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
+                    data.eq_active[eq] = 0
+                mujoco.mj_step(model, data)
+                max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
+            mujoco.mj_forward(model, data)
+            fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
+            tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+            slip = float(np.linalg.norm(fruit - tcp))
+            if not np.isfinite(slip) or not np.isfinite(max_load):
+                slip, max_load = float('inf'), float('inf')
+            rows.append({
+                'close_frac': float(frac),
+                'slip_m': slip if np.isfinite(slip) else 1.0,
+                'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
+                'retained': bool(np.isfinite(slip) and slip <= slip_ok),
+            })
+    finally:
+        model.opt.timestep = saved_dt
     chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
     return {
         'rows': rows,
