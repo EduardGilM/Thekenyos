@@ -764,6 +764,25 @@ def _hand_contact_load_n(model, data, hand_geoms):
     return load
 
 
+def easy_start_side_y_m(rng=None, *, side_y_m=None, span_m=None):
+    """Chassis Y for a front-side start. 0 keeps the opening centerline."""
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    side = float(EASY_PRESET['start_side_y_m'] if side_y_m is None else side_y_m)
+    span = float(EASY_PRESET['start_y_span_m'] if span_m is None else span_m)
+    if not np.isfinite(side) or not 0.0 <= side <= 0.30:
+        raise ValueError('start_side_y_m must be finite in [0, 0.30] m')
+    if not np.isfinite(span) or not 0.0 <= span <= 0.2:
+        raise ValueError('start_y_span_m must be finite in [0, 0.2] m')
+    if side <= 0.0:
+        if rng is None:
+            return 0.0
+        return float(rng.uniform(-span, span))
+    if rng is None:
+        return float(side)
+    sign = 1.0 if float(rng.random()) < 0.5 else -1.0
+    return sign * float(rng.uniform(side, side + span))
+
+
 def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_m=None):
     """Random chassis-frame TCP outside the crate in a bounded IK box.
 
@@ -786,7 +805,7 @@ def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_
         raise ValueError('random start spans are outside the physics-safe box')
     lo, hi = basket_chassis_aabb_m()
     x = float(rng.uniform(hi[0] + margin, hi[0] + margin + x_span))
-    y = float(rng.uniform(-y_span, y_span))
+    y = easy_start_side_y_m(rng, span_m=y_span)
     z = float(rng.uniform(hi[2] + clearance, hi[2] + clearance + z_span))
     local = push_tcp_outside_basket(np.array([x, y, z], dtype=np.float64), margin_m=margin)
     local[2] = max(float(local[2]), float(hi[2] + clearance))
@@ -799,7 +818,8 @@ def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_
     return local
 
 
-def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.32, clearance_m=0.28):
+def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.32, clearance_m=0.28,
+                      side_y_m=None):
     """Chassis-frame TCP start: frac 0 = clear of the crate, 1 = toward home.
 
     The near pose is on the robot side of the front wall with enough margin that
@@ -810,6 +830,7 @@ def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.32, clearance_m=
     frac = float(frac)
     margin = float(margin_m)
     clearance = float(clearance_m)
+    side_y = easy_start_side_y_m(side_y_m=side_y_m) if side_y_m is not None else easy_start_side_y_m()
     if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
         raise ValueError('start frac must be finite in [0, 1]')
     if not np.isfinite(margin) or not 0.05 <= margin <= 0.5:
@@ -819,7 +840,7 @@ def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.32, clearance_m=
     lo, hi = basket_chassis_aabb_m()
     near = np.array([
         hi[0] + margin,
-        float(CENTER[1]),
+        float(CENTER[1]) + side_y,
         float(CENTER[2] + SIZE[2] + clearance),
     ], dtype=np.float64)
     if home_local is None:

@@ -487,7 +487,9 @@ def run(args):
             config['easy_scope'] = easy_info['scope']
             config['hold_close_frac'] = easy_info.get('hold_close_frac')
             config['shaping_length_m'] = easy_info.get('shaping_length_m')
+            config['deposit_reward'] = easy_info.get('deposit_reward')
             config['start_clearance_m'] = EASY_PRESET['start_clearance_m']
+            config['start_side_y_m'] = EASY_PRESET['start_side_y_m']
             config['hold_sweep_slip_m'] = easy_info.get('hold_sweep_slip_m')
             config['hold_sweep_load_N'] = easy_info.get('hold_sweep_load_N')
             config['hold_sweep_rows'] = easy_info.get('hold_sweep_rows')

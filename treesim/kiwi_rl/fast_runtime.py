@@ -70,7 +70,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
                      basket_center: wp.vec3, dt: float, gamma_step: float,
-                     w_deposit: float, w_grasp: float, w_detach: float, w_loss: float,
+                     deposit_w: wp.array(dtype=float),
+                     w_grasp: float, w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float):
     world = wp.tid()
     if mask[world] == 0:
@@ -132,7 +133,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
         r = r + w_loss
         loss_paid[world] = wp.uint8(1)
     if unpaid_deposit > 0 and goal[world] != 1:
-        r = r + w_deposit * float(unpaid_deposit)
+        r = r + deposit_w[world] * float(unpaid_deposit)
     episode_time[world] = episode_time[world] + dt
     timed_out[world] = wp.uint8(episode_time[world] >= timeout_s[world])
     terminated[world] = wp.uint8(fallen or failed[world] != 0 or success[world] != 0 or timed_out[world] != 0)
@@ -533,6 +534,7 @@ class FastRuntime:
                                          dtype=float, device=self.device)
             self._shaping_length = wp.full(worlds, float(EASY_PRESET['default_shaping_length_m']),
                                            dtype=float, device=self.device)
+            self._deposit_w = wp.full(worlds, float(W_DEPOSIT), dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
             self._allow_locomotion = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
@@ -669,7 +671,7 @@ class FastRuntime:
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
                           self.task.deposited, self.task.loss_paid, self._basket_center, self.control_dt,
-                          self._gamma_step, W_DEPOSIT, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
+                          self._gamma_step, self._deposit_w, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH], device=self.device)
 
     def _latch(self):
@@ -841,7 +843,7 @@ class FastRuntime:
         # knock the fruit into the front wall and poison close-fraction choice.
         sweep_local = easy_start_local_m(
             0.0, home_local, margin_m=HOLD_SWEEP_MARGIN_M,
-            clearance_m=HOLD_SWEEP_CLEARANCE_M)
+            clearance_m=HOLD_SWEEP_CLEARANCE_M, side_y_m=0.0)
         sweep_q, sweep_err = solve_tcp_hover(
             self.model, qpos, self.tcp_site, chassis_p + chassis_R @ sweep_local,
             qids, dofs, q_home, ranges)
@@ -905,6 +907,13 @@ class FastRuntime:
         if not np.isfinite(length) or not 0.05 <= length <= 2.0:
             raise ValueError('shaping_length_m must be finite in [0.05, 2.0] m')
         self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
+        if self._easy:
+            deposit = float(EASY_PRESET['deposit_reward'])
+        else:
+            deposit = float(W_DEPOSIT)
+        if not np.isfinite(deposit) or not 1.0 <= deposit <= 500.0:
+            raise ValueError('deposit_reward must be finite in [1, 500]')
+        self._deposit_w.assign(np.full(self.worlds, deposit, dtype=np.float32))
         if self._easy and self._hold_sweep is None:
             self._hold_sweep = self._run_hold_sweep()
             self._chosen_close_frac = float(self._hold_sweep['chosen_close_frac'])
@@ -935,6 +944,7 @@ class FastRuntime:
             'easy': self._easy,
             'shaping_coef': coef,
             'shaping_length_m': length,
+            'deposit_reward': deposit,
             'open_xy_m': self._open_xy_m,
             'open_rim_z_m': self._open_rim_z_m,
             'hover_error_m': float(self.hover_error_m),

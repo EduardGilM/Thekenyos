@@ -117,8 +117,9 @@ class CurriculumTest(unittest.TestCase):
             apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
         )
         from treesim.kiwi_rl.reach_teacher import (
-            basket_chassis_aabb_m, easy_start_local_m, hold_close_fracs, hover_tcp_local_m,
-            jaw_hold_q, random_easy_start_local_m, select_hold_close, tcp_outside_basket,
+            basket_chassis_aabb_m, easy_start_local_m, easy_start_side_y_m, hold_close_fracs,
+            hover_tcp_local_m, jaw_hold_q, random_easy_start_local_m, select_hold_close,
+            tcp_outside_basket,
         )
         from treesim.basket import CENTER, SIZE
         deposit = stage_named('deposit_pixels')
@@ -133,6 +134,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['start_clearance_m'], 0.10)
         self.assertEqual(preset['shaping_length_m'], 0.60)
         self.assertEqual(preset['default_shaping_length_m'], 0.25)
+        self.assertEqual(preset['start_side_y_m'], 0.16)
+        self.assertEqual(preset['deposit_reward'], 100.0)
         self.assertEqual(HOLD_SWEEP_MARGIN_M, 0.40)
         self.assertEqual(HOLD_SWEEP_CLEARANCE_M, 0.28)
         self.assertEqual(preset['n_start_poses'], 24)
@@ -154,6 +157,9 @@ class CurriculumTest(unittest.TestCase):
         np.testing.assert_allclose(hi[2], CENTER[2] + SIZE[2])
         near = easy_start_local_m(0.0)
         far = easy_start_local_m(1.0)
+        self.assertAlmostEqual(easy_start_side_y_m(), 0.16)
+        self.assertAlmostEqual(easy_start_side_y_m(side_y_m=0.0), 0.0)
+        self.assertAlmostEqual(float(near[1]), float(CENTER[1] + 0.16))
         self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
         self.assertTrue(tcp_outside_basket(far, margin_m=0.04, above_rim_m=0.0))
         self.assertGreater(float(near[0]), float(hi[0]))
@@ -197,6 +203,8 @@ class CurriculumTest(unittest.TestCase):
             self.assertLessEqual(float(pose[0]), float(hi[0] + 0.32 + 0.08) + 1e-9)
             self.assertGreaterEqual(float(pose[2]), float(hi[2] + 0.10) - 1e-9)
             self.assertLessEqual(float(pose[2]), float(hi[2] + 0.10 + 0.08) + 1e-9)
+            self.assertGreaterEqual(abs(float(pose[1]) - float(CENTER[1])), 0.16 - 1e-9)
+            self.assertLessEqual(abs(float(pose[1]) - float(CENTER[1])), 0.16 + 0.10 + 1e-9)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
@@ -209,6 +217,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('margin_m=HOLD_SWEEP_MARGIN_M', src)
         self.assertIn('clearance_m=HOLD_SWEEP_CLEARANCE_M', src)
         self.assertIn('self._shaping_length', src)
+        self.assertIn('self._deposit_w', src)
+        self.assertIn('side_y_m=0.0', src)
         self.assertIn('self._easy_pin', src)
         self.assertIn('qpos[world, jaw_qposadr] = hold', src)
         self.assertIn('def _run_hold_sweep', src)
@@ -222,6 +232,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertNotIn('def _easy_airdrop', src)
         teacher_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'reach_teacher.py').read_text(encoding='utf-8')
         self.assertIn('def sweep_jaw_hold', teacher_src)
+        self.assertIn('def easy_start_side_y_m', teacher_src)
         self.assertIn('def scripted_jaw_target', teacher_src)
         self.assertIn('def fruit_in_release_zone', teacher_src)
         self.assertIn('def adapt_scripted_hold_q', teacher_src)

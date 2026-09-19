@@ -83,7 +83,13 @@ EASY_PRESET = {
     'n_start_poses': 24,
     'start_x_span_m': 0.08,
     'start_y_span_m': 0.10,
+    # Front-side of the opening (radius 0.15 m). The student already grazes
+    # this lip; start there so the last motion is a lateral slide in.
+    'start_side_y_m': 0.16,
     'start_z_span_m': 0.08,
+    # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
+    # stay away. 100 is an engineering jackpot, not a measured harvest value.
+    'deposit_reward': 100.0,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,
