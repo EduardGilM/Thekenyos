@@ -32,6 +32,7 @@ MAX_RETRIES = 3
 class ArbiterState:
     phase: str = "EXPLORE"
     phase_time_s: float = 0.0
+    stable_time_s: float = 0.0
     retries: int = 0
     active_policy: str = "N3"  # N3 in EXPLORE/SETTLE, M3 in MANIPULATE/VERIFY
     base_command_mps: np.ndarray = field(
@@ -40,6 +41,7 @@ class ArbiterState:
     def reset(self):
         self.phase = "EXPLORE"
         self.phase_time_s = 0.0
+        self.stable_time_s = 0.0
         self.retries = 0
         self.active_policy = "N3"
         self.base_command_mps = np.zeros(3, dtype=np.float32)
@@ -79,13 +81,15 @@ class Arbiter:
             st.active_policy = "N3"
             st.base_command_mps = np.zeros(3, dtype=np.float32)  # policy fills
             if n3_event == "ATTEMPT" and fresh:
-                st.phase, st.phase_time_s = "SETTLE", 0.0
+                st.phase, st.phase_time_s, st.stable_time_s = "SETTLE", 0.0, 0.0
         elif st.phase == "SETTLE":
             st.active_policy = "N3"
             st.base_command_mps = np.zeros(3, dtype=np.float32)
             slow = speed_mps < SETTLE_SPEED_MPS and yaw_rps < SETTLE_YAW_RPS
-            if slow and st.phase_time_s >= SETTLE_HOLD_S and fresh:
+            st.stable_time_s = st.stable_time_s + dt_s if slow and fresh else 0.0
+            if st.stable_time_s + 1e-9 >= SETTLE_HOLD_S:
                 st.phase, st.phase_time_s = "MANIPULATE", 0.0
+                st.active_policy = "M3"
             elif st.phase_time_s >= SETTLE_TIMEOUT_S:
                 self._to_recover()
         elif st.phase == "MANIPULATE":
@@ -115,6 +119,7 @@ class Arbiter:
             raise ValueError(f"bad phase {st.phase!r}")
         if st.phase not in PHASES:
             raise ValueError(f"bad phase {st.phase!r}")
+        st.active_policy = 'M3' if st.phase in ('MANIPULATE', 'VERIFY') else 'N3'
         return st
 
     def _to_recover(self):

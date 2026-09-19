@@ -1,0 +1,13 @@
+mujoco==3.13.0
+mujoco-warp==3.13.0
+warp-lang==1.15.0
+numpy==2.2.6
+scipy==1.15.3
+pillow==11.3.0
+absl-py==2.3.1
+etils[epath]==1.13.0
+fsspec==2025.9.0
+glfw==2.9.0
+pyopengl==3.1.9
+typing-extensions==4.14.1
+zipp==3.23.0

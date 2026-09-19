@@ -172,7 +172,8 @@ def normalise_p85(raw: dict) -> np.ndarray:
     put(P85_SLICES[14], get("base_command_prev"), -1.0, 1.0,
         P85_SCALES["base_command_prev"])
     put(P85_SLICES[15], get("hand_image_age_valid"), 0.0, 10.0, 1.0)
-    out[83] = float(np.clip(get("hand_image_age_valid")[0], 0.0, 10.0))
+    if out[83] not in (0.0, 1.0):
+        raise ValueError('P85.hand_image_valid must be zero or one')
     put(P85_SLICES[16], get("grip_contact_score"), 0.0, 1.0, 1.0)
     clipped = int((np.abs(out) > NORM_CLIP).sum())
     np.clip(out, -NORM_CLIP, NORM_CLIP, out=out)

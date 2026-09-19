@@ -88,5 +88,64 @@ class TorchShapesTest(unittest.TestCase):
         self.assertFalse(torch.equal(v_empty, v_one))
 
 
+class ContinuingGAETest(unittest.TestCase):
+    def test_rollout_boundary_bootstraps(self):
+        from treesim.kiwi_rl.ppo import compute_gae
+        result = compute_gae([0.], [0.], [False], [False], .99, .95, final_value=5.)
+        self.assertAlmostEqual(float(result[0]), 4.95, places=5)
+
+    def test_timeout_does_not_leak_next_episode(self):
+        from treesim.kiwi_rl.ppo import compute_gae
+        result = compute_gae([0., 100.], [0., 0.], [False, True], [True, False],
+                             .99, .95, next_values=[5., 0.])
+        self.assertAlmostEqual(float(result[0]), 4.95, places=5)
+        self.assertAlmostEqual(float(result[1]), 100.)
+
+    def test_missing_midrollout_timeout_value_rejected(self):
+        from treesim.kiwi_rl.ppo import compute_gae
+        with self.assertRaises(ValueError):
+            compute_gae([0., 1.], [0., 0.], [False, True], [True, False], .99, .95)
+
+
+@requires_torch
+class LearningRegressionTest(unittest.TestCase):
+    def test_vision_parameters_registered_and_updated(self):
+        from treesim.kiwi_rl.models_torch import build_v3
+        model = build_v3()
+        self.assertGreater(sum(p.numel() for p in model.parameters()), 1000)
+        self.assertGreater(len(model.state_dict()), 0)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        before = next(model.parameters()).detach().clone()
+        loss = model(torch.randn(1, 5, 64, 64)).square().mean()
+        loss.backward()
+        optimizer.step()
+        self.assertFalse(torch.equal(before, next(model.parameters())))
+        clone = build_v3()
+        clone.load_state_dict(model.state_dict())
+        for name, value in model.state_dict().items():
+            self.assertTrue(torch.equal(value, clone.state_dict()[name]))
+
+    def test_logprob_matches_transformed_distribution(self):
+        import numpy as np
+        from torch.distributions import Normal, TransformedDistribution, TanhTransform
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        from treesim.kiwi_rl.models import gaussian_logprob_tanh
+        u = torch.tensor([[1., -.5, 2.]], dtype=torch.float64)
+        mu, ls = torch.zeros_like(u), torch.zeros(3, dtype=torch.float64)
+        reference = TransformedDistribution(Normal(mu, ls.exp()), [TanhTransform()])
+        expected = reference.log_prob(u.tanh()).sum(-1)
+        torch.testing.assert_close(tanh_logprob(u, mu, ls), expected)
+        np.testing.assert_allclose(gaussian_logprob_tanh(u.numpy(), mu.numpy(), ls.numpy()),
+                                   expected.numpy(), atol=1e-6)
+
+    def test_saturated_logprob_stays_finite(self):
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        u = torch.tensor([[100., -100.]], requires_grad=True)
+        loss = tanh_logprob(u, torch.zeros_like(u), torch.zeros(2)).sum()
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(u.grad).all())
+
+
 if __name__ == "__main__":
     unittest.main()

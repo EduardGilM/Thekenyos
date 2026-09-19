@@ -57,8 +57,13 @@ def build_v3():
             torch.nn.init.kaiming_normal_(mod.weight, nonlinearity="relu")
 
     class V3(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = net
+            self.projection = proj
+
         def forward(self, x):
-            return proj(net(x))
+            return self.projection(self.backbone(x))
     return V3()
 
 
@@ -150,6 +155,22 @@ def load_relic_jit_actor(policy_pt: str):
     return mod
 
 
+def load_trainable_relic_actor(policy_pt):
+    exported = load_relic_jit_actor(policy_pt)
+    model = build_g1_mlp()
+    weights = exported.state_dict()
+    expected = {f'actor.{name}' for name in model.state_dict()}
+    if set(weights) != expected:
+        raise ValueError('Unexpected RELIC actor or normalizer state; require an explicit adapter')
+    model.load_state_dict({name: weights[f'actor.{name}'] for name in model.state_dict()}, strict=True)
+    torch = _torch()
+    if any(value.dtype != weights[f'actor.{name}'].dtype or not torch.equal(value, weights[f'actor.{name}'])
+           for name, value in model.state_dict().items()):
+        raise ValueError('Imported RELIC weights are not identical')
+    model.requires_grad_(True)
+    return model
+
+
 def jit_actor_forward(mod, obs: np.ndarray) -> np.ndarray:
     """Run a loaded JIT actor on (N,84) float32; returns (N,12)."""
     torch = _torch()
@@ -189,3 +210,82 @@ def build_critic():
             pool = torch.cat([mean, mx], -1)           # (B,256)
             return self.value(torch.cat([base, pool], -1)).squeeze(-1)
     return Critic()
+
+
+def build_student(hidden_size=128, intent_dim=16, vision='compact'):
+    torch = _torch()
+    nn = torch.nn
+    if hidden_size < 16 or intent_dim < 1 or vision not in ('compact', 'resnet18'):
+        raise ValueError('Invalid shared-belief architecture')
+
+    def mlp(inputs, outputs):
+        return nn.Sequential(nn.Linear(inputs, hidden_size), nn.SiLU(), nn.Linear(hidden_size, outputs))
+
+    class Student(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = dict(schema='shared-belief/v4', hidden_size=hidden_size,
+                               intent_dim=intent_dim, vision=vision)
+            if vision == 'resnet18':
+                self.vision = build_v3()
+            else:
+                layers = []
+                channels = 5
+                for width in (32, 64, 64, 128):
+                    layers.extend((nn.Conv2d(channels, width, 3, 2, 1),
+                                   nn.GroupNorm(8, width), nn.SiLU()))
+                    channels = width
+                self.vision = nn.Sequential(*layers, nn.AdaptiveAvgPool2d((4, 4)), nn.Flatten(),
+                                            nn.Linear(2048, 256), nn.LayerNorm(256), nn.SiLU())
+            self.map_encoder = build_map_encoder()
+            self.fusion = nn.Sequential(nn.Linear(515, hidden_size), nn.LayerNorm(hidden_size), nn.SiLU())
+            self.belief = nn.GRUCell(hidden_size, hidden_size)
+            self.n_intent = nn.Sequential(mlp(hidden_size, intent_dim), nn.Tanh())
+            self.m_intent = nn.Sequential(mlp(hidden_size, intent_dim), nn.Tanh())
+            self.n_executor = mlp(intent_dim + 128 + 85 + 14, hidden_size)
+            self.m_executor = mlp(intent_dim + 85 + 14 + 16, hidden_size)
+            self.n_mean, self.m_mean = nn.Linear(hidden_size, 3), nn.Linear(hidden_size, 8)
+            self.n_events, self.m_events = nn.Linear(hidden_size, 2), nn.Linear(hidden_size, 3)
+            self.n_logstd = nn.Parameter(torch.full((3,), float(np.log(.3))))
+            self.m_logstd = nn.Parameter(torch.full((8,), float(np.log(.2))))
+            with torch.no_grad():
+                self.n_events.bias.copy_(torch.tensor([2., 0.]))
+                self.m_events.bias.copy_(torch.tensor([2., 0., 0.]))
+
+        def forward(self, rgbd, proprio, context, basket, local_map,
+                    previous_actions, previous_events, memory, reset=None, intent_override=None):
+            batch = rgbd.shape[0]
+            if rgbd.ndim != 4 or rgbd.shape[1] != 5:
+                raise ValueError('RGB-D must be [batch, 5, height, width]')
+            for name, value, width in (('proprio', proprio, 85), ('context', context, 14),
+                                       ('basket', basket, 16), ('previous_actions', previous_actions, 11),
+                                       ('previous_events', previous_events, 5), ('memory', memory, hidden_size)):
+                if value.shape != (batch, width):
+                    raise ValueError(f'{name} has an invalid shape')
+            if local_map.shape != (batch, 3, 64, 64):
+                raise ValueError('Local map must be [batch, 3, 64, 64]')
+            if reset is not None:
+                if reset.shape != (batch,) or reset.dtype != torch.bool:
+                    raise ValueError('Reset mask must be one boolean per environment')
+                memory = torch.where(reset[:, None], torch.zeros_like(memory), memory)
+            visual, map_features = self.vision(rgbd), self.map_encoder(local_map)
+            fused = torch.cat((visual, map_features, proprio, context, basket,
+                               previous_actions, previous_events), dim=-1)
+            memory = self.belief(self.fusion(fused), memory)
+            intents = {'n': self.n_intent(memory), 'm': self.m_intent(memory)}
+            if intent_override is not None:
+                if set(intent_override) - {'n', 'm'}:
+                    raise ValueError('Unknown intervention target')
+                for name, value in intent_override.items():
+                    if value.shape != (batch, intent_dim) or not torch.isfinite(value).all() or (value.abs() > 1).any():
+                        raise ValueError('Intent intervention must be finite and bounded')
+                    intents[name] = value
+            n = self.n_executor(torch.cat((intents['n'], map_features, proprio, context), dim=-1))
+            m = self.m_executor(torch.cat((intents['m'], proprio, context, basket), dim=-1))
+            return dict(n_mu=self.n_mean(n), m_mu=self.m_mean(m),
+                        n_events=self.n_events(n), m_events=self.m_events(m),
+                        n_logstd=self.n_logstd.clamp(LOGSTD_MIN, LOGSTD_MAX),
+                        m_logstd=self.m_logstd.clamp(LOGSTD_MIN, LOGSTD_MAX),
+                        memory=memory, n_intent=intents['n'], m_intent=intents['m'])
+
+    return Student()

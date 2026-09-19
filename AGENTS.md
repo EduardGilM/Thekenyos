@@ -127,3 +127,71 @@ Preserve other workloads. Keep caches and outputs on the SSD; the root disk is
 space constrained. Do not kill unrelated processes. First CUDA compilation can
 be slow; inspect the log before restarting a job. Desktop DISPLAY/XAUTHORITY
 values are session-specific, so verify them rather than hardcoding new scripts.
+
+## Isolated deformable training development
+
+The approved training work uses `training/envs/flex-gpu` under the existing SSD
+experiment root, separately from `conda/` and `pergola/`. Its candidate stack is
+MuJoCo/MuJoCo-Warp 3.13.0, Warp 1.15.0 and CUDA Torch 2.10.0. Do not upgrade the
+legacy environment to these versions. Dependency inputs are under
+`.devin/training/`; backend acceptance and the full training launcher are not yet complete.
+
+Run learning tests with `python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v`.
+GPU monitor and mesh-frame tests require the isolated JP environment. A feature
+screen from `scripts/check_deformable_backend.py` is not a training-readiness report.
+
+MJWarp 3.13 flex contact filtering can reject offset jaw meshes because its
+mesh-convex bounding-sphere test adds the original mesh offset again. The
+`normalize_collision_meshes` helper normalizes authored mesh coordinates while
+checking world-space collision surfaces and mass/inertia invariance. Preserve
+its geometry-equivalence and actual GPU-contact regressions; do not substitute
+simpler gripper colliders or zero model fields without validation.
+
+In mixed rigid/flex GPU contacts, valid geom IDs take precedence over stale flex
+IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
+than identifying fruit contact from `contact.flex` alone. Numerical overflow,
+nonfinite states and element inversion must remain latched across substeps.
+
+The isolated full-scene exporter has explicit options for floating-base and
+multi-fruit scene generation. Legacy fixed-base defaults remain unchanged.
+Preserve the initial-body-frame comparison and asset hashes. New assembled
+scenes use the supported native/GPU midphase path; do not change the legacy CPU
+contact-adapter bypass as part of this separate path.
+
+RELIC R84 values in `spot.py` are raw velocities and absolute arm targets:
+do not add Isaac-style scaling or subtract arm-home targets without evidence.
+MuJoCo spatial velocity is angular-first and COM-referenced differently from
+Newton. The native/device control tests compare the body COM velocity against
+an independent Jacobian and verify that optimizer changes reach motor commands.
+
+MJWarp `get_depth` produces clipped display-normalized values, not metric
+measurements. Use the raw planar-depth buffer and explicit range validity.
+Render-buffer camera indices refer to the active-camera list, not global model
+camera IDs. Preserve the non-square, inactive-camera, metric-plane and immutable
+frame tests. GPU scene/vision bring-up does not clear physical training gates.
+
+## Hackathon precision (user direction)
+
+Prioritize a working training demonstration over material calibration or fine
+mesh resolution. The current isolated profile uses coarse deformable fruit,
+static canopy supports, a one-segment collidable stalk, and a 2 mm sampled
+hand/fruit overlap screen. Keep the
+strict contact result visible, and keep failures for nonfinite state, overflow,
+inversion, retention and release. Do not reopen finer calibration as a blocker
+for this approved profile. Verify learned progress with the teacher disabled;
+one-fruit reaching is not a complete harvest or generalization result.
+
+## Continuous visual leaf roof
+
+The reproducible local capture and generation details are in README.md under
+"Continuous leaf roof (render-only)". Use `--canopy-spacing .08` for area-wide
+infill; increasing `--leaves` alone only thickens the existing sparse cane lines.
+The recipe uses a 3x3 post grid, scene seed 42, terrain seed 202 and 40 kiwis.
+`treesim/foliage.py::place_canopy_leaves` generates the seeded placements;
+`treesim/builder.py` attaches shared visual meshes to supported cane bodies.
+Keep this optional layer massless and non-colliding, with no extra bodies/DOFs;
+it is neither physical shoot growth nor PBR postprocessing. Default spacing zero
+preserves the original foliage, and apple placement must remain unaffected.
+The layer is capped at 100,000 leaves; use cropped plots rather than enabling it
+blindly over the commercial field. Run `python -B -m unittest tests.test_pergola -v`
+after changing it, and inspect a newly generated image as well.

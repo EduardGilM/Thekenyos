@@ -24,20 +24,111 @@ ARM=['arm_sh0','arm_sh1','arm_el0','arm_el1','arm_wr0','arm_wr1']
 PREFIX='spot_with_arm_'
 
 
-def build(a):
+def export_metadata(root, env, solver, constants, output):
+    import newton
+    from treesim.spot import LEGS, ARM as SPOT_ARM, OBS_JOINTS
+    model = env.sim.model
+    bodies = {body.get('name'): body for body in root.findall('.//body')}
+    geoms = {geom.get('name'): geom for geom in root.findall('.//geom')}
+    shape_bodies = model.shape_body.numpy()
+    renamed = {}
+    for geom_id, shape in enumerate(solver.mjc_geom_to_newton_shape.numpy()[0]):
+        if shape < 0 or shape_bodies[shape] < 0:
+            continue
+        label = model.body_label[int(shape_bodies[shape])].replace('/', '_')
+        if label.endswith(('arm_link_wr1', 'arm_link_fngr', 'arm_link_jaw')):
+            original = solver.mj_model.geom(geom_id).name
+            if original in geoms:
+                renamed[original] = f'{label}_collision_{shape}'
+    for element in root.iter():
+        for key, value in list(element.attrib.items()):
+            if value in renamed:
+                element.set(key, renamed[value])
+    fruits = env.sim.tree.apple_data
+    anchors = []
+    for i, parent in enumerate(fruits['parent_body']):
+        parent_name = model.body_label[int(parent)].replace('/', '_')
+        offset = np.asarray(fruits['offset'][i], dtype=float)
+        site = f'training_anchor_{i}'
+        ET.SubElement(bodies[parent_name], 'site', name=site, pos=' '.join(map(str, offset)),
+                      size='.001', rgba='0 0 0 0', group='5')
+        anchors.append(dict(site=site, parent_body=parent_name, local_position_m=offset.tolist(),
+                            source_fruit_body='kiwi' if i == 0 else f'apple{i}'))
+    exported = set(solver.mjc_geom_to_newton_shape.numpy()[0].tolist())
+    assets = root.find('asset')
+    flags, parents = model.shape_flags.numpy(), model.shape_body.numpy()
+    transforms, scales = model.shape_transform.numpy(), model.shape_scale.numpy()
+    colors, kinds = model.shape_color.numpy(), model.shape_type.numpy()
+    restored = 0
+    for i, parent in enumerate(parents):
+        if i in exported or not flags[i] & int(newton.ShapeFlags.VISIBLE) or parent >= env.sim.tree.robot_data['body_start']:
+            continue
+        body = root.find('worldbody') if parent < 0 else bodies[model.body_label[int(parent)].replace('/', '_')]
+        transform, size = transforms[i], scales[i]
+        attrs = dict(name=f'canopy_visual_{i}', pos=' '.join(map(str, transform[:3])),
+                     quat=' '.join(map(str, transform[[6, 3, 4, 5]])), contype='0', conaffinity='0',
+                     density='0', group='2', rgba=' '.join(map(str, [*colors[i], 1.])))
+        primitive = {newton.GeoType.BOX: ('box', 3), newton.GeoType.SPHERE: ('sphere', 1),
+                     newton.GeoType.CAPSULE: ('capsule', 2), newton.GeoType.CYLINDER: ('cylinder', 2),
+                     newton.GeoType.ELLIPSOID: ('ellipsoid', 3)}
+        if kinds[i] in primitive:
+            name, dimensions = primitive[kinds[i]]
+            attrs.update(type=name, size=' '.join(map(str, size[:dimensions])))
+        elif kinds[i] in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
+            mesh, name = model.shape_source[i], f'canopy_mesh_{i}'
+            element = ET.SubElement(assets, 'mesh', name=name, inertia='shell', scale=' '.join(map(str, size)),
+                vertex=' '.join(map(str, np.asarray(mesh.vertices).ravel())),
+                face=' '.join(map(str, np.asarray(mesh.indices).ravel())))
+            attrs.update(type='mesh', mesh=name)
+            if getattr(mesh, 'texture', None) is not None:
+                from PIL import Image
+                path = (output / f'{name}.png').resolve()
+                Image.fromarray(np.asarray(mesh.texture)).save(path)
+                element.set('texcoord', ' '.join(map(str, np.asarray(mesh.uvs).ravel())))
+                ET.SubElement(assets, 'texture', name=name, type='2d', file=str(path))
+                ET.SubElement(assets, 'material', name=name, texture=name)
+                attrs['material'] = name
+        else:
+            raise ValueError(f'Unsupported canopy visual type: {kinds[i]}')
+        ET.SubElement(body, 'geom', **attrs)
+        restored += 1
+    limits = env.controller.buffers[5].numpy().copy()
+    limits[-1] = constants['ARM_EFFORT_LIMIT'][-1]
+    initial = dict(constants['SPOT_DEFAULT_JOINT_POS'])
+    initial['arm_f1x'] = -1.
+    poses = env.sim.body_q_np()
+    reference_poses = {name.replace('/', '_'): dict(position_m=pose[:3].tolist(),
+        quaternion_wxyz=pose[[6, 3, 4, 5]].tolist()) for name, pose in zip(model.body_label, poses)
+        if name.replace('/', '_') in bodies and not name.startswith('apple')}
+    return dict(anchors=anchors, restored_canopy_visuals=restored, reference_body_poses=reference_poses,
+        robot=dict(prefix=PREFIX, legs=LEGS, arm=SPOT_ARM, observation_joints=OBS_JOINTS,
+                   home_position_rad=dict(constants['SPOT_DEFAULT_JOINT_POS']), initial_position_rad=initial,
+                   kp=env.controller.buffers[3].numpy().tolist(), kd=env.controller.buffers[4].numpy().tolist(),
+                   controller_torque_limit_Nm=limits.tolist(), knee_lookup=env.controller.buffers[6].numpy().tolist(),
+                   chassis=PREFIX+'body', wrist=PREFIX+'arm_link_wr1', tcp_offset_m=[.195, 0., .005]))
+
+
+def build(a, metadata=None):
     from treesim.harvest_env import SpotHarvestEnv
     import newton
-    e=SpotHarvestEnv(a.relic,device='cpu');e.reset(seed=42)
+    e=SpotHarvestEnv(a.relic,device='cpu',fixed_base=getattr(a,'fixed_base',True),
+                     fruit_count=getattr(a,'fruit_count',1),foliage_density=getattr(a,'foliage_density',None))
+    e.reset(seed=getattr(a,'seed',42))
     solver=newton.solvers.SolverMuJoCo(e.sim.model,use_mujoco_cpu=True,save_to_mjcf=str(a.output/'export.xml'))
     root=ET.parse(a.output/'export.xml').getroot();model=e.sim.model
     geoms={g.get('name'):g for g in root.findall('.//geom')}
     for i,shape in enumerate(solver.mjc_geom_to_newton_shape.numpy()[0]):
         if shape>=0:geoms[solver.mj_model.geom(i).name].set('rgba',' '.join(map(str,[*model.shape_color.numpy()[shape],1.])))
     # Freeze only the canopy for this fixture. The arm and fruit remain dynamic.
-    for b in root.findall('.//body'):
-        if b.get('name','').startswith('seg'):
-            for j in list(b.findall('joint')):b.remove(j)
-    body=root.find(f'.//body[@name="{PREFIX}body"]');base=np.fromstring(body.get('pos'),sep=' ')
+    if getattr(a,'freeze_canopy',True):
+        for b in root.findall('.//body'):
+            if b.get('name','').startswith('seg'):
+                for j in list(b.findall('joint')):b.remove(j)
+    body=root.find(f'.//body[@name="{PREFIX}body"]')
+    if not getattr(a,'fixed_base',True):
+        body.set('pos',' '.join(map(str,e.base_pose[:3])))
+        body.set('quat',' '.join(map(str,e.base_pose[[6,3,4,5]])))
+    base=np.fromstring(body.get('pos'),sep=' ')
     asset=a.relic.resolve()/'source/relic/relic/assets/spot'
     constants=runpy.run_path(str(asset/'constants.py'))
     # Restore URDF visuals omitted by Newton's physics-only MJCF exporter.
@@ -121,6 +212,8 @@ def build(a):
         limit=constants['ARM_EFFORT_LIMIT'][idx] if arm else 90
         if name=='arm_f1x':kp,kd,limit=20,.2,3
         ET.SubElement(actuators,'position',name=name,joint=PREFIX+name,kp=str(kp),kv=str(kd),forcerange=f'{-limit} {limit}',ctrlrange=j.get('range'),ctrllimited='true')
+    if metadata is not None:
+        metadata.update(export_metadata(root,e,solver,constants,a.output))
     xml=ET.tostring(root,encoding='unicode');(a.output/'scene.xml').write_text(xml);e.close()
     m=mujoco.MjModel.from_xml_string(xml);d=mujoco.MjData(m)
     for name,home in constants['SPOT_DEFAULT_JOINT_POS'].items():

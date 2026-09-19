@@ -368,6 +368,7 @@ class FoliageParams:
     physics: bool = False              # give each leaf a compliant petiole joint
     petiole_stiffness: float = 0.02
     petiole_damping: float = 0.002
+    canopy_spacing_m: float = 0.0
 
     def set_density(self, d: float) -> None:
         """Map one 0..~2 'density' dial to concrete leaf parameters.

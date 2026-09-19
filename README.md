@@ -129,6 +129,56 @@ python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
   --pergola-rows 5 --pergola-columns 4
 ```
 
+#### Continuous leaf roof (render-only)
+
+For a continuous **visual leaf roof**, `--canopy-spacing .08` adds overlapping
+leaf blades across the entire post footprint, rather than only along the sparse
+fruiting canes. The spacing is in metres; zero (the default) keeps the original
+foliage. This is a seeded artistic canopy approximation, not a measured crop or
+additional physical branches. The extra leaves are massless, non-colliding,
+attached to supported cane bodies, and follow the canopy slope. The option is
+pergola-only and cannot be combined with `--foliage-physics` or disabled foliage.
+Use cropped plots: the additional layer is capped at 100,000 leaves, and increases
+rendering/build cost even though it adds no physical bodies or degrees of freedom.
+
+A single local frame, with the same camera and terrain as the visual experiments:
+
+```bash
+.venv/bin/python -B scripts/grow_tree.py --preset pergola --foliage --leaves 32 \
+  --canopy-spacing .08 --seed 42 --pergola-rows 3 --pergola-columns 3 \
+  --fruit-count 40 --terrain --terrain-seed 202 --terrain-amplitude .05 \
+  --terrain-wavelength 1.8 --terrain-extent 6 --device cpu --substeps 40 \
+  --viewer gl --headless --frames 1 --snapshot output/kiwi-canopy-roof.png
+```
+
+This recipe produces a 1920x1080 PNG after one simulation frame. Its 3x3 posts
+at 5 m centres enclose 100 m²: 15,625 infill leaves plus 1,152 twig leaves, or
+16,777 leaves total. The 40 kiwis remain separate physical fruit (0.4 fruit/m²);
+adding the visual roof does not add fruit or fruit attachment sites.
+
+How the roof is generated:
+
+- `scripts/grow_tree.py` maps `--canopy-spacing` to
+  `cfg.foliage.canopy_spacing_m`. **This is the control that closes the gaps**;
+  `--leaves 32` alone only thickens the existing cane lines. Zero disables infill;
+  nonzero spacing must be finite and at least 0.03 m. Larger spacing reduces
+  coverage and cost; leaf count scales approximately with `1 / spacing²`.
+- `treesim/foliage.py::place_canopy_leaves` fills the horizontal skeleton bounds
+  with `ceil(width / spacing) * ceil(length / spacing)` cells, one leaf per cell.
+  A separate RNG (`scene seed + 1777`) jitters leaf centres within their cells,
+  so the arrangement is reproducible without perturbing fruit sampling.
+- Leaf centres sit 4–18 cm above a plane fitted to the supported canes, following
+  the canopy slope. Random heading, tilt and roll break up the flat-grid look;
+  overlapping blades, rather than a solid opaque sheet, form the roof.
+- `treesim/builder.py` attaches each placement to the supported cane with the
+  nearest midpoint and reuses three leaf-size mesh classes. The CLI's nominal
+  kiwi blade is 22x17 cm; the size classes scale it by 0.72, 1.0 and 1.35.
+  No extra physical branches, joints, leaf mass or leaf contacts are introduced.
+
+Geometry, CLI and unchanged-mass/contact/one-step regressions are included in
+`python -B -m unittest tests.test_pergola -v`. This preview is neither PBR
+postprocessing nor a learned rollout; it changes only the rendered foliage.
+
 The trellis has fixed transverse support wires. Main cane sections are tied
 rigidly to this frame; only the final 0.35 m tips bend. This is an ideal-support
 assumption, not calibrated wire tension or tie compliance. It replaces the
@@ -618,6 +668,156 @@ not evidence that post-release rolling trajectories have converged. All runs com
 one-pose bench results, not an optimal grip or evidence of bruise-free fruit.
 The differing rigid/flex outcomes mean the rigid model cannot yet stand in for
 the flex benchmark without further contact and mesh-resolution checks.
+
+## Experimental learning and deformable-backend foundations
+
+The shared-belief student in `treesim/kiwi_rl/models_torch.py` has registered
+RGB-D, map, recurrent memory, intent, and action/event modules. The separate
+privileged teacher in `teacher.py` can provide confidence-masked supervision
+without sharing its hidden state or gradients with the student. These model
+components are unit-tested, including CUDA updates and checkpoint round-trips;
+they are **not yet an integrated harvesting trainer**.
+
+The isolated deformable investigation uses MuJoCo/MuJoCo-Warp 3.13.0 and Warp
+1.15.0. It does not upgrade the legacy `environment.yml` runtime. The CUDA
+learning stack and Optuna are pinned with hashes under `.devin/training/`.
+Use a separate Python 3.12 environment and scope the CUDA package index to Torch:
+
+```bash
+uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
+  --require-hashes .devin/training/requirements-gpu.lock
+python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
+```
+
+`scripts/check_deformable_backend.py` checks real flex contact against ground,
+other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
+jaw, applies gravity, holds, opens, and checks release. Device-side checks latch
+solver overflow, nonfinite state, element inversion, jaw/palm loads and the
+first ground contact across physics substeps. Native CPU reports provide an
+independent comparison.
+
+```bash
+python scripts/check_deformable_backend.py --relic /path/to/relic \
+  --case grip --backend gpu --count 9 --seconds 4 --iterations 1000 \
+  --contact-time .002 --normalize-meshes --output /path/to/new-report.json
+```
+
+This command is a development screen and may fail. Reports explicitly contain
+`training_ready: false`; passing a contact screen does not prove full robot
+balance, safe fruit handling, backend equivalence, or an overnight-ready trainer.
+The current numerical profiles still need complete validation, including force
+spikes, release behavior and timestep sensitivity. Failed reports are retained.
+
+Full-scene bring-up is separate from those hand fixtures. The legacy exporter
+can now retain a floating base and compliant canopy, restore visual foliage,
+and record attachment markers plus the imported joint/effort contract. The
+isolated assembler replaces the rigid fruit with independent full-DOF flex
+meshes and collidable segmented stalks. Stem point connections attach to the
+canopy and fruit material nodes, never to the hand. Asset hashes and initial
+body-frame comparisons guard scene transfer.
+
+Export with the unchanged legacy simulation environment:
+
+```bash
+python scripts/export_training_scene.py --relic /path/to/relic \
+  --output /path/to/new-base-scene --fruit-count 1
+```
+
+Assemble and check with the isolated deformable environment:
+
+```bash
+python scripts/export_training_scene.py --base-scene /path/to/new-base-scene \
+  --output /path/to/new-flex-scene
+python scripts/check_training_scene.py --scene /path/to/new-flex-scene \
+  --output /path/to/new-diagnostic --backend gpu --worlds 2 --seconds .1 --render
+```
+
+These are bring-up commands, not the overnight launcher. `--gait-checkpoint`
+accepts a checksum-verified CPU RELIC import for pretrained inference. Both
+native and device torque controllers preserve the original raw R84 units,
+absolute arm targets, and knee effort/speed limits. The initial gait precision
+profile uses CPU FP32 inference; GPU physics and sensing remain batched.
+
+### Compact physical reaching experiment
+
+`scripts/train_physical_smoke.py` connects the GPU deformable scene to a compact
+RGB-D/R84 recurrent actor and critic. It applies seven bounded arm/jaw target
+increments, learns from measured TCP-to-fruit progress, and saves both policy
+and optimizer state. Fruit geometry supplies training rewards and optional teacher labels; the actor
+receives camera pixels and robot measurements. This is a reaching experiment,
+not a completed grasp, detachment, basket-deposit or multi-fruit policy.
+
+```bash
+python scripts/train_physical_smoke.py --scene /path/to/flex-scene \
+  --contact-gate /path/to/gpu-grip-report.json \
+  --gait-checkpoint /path/to/verified-g1-cpu.pt \
+  --output /path/to/new-reach-run --worlds 1 --steps 8 --updates 2
+```
+
+For a short imitation warm start, add `--algorithm imitation
+--imitation-epochs 100 --steps 32`. A scripted Jacobian teacher generates motor
+targets through the same controller and physical scene. Its simulator state is
+used for training labels only. The student still receives RGB-D and R84, and
+the before/after evaluations run without the teacher. `teacher_improved` checks
+measured progress and absence of a fall; a lower imitation loss alone does not
+prove a useful reach. One seed and one fruit do not establish generalization.
+Changing algorithms on resume requires `--allow-algorithm-change`.
+For a new scene, `--initialize-from /path/to/checkpoint.pt` transfers only student
+weights and starts a fresh optimizer. It records the source model hash; it is
+not a resume of the old scene.
+
+Use the isolated GPU environment. Start with one GPU world. Repeated episodes
+have produced nonfinite states after cached resets, including single-world runs;
+the trainer therefore creates a fresh simulation for each episode. The tested
+hackathon profile also uses `--static-canopy`, a count-5 fruit mesh, the Newton
+solver, 20 microsecond physics steps and 2 ms contact response. Use
+`--stem-segments 1` when assembling the hackathon scene. The four-segment stem
+failed near-fruit motion even after increasing collision buffers; the one-segment
+replay completed 32 control steps with no numerical failure or fall. It preserves
+stalk length and total mass. The robot, fruit and stalk remain dynamic. The contact report must match the scene's
+solver, timestep, contact settings and fruit mesh count. The explicit hackathon
+screen permits up to 2 mm sampled hand/fruit overlap, retaining the original
+strict result and any sampling limits. It still rejects numerical failures,
+failed retention and failed release. This is an engineering approximation,
+not fruit-material calibration.
+
+Each update checks changed vision and action weights without an entropy bonus,
+then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
+restores optimizer and RNG state and starts a fresh episode in a new output
+directory. Mid-contact replay is not implemented. The final `report.json`
+contains deterministic sensor-only evaluation and `policy-camera.png` shows
+the actual policy input. Updated virtual camera mounts include a body-mounted
+0.55 m camera mast to keep the basket out of view; no hardware calibration is
+implied. The legacy `train_kiwi.py` remains a separate scaffold.
+
+Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
+one physical teacher rollout with 100 supervised passes. On the one-segment
+stem scene, `physical-imitation-eval-stem1-001` replayed that student without a
+teacher: mean TCP-to-fruit-vertex distance fell from about 0.82 m to 0.061 m,
+then rose to 0.507 m. This is an approach with overshoot, not a grasp or a held
+reach. Minimum element-volume ratio was 0.922 and the robot did not fall.
+The old four-segment evaluations remain archived as numerical failures.
+`scripts/diagnose_physical_reach.py` saves actual GPU states for rendering and
+records both checkpoint and evaluated scene hashes when transferring weights.
+
+The GPU RGB-D rig reads metric planar depth directly. The renderer's public
+`get_depth` utility is display-normalized and clipped, so it must not be used as
+metric sensor depth. Tests cover a plane beyond one metre, inactive camera-ID
+mapping, range masks, and frame-buffer ownership. Camera mounts and range
+parameters remain virtual engineering assumptions, not hardware calibration.
+
+MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
+miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by
+normalizing mesh coordinates while verifying unchanged world-space surfaces,
+body mass, center of mass and inertia tensors. It neither simplifies colliders
+nor edits external RELIC assets. Valid geom IDs also take precedence over stale
+flex IDs when interpreting mixed rigid/flex GPU contacts, matching the solver.
+
+The RELIC import checks all 10,000 observations, identical copied weights, and
+finite outputs. Its approved numerical comparison uses
+`abs(error) <= 1e-5 + 2e-6 * abs(reference)` to account for floating-point rounding;
+this is separate from the physical gait benchmark. A CUDA parity failure still
+blocks that import rather than producing an accepted actor.
 
 ## Continue the project
 

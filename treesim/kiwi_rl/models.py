@@ -46,8 +46,8 @@ def gaussian_logprob_tanh(u: np.ndarray, mu: np.ndarray,
     var = np.exp(2.0 * ls)
     logp = -0.5 * (((u - mu) ** 2) / var + 2.0 * ls + np.log(2.0 * np.pi))
     logp = logp.sum(axis=-1)
-    jacob = np.log(np.maximum(1.0 - np.tanh(u) ** 2, 1e-9)).sum(axis=-1)
-    return (logp + jacob).astype(np.float32)
+    jacob = (2.0 * (np.log(2.0) - u - np.logaddexp(0.0, -2.0 * u))).sum(axis=-1)
+    return (logp - jacob).astype(np.float32)
 
 
 def categorical_logprob(logits: np.ndarray, index: np.ndarray) -> np.ndarray:
@@ -173,11 +173,17 @@ class GaitPolicyG1:
 
 
 def onnx_pytorch_parity(onnx_actions: np.ndarray, torch_actions: np.ndarray,
-                        tol: float = 1e-5) -> dict:
+                        tol: float = 1e-5, rtol: float = 2e-6) -> dict:
     """Parity gate for G1 weight import: max abs error over samples."""
     a = np.asarray(onnx_actions, dtype=np.float32)
     b = np.asarray(torch_actions, dtype=np.float32)
-    if a.shape != b.shape or a.ndim != 2 or a.shape[1] != S.G1_DIM:
-        raise ValueError("parity inputs must share shape (N,12)")
-    err = float(np.abs(a - b).max())
-    return {"max_abs_err": err, "tol": tol, "pass": bool(err <= tol)}
+    if a.shape != b.shape or a.ndim != 2 or a.shape[1] != S.G1_DIM or not len(a):
+        raise ValueError("parity inputs must share nonempty shape (N,12)")
+    if not np.isfinite(a).all() or not np.isfinite(b).all():
+        raise ValueError('Parity inputs must be finite')
+    if not np.isfinite([tol, rtol]).all() or not 0 < tol <= 1e-5 or not 0 <= rtol <= 2e-6:
+        raise ValueError('Parity tolerances exceed the approved bounds')
+    error = np.abs(a - b)
+    scaled = float(np.max(error / (tol + rtol * np.abs(a))))
+    return {'max_abs_err': float(error.max()), 'max_scaled_err': scaled,
+            'tol': tol, 'rtol': rtol, 'pass': bool(scaled <= 1.)}
