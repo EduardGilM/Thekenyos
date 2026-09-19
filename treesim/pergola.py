@@ -155,14 +155,23 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
 
 def place_fruit(skeleton: TreeSkeleton, params: FruitParams,
                 seed: int = 0) -> list[KiwiPlacement]:
-    """Place separated pairs on canes, shuffled before applying the count cap.
+    """Place kiwis along fruiting wood, shuffled before applying the count cap.
 
-    All generated fruit is harvest-ready; there is no maturity filtering.
+    Tied laterals and hanging tips both bear. All generated fruit is
+    harvest-ready; there is no maturity filtering.
     """
     if params.max_count < 0:
         raise ValueError("fruit count must be nonnegative")
     rng = np.random.default_rng(seed + 4242)
-    candidates = [(s, t) for s in skeleton if s.order == 2 and not s.supported for t in (0.35, 0.80)]
+    candidates = []
+    for seg in skeleton:
+        if seg.order != 2:
+            continue
+        # Several stations per cane so fruit sits in the leaf roof, not only
+        # on the sparse hanging tips.
+        ts = (0.16, 0.34, 0.52, 0.70, 0.88) if seg.supported else (0.22, 0.45, 0.68, 0.88)
+        for t in ts:
+            candidates.append((seg, t))
     rng.shuffle(candidates)
     out = []
     for seg, t in candidates[:params.max_count]:

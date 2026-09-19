@@ -118,7 +118,7 @@ not Spot gait. The flag refuses a CPU fallback:
 ```bash
 python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
     --hillside --canopy-spacing .15 --pergola-rows 9 --pergola-columns 7 \
-    --fruit-count 180 --video output/orchard-mujoco.mp4
+    --fruit-count 800 --video output/orchard-mujoco.mp4
 ```
 
 The hillside is an assumed rolling landform (value-noise / Perlin-like octaves

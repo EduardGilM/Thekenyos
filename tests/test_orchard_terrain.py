@@ -178,6 +178,18 @@ class OrchardTerrainTest(unittest.TestCase):
             self.assertLess(center[2] + extent, floor.canopy_z(*f.attach[:2]))
             self.assertGreater(center[2] - extent, floor.ground_z(center[0], center[1]))
 
+    def test_kiwis_hang_along_tied_canes_and_tips(self):
+        floor = _pinned(seed=42)
+        skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0,
+                        ground_z=floor.ground_z, canopy_z=floor.canopy_z)
+        fruit = place_fruit(skel, FruitParams(max_count=400,
+                                              colors=((0.39, 0.27, 0.12),)), seed=42)
+        self.assertGreater(len(fruit), 40)
+        tied = sum(1 for f in fruit if skel[f.parent_seg].supported)
+        hang = sum(1 for f in fruit if not skel[f.parent_seg].supported)
+        self.assertGreater(tied, 15)
+        self.assertGreater(hang, 5)
+
     def test_plantation_cover_matches_commercial_grid(self):
         small = floor_kwargs_for_plantation(2, 2, 5.0)
         self.assertAlmostEqual(small["half_extent_m"], 15.0)

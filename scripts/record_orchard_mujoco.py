@@ -8,7 +8,7 @@ URDF, and not a learned policy.
 
     python scripts/record_orchard_mujoco.py --seed 42 --require-gpu \
         --hillside --canopy-spacing .15 --pergola-rows 9 --pergola-columns 7 \
-        --fruit-count 180 --video output/orchard-mujoco.mp4
+        --fruit-count 800 --video output/orchard-mujoco.mp4
 """
 from __future__ import annotations
 
@@ -91,6 +91,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
             f'size="{seg.mean_radius:.5f}" rgba="{_rgba(rgb)}" '
             f'contype="0" conaffinity="0"/>'
         )
+    geoms.extend(leaf_geoms)
     for f in fruit:
         center = f.attach - np.array([0.0, 0.0, STEM_LENGTH + float(f.radii[2])])
         rx, ry, rz = (float(v) for v in f.radii)
@@ -99,7 +100,6 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
             f'size="{rx:.5f} {ry:.5f} {rz:.5f}" rgba="{_rgba(f.color)}" '
             f'contype="0" conaffinity="0"/>'
         )
-    geoms.extend(leaf_geoms)
     look_z = 0.5 * (min_z + float(floor.canopy_z(0.0, 0.0)))
     leaf_xml = "\n".join(leaf_assets)
     # Visual earth bulk so the heightfield is a hillside cut, not a floating card.
@@ -246,7 +246,7 @@ def main():
     p.add_argument("--pergola-rows", type=int, default=9)
     p.add_argument("--pergola-columns", type=int, default=7)
     p.add_argument("--pergola-spacing", type=float, default=5.0)
-    p.add_argument("--fruit-count", type=int, default=180)
+    p.add_argument("--fruit-count", type=int, default=800)
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--slope-deg", type=float, default=3.5,
@@ -308,7 +308,7 @@ def main():
     )
     fruit = place_fruit(skeleton, FruitParams(
         max_count=args.fruit_count, joint="free",
-        colors=((0.39, 0.27, 0.12), (0.48, 0.34, 0.17)),
+        colors=((0.42, 0.28, 0.10), (0.55, 0.38, 0.14), (0.33, 0.22, 0.08)),
     ), seed=args.seed)
     fp = FoliageParams(
         enabled=True, leaves_per_terminal=8, min_order_for_leaves=2,
