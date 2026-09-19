@@ -15,8 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mujoco
 import numpy as np
 from treesim.kiwi_material import XUXIANG, damage_increment
-from treesim.native_kiwi import flesh_mass, FLESH_DENSITY_KG_M3, CONTACT_TIME_S
+from treesim.native_kiwi import flesh_mass, FLESH_DENSITY_KG_M3
 
+
+# Jaw impacts need separate numerical compliance from ideal-pad compression.
+CONTACT_TIME_S = .004
 
 def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0., count=9):
     from scipy.spatial.transform import Rotation
@@ -27,7 +30,7 @@ def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0., 
     urdf = ET.parse(asset/'spot_with_arm.urdf').getroot()
     root = ET.fromstring(f'''<mujoco model="Spot jaw contact bench">
       <compiler angle="radian"/>
-      <option gravity="0 0 0" timestep="{dt}" integrator="implicitfast" solver="Newton" iterations="100" tolerance="1e-9"/>
+      <option gravity="0 0 0" timestep="{dt}" integrator="implicitfast" solver="Newton" iterations="100" tolerance="1e-9"><flag nativeccd="disable"/></option>
       <size memory="128M"/>
       <visual><global offwidth="1280" offheight="720"/><headlight ambient=".5 .5 .5"/></visual>
       <default><geom friction=".44 .005 .0001" solref="{CONTACT_TIME_S} 1" solimp=".95 .99 .001"/></default>
@@ -107,7 +110,7 @@ def run(args):
         args.video.parent.mkdir(parents=True,exist_ok=True)
         encoder=subprocess.Popen(['ffmpeg','-y','-loglevel','error','-f','rawvideo','-pix_fmt','rgb24','-s','1280x720','-r','15','-i','-','-r','30','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(args.video)],stdin=subprocess.PIPE)
     hold_samples=bilateral_samples=0
-    rows=[]; force=np.zeros(6); damage=0.; peak=np.zeros(2); next_sample=next_frame=0.; held=[]
+    rows=[]; force=np.zeros(6); damage=0.; peak=np.zeros(2); next_sample=next_frame=0.; held=[]; max_penetration=0.; hold_origin=None; settling_displacement=0.
     try:
         for step in range(round(4/args.timestep)):
             t=d.time
@@ -125,6 +128,7 @@ def run(args):
                 c=d.contact[k]
                 isfruit=fruitgeom in c.geom if args.rigid else 0 in c.flex
                 if not isfruit: continue
+                max_penetration=max(max_penetration,max(0.,-float(c.dist)))
                 mujoco.mj_contactForce(m,d,k,force)
                 load=abs(force[0]); geoms=set(c.geom)
                 if geoms&fixed: loads[0]+=load
@@ -152,7 +156,10 @@ def run(args):
                 print(f'{t:.1f} s: {phase}, forces={loads.round(2)}, compression={strain:.4f}',flush=True)
                 next_progress+=.5
             if 1.7<t<2.7:
-                held.append(float(np.linalg.norm(center-restcenter)))
+                if hold_origin is None:
+                    hold_origin=center.copy()
+                    settling_displacement=float(np.linalg.norm(center-restcenter))
+                held.append(float(np.linalg.norm(center-hold_origin)))
                 hold_samples += 1
                 bilateral_samples += int(min(loads) > .1)
             if t>=next_sample:
@@ -173,11 +180,11 @@ def run(args):
             if encoder.wait(): raise RuntimeError('ffmpeg failed')
         if renderer: renderer.close()
     metrics = dict(
-        rigid=args.rigid, mass_kg=flesh_mass(args.count), mesh_count=args.count, contact_time_s=CONTACT_TIME_S, flesh_density_kg_m3=FLESH_DENSITY_KG_M3, timestep_s=args.timestep, torque_limit_Nm=args.torque,
+        collision_method='mpr', max_contact_penetration_m=max_penetration, rigid=args.rigid, mass_kg=flesh_mass(args.count), mesh_count=args.count, contact_time_s=CONTACT_TIME_S, flesh_density_kg_m3=FLESH_DENSITY_KG_M3, timestep_s=args.timestep, torque_limit_Nm=args.torque,
         offset_mm=list(args.offset_mm), tilt_deg=args.tilt_deg,
         hold_bilateral_fraction=bilateral_samples/max(hold_samples,1),
         peak_jaw_force_N=peak.tolist(), max_hold_displacement_m=max(held),
-        hold_tolerance_m=.02, hold_window_s=[1.7, 2.7],
+        settling_displacement_m=settling_displacement, hold_reference='fruit centre at start of hold window', hold_tolerance_m=.02, hold_window_s=[1.7, 2.7],
         final_center_z_m=float(center[2]), damage_proxy=damage,
         grip_damage_proxy=grip_damage, max_grip_compression_proxy=max_grip_strain,
         minimum_tetra_volume_ratio=min_volume_ratio,
