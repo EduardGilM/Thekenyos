@@ -147,13 +147,13 @@ def main():
     camera_data = bpy.data.cameras.new('Canopy camera')
     camera = bpy.data.objects.new('Canopy camera', camera_data)
     bpy.context.collection.objects.link(camera)
-    camera.location = (-6.9, -8.1, 1.08)
-    camera.data.lens = 30
+    camera.location = (-6.8, -7.5, 1.08)
+    camera.data.lens = 38
     camera.data.sensor_width = 36
     camera.data.dof.use_dof = True
-    camera.data.dof.focus_distance = 8.0
+    camera.data.dof.focus_distance = 6.0
     camera.data.dof.aperture_fstop = 7.1
-    look_at(camera, (0.0, 0.0, 1.48))
+    look_at(camera, (0.5, -7.5, 1.48))
 
     scene = bpy.context.scene
     scene.camera = camera

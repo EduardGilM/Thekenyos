@@ -3,7 +3,8 @@ import unittest
 
 import numpy as np
 
-from treesim.config import FruitParams, preset
+from treesim.config import FoliageParams, FruitParams, preset
+from treesim.foliage import place_leaves
 from treesim.lsystem import generate
 from treesim.pergola import place_fruit
 
@@ -43,6 +44,12 @@ class PergolaTest(unittest.TestCase):
         for tip in tips:
             self.assertAlmostEqual(tip.length, .35)
             self.assertTrue(a[tip.parent].supported)
+        foliage = FoliageParams(leaves_per_terminal=5, min_order_for_leaves=2)
+        leaves = place_leaves(a, foliage, seed=42)
+        supported = {s.index for s in a if s.order == 2 and s.supported}
+        self.assertTrue(supported)
+        self.assertTrue(all(sum(leaf.parent_seg == i for leaf in leaves) == 5
+                            for i in supported))
         fp = FruitParams(max_count=96, radius=(0.024, 0.028), stem_length=0.055,
                          colors=((0.39, 0.27, 0.12),))
         fruit = place_fruit(a, fp, seed=42)
@@ -64,6 +71,9 @@ class PergolaTest(unittest.TestCase):
         # Conservative bounding-sphere separation also proves capsule pairs
         # do not intersect in their initial pose.
         self.assertTrue(np.isfinite(centers).all())
+        fp.max_count = 10_000
+        fruit = place_fruit(a, fp, seed=42)
+        self.assertEqual({a[f.parent_seg].supported for f in fruit}, {False, True})
         fp.max_count = 3
         self.assertEqual(len(place_fruit(a, fp)), 3)
         fp.max_count = 0

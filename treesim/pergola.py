@@ -157,7 +157,7 @@ def place_fruit(skeleton: TreeSkeleton, params: FruitParams,
     if params.max_count < 0:
         raise ValueError("fruit count must be nonnegative")
     rng = np.random.default_rng(seed + 4242)
-    candidates = [(s, t) for s in skeleton if s.order == 2 and not s.supported for t in (0.35, 0.80)]
+    candidates = [(s, t) for s in skeleton if s.order == 2 for t in (0.35, 0.80)]
     rng.shuffle(candidates)
     out = []
     for seg, t in candidates[:params.max_count]:

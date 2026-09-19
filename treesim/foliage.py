@@ -116,7 +116,9 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
         ref = np.array([0.0, 0.0, 1.0]) if abs(H[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
         L = np.cross(ref, H); L /= np.linalg.norm(L)
         U = np.cross(H, L)
-        nleaf = fp.leaves_per_terminal if seg.is_terminal else max(1, fp.leaves_per_terminal // 2)
+        nleaf = (fp.leaves_per_terminal
+                 if seg.is_terminal or seg.supported
+                 else max(1, fp.leaves_per_terminal // 2))
         for k in range(nleaf):
             # distribute along the twig and around it (phyllotaxis ~137.5 deg)
             t = (k + 1) / (nleaf + 1)
