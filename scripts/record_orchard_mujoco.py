@@ -109,19 +109,19 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     sun_pos = np.array([0.0, 0.0, float(floor.canopy_z(0.0, 0.0))]) - 28.0 * sun_dir
     soil_geoms = [
         f'    <geom name="earth_mass" type="box" size="{half + 0.8:.3f} {half + 0.8:.3f} {bulk:.3f}" '
-        f'pos="0 0 {min_z - bulk:.4f}" material="earth_cut" contype="0" conaffinity="0" group="3"/>',
+        f'pos="0 0 {min_z - bulk:.4f}" material="earth_cut" contype="0" conaffinity="0"/>',
         f'    <geom name="earth_x_pos" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
-        f'contype="0" conaffinity="0" group="3"/>',
+        f'contype="0" conaffinity="0"/>',
         f'    <geom name="earth_x_neg" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="{-half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
-        f'contype="0" conaffinity="0" group="3"/>',
+        f'contype="0" conaffinity="0"/>',
         f'    <geom name="earth_y_pos" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="0 {half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
-        f'contype="0" conaffinity="0" group="3"/>',
+        f'contype="0" conaffinity="0"/>',
         f'    <geom name="earth_y_neg" type="box" size="{half:.3f} {skirt:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="0 {-half:.4f} {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
-        f'contype="0" conaffinity="0" group="3"/>',
+        f'contype="0" conaffinity="0"/>',
     ]
     return f'''<mujoco model="kiwi_plantation">
   <compiler angle="radian"/>
@@ -130,7 +130,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     <global offwidth="{int(width)}" offheight="{int(height)}" azimuth="125" elevation="-22" fovy="46"/>
     <headlight ambient=".14 .15 .13" diffuse=".10 .11 .09" specular="0 0 0"/>
     <rgba haze=".70 .78 .86 1"/>
-    <map fogstart="35" fogend="180" znear=".12" zfar="220" shadowclip=".98" shadowscale=".45"/>
+    <map fogstart="35" fogend="180" znear=".05" zfar="420" shadowclip=".98" shadowscale=".45"/>
     <quality shadowsize="4096" offsamples="4"/>
   </visual>
   <asset>
