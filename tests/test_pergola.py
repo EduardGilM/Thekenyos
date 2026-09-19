@@ -416,7 +416,7 @@ class PergolaTest(unittest.TestCase):
                            leaf_shape='cordate', leaves_per_terminal=6,
                            min_order_for_leaves=2)
         leaves = place_leaves(pergola(rows=2, columns=2, seed=42), fp, seed=42)
-        self.assertGreater(len(leaves), 20)
+        self.assertGreater(len(leaves), 8)
         normals = np.array([rotate_xyzw(p.frame, np.array([0., 1., 0.])) for p in leaves])
         headings = np.array([rotate_xyzw(p.frame, np.array([0., 0., 1.])) for p in leaves])
         self.assertGreater(float(np.mean(np.abs(normals[:, 2]))), 0.82)

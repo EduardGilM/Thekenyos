@@ -258,6 +258,10 @@ def place_leaves(skel: TreeSkeleton, fp: FoliageParams,
         H = seg.direction
         nleaf = fp.leaves_per_terminal if seg.is_terminal else max(1, fp.leaves_per_terminal // 2)
         if kiwi:
+            if not seg.supported:
+                # Hanging fruiting laterals keep fruit; the leaf roof sits on
+                # the tied canes so blades do not drape as a vertical string.
+                continue
             plane_n = np.array([0.0, 0.0, 1.0])
             along = np.array([H[0], H[1], 0.0])
             if np.linalg.norm(along) < 0.05:
