@@ -84,6 +84,15 @@ class RuntimeSnapshotTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'physics profile changed'):
             counterfactual.restore(runtime, snapshot)
 
+    def test_rejects_changed_task_semantics(self):
+        for name, before, after in (('settle_seconds', .5, 2.), ('ground_is_failure', True, False)):
+            runtime = self.runtime()
+            setattr(runtime.task, name, before)
+            snapshot = counterfactual.capture(runtime)
+            setattr(runtime.task, name, after)
+            with self.assertRaisesRegex(ValueError, 'physics profile changed'):
+                counterfactual.restore(runtime, snapshot)
+
 class WorldSnapshotTest(unittest.TestCase):
     def runtime(self, worlds):
         from dataclasses import make_dataclass

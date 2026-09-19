@@ -22,6 +22,7 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(_phase({'phase_events': [{'phase': 'ppo'}, {'phase': 'cti-v2'}]}), 'cti-v2')
         self.assertEqual(_phase({'rows': [{'cti/version': 2}]}), 'cti-v2')
         self.assertEqual(_phase({'rows': [{}]}), 'ppo')
+        self.assertEqual(_phase({'rows': [{'cti/version': 7}]}), 'cti-v7')
 
     def test_jsonl_tail_keeps_large_records_and_latest_complete_rows(self):
         stream = io.BytesIO((json.dumps({'payload': 'x' * 70000}) + '\n'
@@ -82,6 +83,15 @@ class DashboardTest(unittest.TestCase):
         rows.append(row(4,success=.5))
         self.assertEqual(select_checkpoint(rows,None)[0],'checkpoint-000004.pt')
         self.assertEqual(select_checkpoint(rows,{'best_checkpoint':'/run/checkpoint-000009.pt'})[0],'checkpoint-000009.pt')
+
+    def test_graph_best_uses_current_stage_and_physical_failure(self):
+        rows=[dict(step=i, **{'evaluation/success':0.,'evaluation/physical_failure':0.,
+              'evaluation/grasp':1.,'evaluation/closest_distance_m':.02,
+              'evaluation/graph_score':grade,'evaluation/held_detach':0.})
+              for i,grade in enumerate([1.5,3.6,2.])]
+        self.assertEqual(select_checkpoint(rows,None)[0],'checkpoint-000001.pt')
+        rows[1]['evaluation/physical_failure']=1.
+        self.assertEqual(select_checkpoint(rows,None)[0],'checkpoint-000002.pt')
 
     def test_api_media_range_and_path_confinement(self):
         with tempfile.TemporaryDirectory() as tmp:

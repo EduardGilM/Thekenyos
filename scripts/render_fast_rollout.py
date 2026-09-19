@@ -55,9 +55,16 @@ def main():
             arm_speed = saved['meta'].get('config', {}).get('arm_speed_rad_s', 2.5)
             solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
             jaw_cap = saved['meta'].get('config', {}).get('jaw_cap_Nm', .3)
+            reward_profile=saved['meta'].get('config',{}).get('reward_profile','potential-harvest/v1')
+            graph_profile=reward_profile=='graph-harvest/v1'
             rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,
-                             solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap)
+                             solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap,
+                             task_profile=reward_profile if graph_profile else None)
             gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
+            from treesim.kiwi_rl.harvest_training import EpisodeProgress, signals
+            progress=EpisodeProgress(signals(rt), reward_profile=reward_profile, guidance=0.,
+                stall_steps=round(saved['meta'].get('config',{}).get('stall_seconds',4.)/.02),
+                max_steps=round(saved['meta'].get('config',{}).get('max_episode_seconds',30.)/.02))
             memory = torch.zeros(1,64,device='cuda')
             with torch.no_grad():
                 for i in range(a.steps):
@@ -69,6 +76,8 @@ def main():
                     mean, _, _, memory = policy(inputs, obs, memory)
                     rt.set_gait_actions(gait(obs))
                     _, _, done, info = rt.step(mean.tanh())
+                    _,terminated,truncated,_=progress.step(signals(rt),done)
+                    done=terminated|truncated
                     if bool(done.any()):
                         states.append(rt.data.qpos.numpy()[0].copy())
                         break
@@ -76,9 +85,12 @@ def main():
             metadata = dict(checkpoint=str(a.checkpoint), role=a.role, scene=str(a.scene), frames=len(states), fps=25,
                             simulated_seconds=(i+1)*.02, terminated=bool(done.any()),
                             success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
-                            numerical=numerical,
+                            numerical=numerical,reward_profile=reward_profile,
                             arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
                             arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
+            if graph_profile:
+                metadata.update(graph_score=float(progress.graph_score[0]),
+                    graph_stage=int(progress.graph_stage[0]),ground_drop=bool(progress.graph_ground_drop[0]))
             np.savez_compressed(a.output/'states.npz', qpos=np.array(states))
             robot = rt.manifest['robot']
     model = mujoco.MjModel.from_xml_path(str(a.scene/'scene.xml'))

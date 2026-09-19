@@ -9,7 +9,7 @@ import time
 import torch
 
 from .counterfactual import capture, restore, restore_worlds, replay_position_errors
-from .harvest_training import EpisodeProgress, signals, HARVEST_GAMMA
+from .harvest_training import EpisodeProgress, signals, HARVEST_GAMMA, GRAPH_PROFILE
 from .fast_teacher import privileged_observation
 
 _EXPLORATION_SCALES = (.5, 1., 2.)
@@ -54,18 +54,25 @@ def _choose_winners(outcomes, root, *, minimum_gain=.1, approach_gain=.015):
         checks = {
             'baseline': torch.full_like(result['success'], index == 0),
             'failure': result['failed'] | result['numerical'],
-            'unheld_detachment_or_lost_fruit': result['lost_fruit'] & ~result['success'],
-            'incomplete_retention': ~result['retained'] & ~result['success'],
-            'no_retained_progress': ~(_progress_over(result, root, approach_gain) &
-                                      _progress_over(result, baseline, approach_gain)),
-            'no_root_potential_gain': (result['retained_potential'] <= EpisodeProgress.potential(root)) &
-                                      ~result['success'],
             'insufficient_score_gain': result['score'] - baseline['score'] < minimum_gain,
             'nonfinite_score': ~torch.isfinite(result['score']) | ~torch.isfinite(baseline['score']),
             'unmatched_numerical_baseline': baseline['numerical'],
             'factual_replay_mismatch': baseline.get('replay_invalid', torch.zeros_like(result['success'])),
             'inactive': ~result['triggered'],
         }
+        if 'graph_score' in result:
+            checks['no_current_graph_progress'] = ((result['graph_score'] <= root['graph_score'] + .005) |
+                                                   (result['graph_score'] <= baseline['graph_score'] + .005))
+            checks['candidate_replay_invalid'] = result['replay_invalid']
+        else:
+            checks.update({
+            'unheld_detachment_or_lost_fruit': result['lost_fruit'] & ~result['success'],
+            'incomplete_retention': ~result['retained'] & ~result['success'],
+            'no_retained_progress': ~(_progress_over(result, root, approach_gain) &
+                                      _progress_over(result, baseline, approach_gain)),
+            'no_root_potential_gain': (result['retained_potential'] <= EpisodeProgress.potential(root)) &
+                                      ~result['success'],
+            })
         eligible = torch.ones_like(result['success'])
         for name, reject in checks.items():
             eligible &= ~reject
@@ -149,6 +156,15 @@ class SelectiveCTI:
         result.update({key: torch.zeros_like(trigger) for key in
                        ('holding', 'detached', 'success', 'failed', 'stalled', 'truncated',
                         'horizon', 'numerical', 'lost_fruit', 'retained', 'replay_invalid')})
+        graph = progress.reward_profile == GRAPH_PROFILE
+        if graph:
+            result.update(graph_score=progress.graph_score.clone(),
+                          graph_stage=progress.graph_stage.clone(),
+                          root_graph_score=progress.graph_score.clone(),
+                          root_graph_stage=progress.graph_stage.clone(),
+                          ground_drop=torch.zeros_like(trigger),
+                          discounted_reward=torch.zeros_like(initial['distance']),
+                          replay_shaping_difference=torch.zeros_like(initial['distance']))
         result['triggered'] = trigger.clone()
         result['replay_steps'] = torch.zeros_like(initial['distance'])
         window, segment = deque(maxlen=self.retention_steps), []
@@ -206,20 +222,31 @@ class SelectiveCTI:
                     result[name] = torch.maximum(result.get(name, torch.zeros_like(error)),
                                                  torch.where(checked, error, 0.))
                 result['replay_steps'] += checked.float()
-            _, terminated, truncated, stalled = progress.step(now, done)
+            reward, terminated, truncated, stalled = progress.step(now, done)
             if recorded is not None:
                 result['replay_invalid'] |= active & ((terminated != recorded['terminated']) |
                     (truncated != recorded['truncated']) | (progress.task_reward != recorded['task_reward']))
-            result['task_return'][active] += HARVEST_GAMMA ** tick * progress.task_reward[active]
+            result['task_return'][active] += progress.gamma ** tick * progress.task_reward[active]
+            if graph:
+                result['discounted_reward'][active] += progress.gamma ** tick * reward[active]
+                if recorded is not None:
+                    # .05 grade = 7.5 mm of insertion distance. Accumulate the
+                    # discounted mismatch rather than tolerating repeated bias.
+                    result['replay_shaping_difference'][active] += progress.gamma**tick * (
+                        progress.shaping_reward-recorded['shaping_reward'])[active]
+                    result['replay_invalid'] |= active & (result['replay_shaping_difference'].abs() > .05)
+                    if 'graph_state' in recorded:
+                        result['replay_invalid'] |= active & (progress.graph_stage != recorded['graph_state']['graph_stage'])
             result['lost_fruit'] |= active & ~now['success'] & now['detached'] & ~now['holding']
             window.append({key: value.clone() for key, value in now.items()})
             finish = active & (terminated | truncated | (tick + 1 == self.horizon_steps))
             if bool(finish.any()):
-                potential = torch.stack([EpisodeProgress.potential(s) for s in window]).amin(dim=0)
-                result['retained_potential'][finish] = potential[finish]
-                leaf = torch.where(terminated, 0., HARVEST_GAMMA ** (tick + 1) * potential)
-                result['leaf'][finish] = leaf[finish]
-                result['score'][finish] = (result['task_return'] + leaf)[finish]
+                if not graph:
+                    potential = torch.stack([EpisodeProgress.potential(s) for s in window]).amin(dim=0)
+                    result['retained_potential'][finish] = potential[finish]
+                    leaf = torch.where(terminated, 0., HARVEST_GAMMA ** (tick + 1) * potential)
+                    result['leaf'][finish] = leaf[finish]
+                    result['score'][finish] = (result['task_return'] + leaf)[finish]
                 for key in ('distance', 'basket_distance'):
                     result[key][finish] = torch.stack([s[key] for s in window]).amax(dim=0)[finish]
                 holds = torch.stack([s['holding'] for s in window])
@@ -236,6 +263,13 @@ class SelectiveCTI:
                 result['retained'][finish] = (len(window) == self.retention_steps and
                                              tick + 1 >= self.perturb_steps + continuation)
                 result['steps'][finish] = tick + 1
+                if graph:
+                    result['score'][finish] = result['discounted_reward'][finish]
+                    result['leaf'][finish] = 0.
+                    result['graph_score'][finish] = progress.graph_score[finish]
+                    result['graph_stage'][finish] = progress.graph_stage[finish]
+                    result['ground_drop'][finish] = progress.graph_ground_drop[finish]
+                    result['holding'][finish] = progress.graph_grip[finish]
             active &= ~finish
             # Ended worlds must not accumulate physics failures during another
             # world's continuation. Their stored outcomes and labels are frozen.
@@ -268,8 +302,11 @@ class SelectiveCTI:
         # Prefix is identical in matched branches; root-relative discount keeps
         # gains comparable across early and late decisions.
         del prefix_return
-        self._restore_app(root)
+        _, root_progress, _ = self._restore_app(root)
         initial = signals(self.runtime)
+        if root_progress.reward_profile == GRAPH_PROFILE:
+            initial['graph_score'] = root_progress.graph_score.clone()
+            initial['graph_stage'] = root_progress.graph_stage.clone()
         outcomes, transitions = [], 0
         for candidate in candidates:
             outcome, _, count = self._branch(policy, root, trigger_mask, candidate, 71009+self.rounds)
@@ -341,8 +378,11 @@ class SelectiveCTI:
             frozen = deepcopy(policy).eval()
             frozen.load_state_dict(batch.policy_state)
             app = restore_worlds(rt, batch.snapshot)
+            if app['progress'].reward_profile == GRAPH_PROFILE and getattr(rt, 'task_profile', None) != GRAPH_PROFILE:
+                raise ValueError('Graph CTI requires matching physical runtime profile')
             # The queue captures pre-action GRU/progress from the factual collector.
-            app['progress'].guidance = 0.
+            if app['progress'].reward_profile != GRAPH_PROFILE:
+                app['progress'].guidance = 0.
             root = capture(rt, application_state=dict(memory=app['memory'],
                 progress=app['progress'], task_return=torch.zeros(rt.worlds,device=rt.device_name)))
             self.factual = batch.factual

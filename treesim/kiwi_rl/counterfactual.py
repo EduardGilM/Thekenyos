@@ -101,9 +101,13 @@ def _physics_profile(runtime):
     """Scalar settings that define a fixed branchable runtime profile."""
     profile = []
     for name in ('worlds', 'control_dt', 'dt', 'substeps', 'arm_speed_rad_s',
-                 'solver_iterations', 'device_name'):
+                 'solver_iterations', 'device_name', 'task_profile'):
         if hasattr(runtime, name):
             profile.append((name, str(getattr(runtime, name))))
+    task = getattr(runtime, 'task', None)
+    for name in ('settle_seconds','ground_is_failure'):
+        if task is not None and hasattr(task,name):
+            profile.append((f'task.{name}',str(getattr(task,name))))
     model = getattr(runtime, 'model', None)
     opt = getattr(model, 'opt', None)
     for name in ('timestep', 'integrator', 'cone', 'iterations', 'tolerance',
@@ -341,11 +345,11 @@ def _world_profile(runtime):
     return profile + capacities
 
 
-def _world_ids(world_ids, worlds):
+def _world_ids(world_ids, worlds, maximum=64):
     import torch
     ids = torch.as_tensor(world_ids)
-    if ids.ndim != 1 or ids.dtype not in (torch.int32, torch.int64) or not 1 <= ids.numel() <= 64:
-        raise ValueError('World ids must be a nonempty integer vector with at most 64 entries')
+    if ids.ndim != 1 or ids.dtype not in (torch.int32, torch.int64) or not 1 <= ids.numel() <= maximum:
+        raise ValueError(f'World ids must be a nonempty integer vector with at most {maximum} entries')
     values = tuple(ids.cpu().tolist())
     if len(set(values)) != len(values) or any(index < 0 or index >= worlds for index in values):
         raise ValueError('World ids must be unique and within the runtime')
@@ -372,7 +376,7 @@ def capture_worlds(runtime, world_ids, *, application_state=None):
         physics_profile=profile, model_sha256=runtime.manifest['model_sha256'])
 
 
-def restore_worlds(runtime, snapshot, world_ids=None):
+def restore_worlds(runtime, snapshot, world_ids=None, *, source_indices=None):
     """Restore selected worlds in place; preserve every other target world.
 
     Model, solver, controller, and buffer layouts must match. Raw global contact
@@ -382,9 +386,17 @@ def restore_worlds(runtime, snapshot, world_ids=None):
     import torch
     if not isinstance(snapshot, WorldSnapshot):
         raise TypeError('snapshot must be a WorldSnapshot')
-    ids = _world_ids(range(len(snapshot.source_world_ids)) if world_ids is None else world_ids,
-                     runtime.worlds)
-    if len(ids) != len(snapshot.source_world_ids):
+    count = len(snapshot.source_world_ids)
+    mapping = None
+    if source_indices is not None:
+        mapping = torch.as_tensor(source_indices)
+        if (mapping.ndim != 1 or mapping.dtype not in (torch.int32, torch.int64) or
+                not 1 <= mapping.numel() <= 4096 or bool(((mapping < 0) | (mapping >= count)).any())):
+            raise ValueError('Invalid branch source indices')
+        count = mapping.numel()
+    ids = _world_ids(range(count) if world_ids is None else world_ids, runtime.worlds,
+                     maximum=4096 if mapping is not None else 64)
+    if len(ids) != count:
         raise ValueError('Source and destination world counts must match')
     if snapshot.model_sha256 != runtime.manifest.get('model_sha256') or snapshot.physics_profile != _world_profile(runtime):
         raise ValueError('World transfer model or physics profile mismatch')
@@ -397,9 +409,14 @@ def restore_worlds(runtime, snapshot, world_ids=None):
         if target.shape[1:] != saved.shape[1:] or target.dtype != saved.dtype or target.device != saved.device:
             raise ValueError(f'World transfer buffer layout mismatch: {path}')
     indices = torch.tensor(ids, dtype=torch.long, device=next(iter(arrays.values())).device)
+    if mapping is not None:
+        mapping = mapping.to(device=indices.device, dtype=torch.long)
     with torch.no_grad():
         for path, target in arrays.items():
-            target.index_copy_(0, indices, snapshot.arrays[path])
+            saved = snapshot.arrays[path]
+            target.index_copy_(0, indices, saved if mapping is None else saved.index_select(0, mapping))
+    # Application tensors are explicitly expanded by the caller, whose schema
+    # includes recurrent memory and temporal reward state.
     return deepcopy(snapshot.application_state)
 
 

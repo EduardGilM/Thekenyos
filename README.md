@@ -1355,10 +1355,10 @@ without checking their licenses.
 
 ### Live reward/CTI run dashboard
 
-For the current `teacher-reward-cti-001` experiment, run locally:
+For the fresh reward-graph and CTI v7 run, run locally:
 
 ```bash
-python3 scripts/training_dashboard.py --cache output/live-dashboard
+python3 scripts/training_dashboard.py --run teacher-graph-cti-001 --cache output/graph-dashboard
 ```
 
 Open `http://127.0.0.1:8765`. This standard-library server polls JP every five
@@ -1367,5 +1367,42 @@ and a cached rollout of the best evaluated checkpoint with the arm-camera inset.
 Changed best checkpoints render no more often than every three minutes. Video is
 recorded, not a live camera feed. Render errors retain the previous video. The
 server binds only to localhost; SSH access to `jp` is required. Use `--no-render`
-for metrics only. Current run paths and PID are explicit constants in the script.
+for metrics only. Run selection is explicit; the server reads the active PID and the renderer source from run metadata.
 Run `python3 -B -m unittest tests.test_training_dashboard -v` for the focused checks.
+
+### Temporal reward graph and all-branch CTI
+
+The current hackathon teacher uses `--reward-graph --cti`. See
+[the reward contract](docs/reward-graph.md) for the six stages, physical gates,
+partial ground-drop credit and two-second basket settling. The graph shapes
+training reward; it does not choose actions or become a sensor-student input.
+
+CTI v7 replicates 32 actual PPO roots into 416 GPU worlds, runs three refinement
+passes, and learns from all replay-valid branch transitions using a separate
+V-trace actor/critic optimizer. Worse outcomes and physical failures are included.
+The search samples all seven controls, keeps an unbiased comparison branch,
+and preserves broad mutations. It does not prescribe jaw closure or harvesting
+motions. A mean factual KL limit and rollback constrain auxiliary updates.
+
+```bash
+python scripts/train_harvest_fast.py --role teacher \
+  --scene "$FAST_SCENE" --eval-scene "$EVAL_SCENE" \
+  --gait-checkpoint "$GAIT_CHECKPOINT" --output training/runs/teacher-graph-cti-001 \
+  --reward-graph --worlds 4096 --steps 128 --minibatch-worlds 256 \
+  --gae-lambda .99 --entropy-coef .001 --cti --cti-worlds 32 \
+  --cti-alternatives 12 --cti-search-iterations 3 --cti-time-fraction .2 \
+  --train-seconds 3600 --wandb-mode online
+```
+
+Omitting initialization/resume flags starts fresh harvest actor and critic weights
+and both optimizers; the fixed gait checkpoint remains reused. Preserve old runs.
+The CTI time fraction is an amortized cap; an individual search can overshoot it.
+
+Focused checks: `tests.test_reward_graph`, `tests.test_cti_learning`,
+`tests.test_branch_cti`, `tests.test_counterfactual_replay`,
+`tests.test_harvest_training`, `tests.test_fast_task`, and
+`tests.test_training_dashboard`. Set `CTI_GPU_TEST=1`, `FAST_SCENE`, and
+`GAIT_CHECKPOINT` for the real PPO-to-CTI GPU test. The full-size integration
+check processed 249,600 branch transitions in 4.88 s including learning, used
+40 accepted optimizer steps, and rejected zero replay roots. That demonstrates
+working data flow and throughput, not improved harvesting.

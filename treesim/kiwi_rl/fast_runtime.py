@@ -155,7 +155,7 @@ class FastRuntime:
 
     def __init__(self, directory, worlds=64, control_dt=.02, camera=None,
                  resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0',
-                 arm_speed_rad_s=2.5, solver_iterations=100, jaw_cap_Nm=1.0):
+                 arm_speed_rad_s=2.5, solver_iterations=100, jaw_cap_Nm=1.0, task_profile=None):
         if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
             raise ValueError('worlds must be an integer in [1, 4096]')
         if not np.isfinite(control_dt) or control_dt <= 0:
@@ -241,7 +241,8 @@ class FastRuntime:
             self.tcp_site = int(self.model.site(tcp_site_name).id)
             self.chassis = self.control.chassis
             from .fast_task import FastHarvestTask
-            self.task = FastHarvestTask(self.model, self.data, self.manifest)
+            self.task_profile = task_profile
+            self.task = FastHarvestTask(self.model, self.data, self.manifest, task_profile=task_profile)
             self._refresh(mw)
             self._measure_reward()
             self.reset()

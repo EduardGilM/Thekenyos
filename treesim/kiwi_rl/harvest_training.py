@@ -2,6 +2,7 @@
 import torch
 import warp as wp
 from treesim.basket import CENTER
+from .reward_graph import GRAPH_PROFILE, CollisionGeometry, graph_step
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -14,7 +15,7 @@ def signals(runtime):
     center = torch.as_tensor(CENTER, dtype=pos.dtype, device=pos.device)
     basket = pos[:, runtime.chassis] + (rotation @ center.expand(runtime.worlds, 3)[..., None]).squeeze(-1)
     task = runtime.task
-    return dict(distance=wp.to_torch(runtime._distance).clone(),
+    result = dict(distance=wp.to_torch(runtime._distance).clone(),
                 basket_distance=(pos[:, runtime.fruit_body] - basket).norm(dim=-1),
                 grasp=wp.to_torch(task.ever_grasped).bool().clone(),
                 holding=wp.to_torch(task.stable_grasp).bool().clone(),
@@ -25,19 +26,29 @@ def signals(runtime):
                 failed=wp.to_torch(task.failed).bool().clone(),
                 settle_time=(wp.to_torch(task.settle_time).clone() if hasattr(task, 'settle_time')
                              else torch.zeros_like(wp.to_torch(runtime._distance))))
+    if getattr(runtime, 'task_profile', None) == GRAPH_PROFILE:
+        if not hasattr(runtime, '_graph_geometry'):
+            runtime._graph_geometry = CollisionGeometry(runtime)
+        result.update(runtime._graph_geometry.signals(runtime))
+        result.update(bilateral=wp.to_torch(task.bilateral_contact).bool().clone(),
+            max_load=torch.stack([wp.to_torch(x) for x in (task.finger_load, task.jaw_load, task.palm_load)]).amax(0),
+            damage=wp.to_torch(task.damage_proxy).clone(),
+            ground_contact=wp.to_torch(task.ground_contact).bool().clone())
+    return result
 
 
 class EpisodeProgress:
     """Track meaningful best-so-far progress, never motion or repeat events."""
     def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1., gamma=HARVEST_GAMMA,
-                 reward_profile=REWARD_PROFILE, curriculum_stage=0):
-        if reward_profile not in (REWARD_PROFILE, CURRICULUM_PROFILE):
+                 reward_profile=REWARD_PROFILE, curriculum_stage=0, control_dt=.02):
+        if reward_profile not in (REWARD_PROFILE, CURRICULUM_PROFILE, GRAPH_PROFILE):
             raise ValueError('Unknown harvesting reward profile')
         if curriculum_stage not in (0, 1, 2):
             raise ValueError('Curriculum stage must be 0, 1, or 2')
         self.reward_profile, self.curriculum_stage = reward_profile, curriculum_stage
         self.stall_steps, self.max_steps, self.guidance = stall_steps, max_steps, guidance
         self.gamma = gamma
+        self.control_dt = control_dt
         self.age = torch.zeros_like(initial['distance'], dtype=torch.long)
         self.stale = self.age.clone()
         self.closest = initial['distance'].clone()
@@ -54,6 +65,18 @@ class EpisodeProgress:
         self.curriculum_detach_paid = torch.zeros_like(self.ever_grasp)
         self.curriculum_stage_ids = torch.full_like(self.age, curriculum_stage)
         self.curriculum_credit = torch.zeros_like(self.closest)
+        self.graph_dwell = torch.zeros_like(self.closest)
+        self.graph_grip = torch.zeros_like(self.ever_grasp)
+        self.graph_detached = torch.zeros_like(self.ever_grasp)
+        self.graph_enclosed = torch.zeros_like(self.ever_grasp)
+        self.graph_ground_drop = torch.zeros_like(self.ever_grasp)
+        self.graph_slip = torch.zeros_like(self.closest)
+        self.graph_score = torch.zeros_like(self.closest)
+        self.graph_stage = torch.zeros_like(self.age)
+        if reward_profile == GRAPH_PROFILE:
+            graph_step(self, initial)
+            self.graph_dwell.zero_()
+        self.graph_best = self.graph_score.clone()
 
     @staticmethod
     def potential(state):
@@ -81,6 +104,12 @@ class EpisodeProgress:
         self.curriculum_detach_paid[mask] = False
         self.curriculum_stage_ids[mask] = self.curriculum_stage
         self.curriculum_credit[mask] = 0
+        if self.reward_profile == GRAPH_PROFILE:
+            fresh = EpisodeProgress(initial, reward_profile=GRAPH_PROFILE, control_dt=self.control_dt,
+                                    gamma=self.gamma)
+            for name, value in vars(self).items():
+                if name.startswith('graph_') and isinstance(value, torch.Tensor):
+                    value[mask] = getattr(fresh, name)[mask]
         for key,value in initial.items():
             self.previous[key][mask] = value[mask]
 
@@ -116,6 +145,8 @@ class EpisodeProgress:
         return self.guidance * bonus
 
     def step(self, now, physical_done):
+        if self.reward_profile == GRAPH_PROFILE:
+            return self._graph_step(now, physical_done)
         self.age += 1; self.stale += 1
         new_grasp = now['grasp'] & ~self.ever_grasp
         new_detach = now['detached'] & ~self.ever_detached
@@ -148,6 +179,28 @@ class EpisodeProgress:
         return reward, terminated, truncated, stalled
 
 
+    def _graph_step(self, now, physical_done):
+        self.age += 1; self.stale += 1
+        previous_score = self.graph_score.clone()
+        score = graph_step(self, now)
+        improved = score > self.graph_best + .005
+        self.stale[improved] = 0
+        self.graph_best = torch.maximum(self.graph_best, score)
+        self.closest = torch.minimum(self.closest, now['distance'])
+        self.ever_grasp |= self.graph_grip
+        self.ever_detached |= self.graph_detached
+        self.ever_held_detach |= self.graph_detached & self.graph_grip
+        ending = physical_done | self.graph_ground_drop
+        stalled = (self.stale >= self.stall_steps) & ~ending
+        terminated = ending | stalled
+        truncated = (self.age >= self.max_steps) & ~terminated
+        failure = now['failed'] | (physical_done & ~now['success'])
+        self.task_reward = -.001 + 20*now['success'] - 5*failure - .5*stalled
+        self.shaping_reward = self.gamma*score - previous_score
+        self.previous = {k:v.clone() for k,v in now.items()}
+        return self.task_reward+self.shaping_reward, terminated, truncated, stalled
+
+
 class HarvestCollector:
     """Keep simulation state and GRU memory across optimizer batch boundaries."""
     def __init__(self, runtime, *, stall_seconds=4., max_episode_seconds=30., guidance=1.,
@@ -156,6 +209,8 @@ class HarvestCollector:
             raise ValueError("role must be 'teacher' or 'student'")
         if role == 'teacher' and teacher_policy is not None:
             raise ValueError('A teacher run cannot also load a teacher checkpoint')
+        if reward_profile == GRAPH_PROFILE and getattr(runtime, 'task_profile', None) != GRAPH_PROFILE:
+            raise ValueError('Graph reward requires matching physical runtime profile')
         self.runtime = runtime
         self.role, self.teacher_policy = role, teacher_policy
         runtime.reset()
@@ -166,7 +221,7 @@ class HarvestCollector:
         self.progress = EpisodeProgress(signals(runtime),
             stall_steps=round(stall_seconds/runtime.control_dt),
             max_steps=round(max_episode_seconds/runtime.control_dt), guidance=guidance,
-            reward_profile=reward_profile, curriculum_stage=curriculum_stage)
+            reward_profile=reward_profile, curriculum_stage=curriculum_stage, control_dt=runtime.control_dt)
         self.tick = 0
         self.rgbd = None
 
@@ -215,7 +270,9 @@ class HarvestCollector:
                         reward=reward,task_reward=self.progress.task_reward,
                         shaping_reward=self.progress.shaping_reward,terminated=terminated,
                         truncated=truncated,stalled=stalled,episode_ids=self.episode_ids,
-                        active_mask=cti_active)
+                        active_mask=cti_active,
+                        graph_state=({name:value for name,value in vars(self.progress).items()
+                                      if name.startswith('graph_')} if self.progress.reward_profile == GRAPH_PROFILE else None))
                     cti_active[ending] = False
                 timeout_value = torch.zeros_like(value)
                 if bool(truncated.any()):
@@ -250,6 +307,14 @@ class HarvestCollector:
                         episodes.append(dict(world=int(world),success=bool(success),grasp=bool(grasp),
                             detached=bool(detached),held_detach=bool(held_detach),physical_failure=bool(failure),stalled=bool(stall),
                             timeout=bool(timeout),duration_s=duration,closest_distance_m=closest))
+                    if self.progress.reward_profile == GRAPH_PROFILE:
+                        for entry, world in zip(episodes[-len(ids):], ids.tolist()):
+                            entry.update(graph_score=float(self.progress.graph_score[world]),
+                                graph_stage=int(self.progress.graph_stage[world]),
+                                enclosure=bool(self.progress.graph_enclosed[world]),
+                                secure_grip=bool(self.progress.graph_grip[world]),
+                                slip_m_s=float(self.progress.graph_slip[world]),
+                                ground_drop=bool(self.progress.graph_ground_drop[world]))
                     rt.reset(ending)
                     self.episode_ids[ending] += 1
                     self.memory[ending] = 0
@@ -281,4 +346,6 @@ def episode_metrics(episodes):
     keys = ('success','grasp','detached','physical_failure','stalled','timeout','duration_s','closest_distance_m')
     return {'episodes':len(episodes),
             'held_detach':sum(r.get('held_detach',False) for r in episodes)/len(episodes),
-            **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys}}
+            **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys},
+            **{k:sum(r.get(k,0) for r in episodes)/len(episodes) for k in
+               ('graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop') if any(k in r for r in episodes)}}

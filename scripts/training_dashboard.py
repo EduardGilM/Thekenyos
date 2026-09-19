@@ -72,7 +72,7 @@ events=tail_jsonl('phase-events.jsonl',200)
 branches=tail_jsonl('cti-branches.jsonl',3)
 phase=active.get('phase')
 if not phase and events: phase=events[-1].get('phase')
-if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4) else 'ppo'
+if not phase and rows: phase='cti-v'+str(rows[-1]['cti/version']) if rows[-1].get('cti/version') in (2,3,4,5,6,7) else 'ppo'
 status=active.get('status') if active.get('status') in ('paused','running') else None
 print(json.dumps({'rows':rows,'report':read('report.json'),'failure':read('failure.json'),
                   'log_mtime':log_mtime,'process_alive':alive,'active_process':active,
@@ -110,6 +110,9 @@ def _row_score(row):
     # Missing metrics stay missing; do not let fabricated zeros rank a checkpoint.
     if any(value is None for value in (success, failure, grasp, distance)):
         return None
+    graph=_number(row.get('evaluation/graph_score'))
+    if graph is not None:
+        return success, -failure, graph, _number(row.get('evaluation/held_detach')) or 0., grasp, -distance
     return success, -failure, grasp, -distance
 
 
@@ -158,7 +161,7 @@ def _phase(snapshot):
                 return event['phase']
     rows = snapshot.get('rows')
     if isinstance(rows, list) and rows and isinstance(rows[-1], dict):
-        if rows[-1].get('cti/version') in (2,3,4):
+        if rows[-1].get('cti/version') in (2,3,4,5,6,7):
             return 'cti-v'+str(rows[-1]['cti/version'])
     return 'ppo'
 
@@ -256,9 +259,13 @@ class Dashboard:
             # artifact; otherwise render into a unique retry directory.
             probe = subprocess.run(['ssh', '-o', 'BatchMode=yes', 'jp', 'python3', '-'],
                 input=("import json,pathlib\np=pathlib.Path(" + repr(remote_base) + ")\n"
-                       "print(json.dumps({'complete':(p/'rollout.mp4').is_file() and (p/'report.json').is_file()}))\n"),
+                       "m=json.loads(pathlib.Path(" + repr(f'{self.remote_run}/{checkpoint}.json') + ").read_text())\n"
+                       "print(json.dumps({'complete':(p/'rollout.mp4').is_file() and (p/'report.json').is_file(), 'config':m.get('config',{})}))\n"),
                 text=True, capture_output=True, timeout=REMOTE_TIMEOUT, check=True)
-            complete = json.loads(probe.stdout).get('complete', False)
+            artifact = json.loads(probe.stdout)
+            complete = artifact.get('complete', False)
+            render_config = artifact.get('config', {})
+            render_source = render_config.get('source_dir', f'{REMOTE_ROOT}/training/releases/reward-cti-001')
             source_dir = remote_base
             if not complete:
                 exists = subprocess.run(['ssh', '-o', 'BatchMode=yes', 'jp', 'test', '-e', remote_base],
@@ -267,11 +274,11 @@ class Dashboard:
                     source_dir = remote_base + f'-retry-{int(time.time())}'
                 output = source_dir
                 argv = [f'{REMOTE_ROOT}/training/envs/flex-gpu/bin/python',
-                        f'{REMOTE_ROOT}/training/releases/reward-cti-001/scripts/render_fast_rollout.py',
-                        '--role', 'teacher', '--scene', f'{REMOTE_ROOT}/training/scenes/harvest-near-001',
+                        f'{render_source}/scripts/render_fast_rollout.py',
+                        '--role', 'teacher', '--scene', render_config.get('scene', f'{REMOTE_ROOT}/training/scenes/harvest-near-001'),
                         '--checkpoint', f'{self.remote_run}/{checkpoint}', '--gait-checkpoint',
-                        f'{REMOTE_ROOT}/training/runs/relic-parity-002/g1-cpu.pt',
-                        '--steps', '300', '--output', output]
+                        render_config.get('gait_checkpoint', f'{REMOTE_ROOT}/training/runs/relic-parity-002/g1-cpu.pt'),
+                        '--steps', '1500', '--output', output]
                 script = ('import os,subprocess\n'
                           f'os.environ.update(WARP_CACHE_PATH={REMOTE_ROOT + "/training/cache/warp"!r}, '
                           f'TMPDIR={REMOTE_ROOT + "/tmp"!r}, MUJOCO_GL="egl")\n'

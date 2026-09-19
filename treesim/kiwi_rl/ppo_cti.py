@@ -93,17 +93,16 @@ class PPODecisionQueue:
         ids, self.cursor = choose_worlds(signals(runtime)['distance'], self.worlds_per_batch, self.cursor)
         worlds = torch.as_tensor(ids, dtype=torch.long, device=runtime.device_name)
         progress = collector.progress
-        progress_state = {name: _clone(_slice(getattr(progress, name), worlds)) for name in
-                          ('age', 'stale', 'closest', 'best_basket', 'best_force',
-                           'ever_grasp', 'ever_detached', 'ever_held_detach', 'previous',
-                           'curriculum_best_reach','curriculum_best_carry','curriculum_best_settle',
-                           'curriculum_grasp_paid','curriculum_detach_paid','curriculum_stage_ids','curriculum_credit')}
+        # Capture every tensor/dict, including temporal graph dwell and latches.
+        progress_state = {name: _clone(_slice(value, worlds)) for name, value in vars(progress).items()
+                          if isinstance(value, (torch.Tensor, dict))}
         from .harvest_training import EpisodeProgress
         selected_initial = {key: value.index_select(0, worlds).clone()
                             for key, value in progress.previous.items()}
         sliced_progress = EpisodeProgress(selected_initial, stall_steps=progress.stall_steps,
             max_steps=progress.max_steps, guidance=progress.guidance, gamma=progress.gamma,
-            reward_profile=progress.reward_profile,curriculum_stage=progress.curriculum_stage)
+            reward_profile=progress.reward_profile,curriculum_stage=progress.curriculum_stage,
+            control_dt=progress.control_dt)
         for name, value in progress_state.items():
             setattr(sliced_progress, name, value)
         rng_state = dict(torch_cpu=torch.random.get_rng_state().clone())
@@ -123,7 +122,7 @@ class PPODecisionQueue:
 
     def record(self, batch, *, obs, raw_action, action, gait_action, next_obs,
                runtime, signals, reward, task_reward, shaping_reward,
-               terminated, truncated, stalled, episode_ids, active_mask, noise=None):
+               terminated, truncated, stalled, episode_ids, active_mask, noise=None, graph_state=None):
         """Record one factual step before any ending world's reset is applied."""
         import torch
         ids = torch.as_tensor(batch.source_world_ids, dtype=torch.long, device=runtime.device_name)
@@ -157,6 +156,8 @@ class PPODecisionQueue:
                       task_reward=selected(task_reward), shaping_reward=selected(shaping_reward),
                       terminated=selected(terminated), truncated=selected(truncated),
                       ending=selected(ended), stalled=selected(stalled))
+        if graph_state is not None:
+            record['graph_state'] = selected(graph_state)
         batch.factual_steps.append(record)
         event = signals['touching'] | signals['grasp'] | signals['detached'] | signals['success'] | signals['failed'] | stalled
         event = event.index_select(0, ids) & active

@@ -250,3 +250,27 @@ and held-detachment state for PPO-rooted CTI replay. PPO and CTI have separate A
 states; checkpoint both. CTI must decrease selected-target error as well as pass
 its KL guard. Preserve the prior completed run when warm-starting a new reward
 profile. Longer GAE and entropy settings must be explicit in run configuration.
+
+## Temporal graph and CTI v7
+
+The current approved run uses `--reward-graph --cti`; read docs/reward-graph.md.
+Preserve the 0.5 m approach saturation, physical jaw enclosure and sustained
+grip, reversible regressions, graded intact ground drops, and two-second basket
+settling. No graph stage may prescribe an action. Training, evaluation, CTI and
+rendering must select the same task profile. Sensor-student observations remain
+unchanged. The fixed gait may be reused when harvest policy training starts over.
+
+CTI v7 branches actual PPO states in parallel and uses all valid branch
+transitions for separate V-trace actor/critic learning. Physical failure is
+negative experience, not an exclusion condition. Reject replay-invalid roots
+and numerical corruption. Log the actual conditional Gaussian proposal density;
+never reuse noise after selecting a proposal based on that same noise. Keep a
+fresh matched-policy branch and generic mutations of every control. Preserve
+current-target bootstrap, terminal/truncation distinction, trajectory masks,
+and policy plus optimizer rollback under excessive factual KL. Stored detached
+GRU states are an explicit truncated recurrent approximation.
+
+Run tests.test_cti_learning and tests.test_branch_cti (CTI_GPU_TEST=1) after
+changes. Count branch transitions as used for learning only after an accepted
+optimizer update. Keep failed physical outcomes and importance weights visible;
+optimizer activity is not evidence of harvesting improvement.

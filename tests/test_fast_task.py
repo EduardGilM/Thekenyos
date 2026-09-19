@@ -143,6 +143,13 @@ class FastTaskGpuTest(unittest.TestCase):
             np.testing.assert_array_equal(self.data.eq_active.numpy(), [[True], [True]])
 
     def test_detached_fruit_settles_on_basket_and_ground_drop_fails(self):
+        self._settle_and_ground(None)
+
+    def test_graph_two_second_settle_motion_reset_and_intact_ground(self):
+        from treesim.kiwi_rl.reward_graph import GRAPH_PROFILE
+        self._settle_and_ground(GRAPH_PROFILE)
+
+    def _settle_and_ground(self, profile):
         from treesim.basket import CENTER, SIZE, WALL
         from treesim.native_kiwi import RADII_M
         from treesim.kiwi_rl.fast_task import FastHarvestTask
@@ -170,10 +177,15 @@ class FastTaskGpuTest(unittest.TestCase):
             data = self.mw.put_data(model, native, nworld=2, nconmax=64, njmax=256)
             qpos = data.qpos.numpy()
             qpos[0, 0:3] = [CENTER[0], CENTER[1], .5 + CENTER[2] + WALL/2 + RADII_M[2]]
+            if profile is not None:
+                # Rest the long ellipsoid axis horizontally. The legacy upright
+                # pose tips over after .5 s; elapsed time is not settled time.
+                qpos[0, 2] = .5 + CENTER[2] + WALL/2 + RADII_M[0]
+                qpos[0, 3:7] = [np.sqrt(.5), 0., np.sqrt(.5), 0.]
             qpos[1, 0:3] = [.8, 0., .3]
             data.qpos.assign(qpos)
             self.mw.forward(gpu_model, data)
-            task = FastHarvestTask(model, data, manifest)
+            task = FastHarvestTask(model, data, manifest, task_profile=profile)
             data.nacon.assign(np.array([0], np.int32))
             data.nefc.assign(np.array([1, 1], np.int32))
             data.efc.type.assign(np.zeros((2, 256), np.int32))
@@ -188,8 +200,24 @@ class FastTaskGpuTest(unittest.TestCase):
                 self.mw.step(gpu_model, data)
                 task.record()
             self.wp.synchronize()
+            if profile is not None:
+                self.assertEqual(task.success.numpy()[0], 0)
+                self.assertGreater(task.settle_time.numpy()[0], .5)
+                # Actual evaluator timer clears on relative motion.
+                velocities = data.cvel.numpy()
+                velocities[0, model.body('fruit').id, 3] = .1
+                data.cvel.assign(velocities)
+                task.record()
+                self.assertEqual(task.settle_time.numpy()[0], 0.)
+                for _ in range(390):
+                    self.mw.step(gpu_model, data)
+                    task.record()
+                self.assertEqual(task.success.numpy()[0], 0)
+                for _ in range(25):
+                    self.mw.step(gpu_model, data)
+                    task.record()
             np.testing.assert_array_equal(task.success.numpy()[0], 1)
-            np.testing.assert_array_equal(task.failed.numpy()[1], 1)
+            np.testing.assert_array_equal(task.failed.numpy()[1], int(profile is None))
             np.testing.assert_array_equal(task.basket_contact.numpy()[0], 1)
 
 

@@ -112,6 +112,7 @@ def _record(
     stem_force: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
     success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), chassis: int, fruit_radius: wp.vec3,
     basket_center: wp.vec3, basket_size: wp.vec3, wall: float, fruit_root: int, chassis_root: int,
+    settle_seconds: float, ground_is_failure: int,
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
@@ -177,9 +178,9 @@ def _record(
         settle_time[world] = 0.
     up = chassis_rotation[2, 2]
     fallen = xpos[world, chassis][2] < .30 or up < .6967067
-    if ground_contact[world] != 0 or fallen or maximum_load > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
+    if (ground_contact[world] != 0 and ground_is_failure != 0) or fallen or maximum_load > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
-    elif settle_time[world] >= SETTLE_TIME_S and detached[world] != 0 and hand_contact[world] == 0:
+    elif settle_time[world] >= settle_seconds and detached[world] != 0 and hand_contact[world] == 0:
         success[world] = wp.uint8(1)
 
 
@@ -221,7 +222,12 @@ class FastHarvestTask:
 
     FORCE_CHECKS = FORCE_CHECKS
 
-    def __init__(self, model, data, manifest):
+    def __init__(self, model, data, manifest, *, task_profile=None):
+        from .reward_graph import GRAPH_PROFILE
+        if task_profile not in (None, GRAPH_PROFILE):
+            raise ValueError('Unknown physical task profile')
+        self.settle_seconds = 2. if task_profile == GRAPH_PROFILE else SETTLE_TIME_S
+        self.ground_is_failure = task_profile != GRAPH_PROFILE
         fruits = manifest.get('fruits', [])
         if not fruits:
             raise ValueError('Fast scene manifest must contain fruits')
@@ -308,7 +314,7 @@ class FastHarvestTask:
             self.success, self.failed, self.chassis, wp.vec3(*RADII_M), wp.vec3(*CENTER),
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.model.body(self.manifest['fruits'][0]['body']).id]),
-            int(self.model.body_rootid[self.chassis])], device=self.device)
+            int(self.model.body_rootid[self.chassis]), self.settle_seconds, int(self.ground_is_failure)], device=self.device)
         return self.outputs()
 
     def reset(self, mask=None):
