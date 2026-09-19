@@ -108,14 +108,15 @@ EASY_PRESET = {
     'fail_reward': -10000.0,
     # Clip 0.5, low entropy, high LR and more epochs: push π toward
     # the ±10000 terminals. Value coef stays small so critic MSE does
-    # not steal the actor step. Extra PPO epochs may continue up to KL 0.50.
+    # not steal the actor step. Extra PPO epochs may continue up to KL 1.0
+    # so a 3e-3 learning rate is not stopped after the first pass.
     'ppo_clip': 0.5,
     'ppo_lr': 3e-3,
     'ppo_epochs': 8,
     'ppo_grad_clip': 5.0,
     'ppo_adv_std_cap': 1.0,
     'ppo_value_coef': 0.05,
-    'ppo_target_kl': 0.50,
+    'ppo_target_kl': 1.0,
     # Rare deposits still vanish in a 3072-world mean. Clone those worlds,
     # leave A>0 unclipped, and add a self-imitation term on harvest
     # trajectories. Not a privileged arm teacher.

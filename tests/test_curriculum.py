@@ -156,7 +156,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['ppo_grad_clip'], 5.0)
         self.assertEqual(preset['ppo_adv_std_cap'], 1.0)
         self.assertEqual(preset['ppo_value_coef'], 0.05)
-        self.assertEqual(preset['ppo_target_kl'], 0.50)
+        self.assertEqual(preset['ppo_target_kl'], 1.0)
         self.assertTrue(preset['ppo_unclip_positive'])
         self.assertEqual(preset['ppo_success_repeat'], 24)
         self.assertEqual(preset['ppo_imitation_coef'], 2.0)
