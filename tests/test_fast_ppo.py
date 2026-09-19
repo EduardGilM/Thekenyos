@@ -161,6 +161,9 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('harvest_jackpot_sum', run_src)
         self.assertIn('reward_transition_mean', inspect.getsource(train_fast))
         self.assertIn('success_window_return_mean', inspect.getsource(train_fast))
+        self.assertIn('reward_window_mean', inspect.getsource(train_fast))
+        self.assertIn('reward_mean = success_window if n_success else transition_mean',
+                      inspect.getsource(train_fast))
         self.assertIn('normalize_advantages', inspect.getsource(train_fast))
         self.assertIn('success_world_order', inspect.getsource(train_fast))
         self.assertIn('ppo_actor_surrogate', inspect.getsource(train_fast))
@@ -206,7 +209,7 @@ class FastTrainerCLITest(unittest.TestCase):
             success_world_order(flag, repeat=0)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
-    def test_reward_mean_is_per_world_window_return(self):
+    def test_reward_mean_shows_harvest_jackpot(self):
         import torch
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
         from train_fast import build_policy, update
@@ -232,7 +235,8 @@ class FastTrainerCLITest(unittest.TestCase):
                     terminated=torch.tensor([t == 0, False]), reset=reset))
         result = update(policy, torch.optim.Adam(policy.parameters(), lr=3e-4),
                         rows, torch.zeros(2), minibatch_worlds=2)
-        self.assertAlmostEqual(result['reward_mean'], 5000.5, places=4)
+        self.assertAlmostEqual(result['reward_mean'], 10000.0, places=3)
+        self.assertAlmostEqual(result['reward_window_mean'], 5000.5, places=4)
         self.assertAlmostEqual(result['reward_transition_mean'], 1250.125, places=4)
         self.assertAlmostEqual(result['success_window_return_mean'], 10000.0, places=3)
         self.assertAlmostEqual(result['deposit_return_sum'], 10000.0, places=3)

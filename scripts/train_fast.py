@@ -360,6 +360,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     action_dim = max(m[4] for m in metrics)
     window = rewards.sum(dim=0)
     n_success = int(success_any.sum().item())
+    transition_mean = float(rewards.mean())
+    window_mean = float(window.mean())
     if 'success' in rows[0]:
         success_steps = torch.stack([r['success'] for r in rows]).to(dtype=rewards.dtype)
         deposit_mass = float((rewards * success_steps).sum())
@@ -367,6 +369,10 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     else:
         deposit_mass = 0.0
         success_window = 0.0
+    # A 64-step sum of the time cost looks ~64× worse than the old per-step
+    # mean and still hides +10000 among 3072 worlds. Headline the harvest
+    # return when a world deposited; otherwise keep the per-step scale.
+    reward_mean = success_window if n_success else transition_mean
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
                 entropy=entropy, entropy_gaussian=entropy_g,
                 entropy_per_dim=entropy / action_dim,
@@ -382,8 +388,9 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 ppo_success_repeat=int(success_repeat),
                 ppo_imitation_coef=float(imitation_coef),
                 ppo_success_worlds=n_success,
-                reward_mean=float(window.mean()),
-                reward_transition_mean=float(rewards.mean()),
+                reward_mean=reward_mean,
+                reward_window_mean=window_mean,
+                reward_transition_mean=transition_mean,
                 reward_std=float(window.std(unbiased=False)),
                 success_window_return_mean=success_window,
                 deposit_return_sum=deposit_mass,
