@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 
 from treesim.kiwi_rl.training_monitor import (
-    LiveDashboard, compose_progress_frame, due_checkpoints, read_jsonl,
-    render_dashboard_html, series_from_rows, svg_chart, write_dashboard,
+    LiveDashboard, compose_progress_frame, curriculum_preview_from_checkpoint,
+    due_checkpoints, read_jsonl, render_dashboard_html, series_from_rows,
+    svg_chart, write_dashboard,
 )
 
 
@@ -16,8 +17,8 @@ class TrainingMonitorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'training.jsonl'
             path.write_text(
-                '{"step": 0, "evaluation/mean_closest_distance_m": 0.8, "evaluation/harvest_successes": 0}\n'
-                '{"step": 5, "loss": 0.12, "reward_mean": 0.01, "distance_mean_closest_m": 0.4}\n'
+                '{"step": 0, "evaluation/mean_closest_distance_m": 0.8, "evaluation/harvest_successes": 0, "curriculum_stage": "deposit_pixels"}\n'
+                '{"step": 5, "loss": 0.12, "reward_mean": 0.01, "distance_mean_closest_m": 0.4, "curriculum_stage": "deposit_pixels"}\n'
                 '{"step": 5, "loss":\n',
                 encoding='utf-8')
             rows = read_jsonl(path)
@@ -39,6 +40,7 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertNotIn('http-equiv="refresh"', html)
             self.assertIn('metrics.json', html)
             self.assertIn('Último vídeo de progreso', html)
+            self.assertIn('deposit_pixels', html)
 
     def test_compose_overlay_keeps_scene_and_nearest_gripper_patch(self):
         scene = np.zeros((180, 320, 3), dtype=np.uint8)
@@ -90,6 +92,26 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertNotIn('progress-0000.mp4', html_two)
             self.assertNotIn('http-equiv="refresh"', html_two)
             self.assertIn('training_ready', html_two)
+
+    def test_curriculum_preview_matches_stage_reset(self):
+        deposit = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'deposit_pixels'}, 'config': {},
+        })
+        self.assertEqual(deposit['stage'], 'deposit_pixels')
+        self.assertEqual(deposit['reset_mode'], 1)
+        self.assertFalse(deposit['allow_locomotion'])
+        approach = curriculum_preview_from_checkpoint({
+            'meta': {}, 'config': {'stage': 'visual_approach'},
+        })
+        self.assertEqual(approach['reset_mode'], 3)
+        self.assertTrue(approach['allow_locomotion'])
+        hanging = curriculum_preview_from_checkpoint({'meta': {}, 'config': {}})
+        self.assertEqual(hanging['reset_mode'], 0)
+        self.assertFalse(hanging['allow_locomotion'])
+        from treesim.kiwi_rl.training_monitor import _n3_command
+        import numpy as np
+        first = _n3_command(np.zeros(3), np.array([1.0, 0.0, -1.0]))
+        np.testing.assert_allclose(first, [0.02, 0.0, -0.04], atol=1e-6)
 
 
 if __name__ == '__main__':

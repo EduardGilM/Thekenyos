@@ -254,9 +254,12 @@ function svgChart(steps, values, title) {
   </svg>`;
 }
 function renderCards(latest) {
+  const stage = latest.curriculum_stage
+    ? `<div class="card"><div class="k">curriculum_stage</div><div class="v">${esc(latest.curriculum_stage)}</div></div>`
+    : "";
   const cards = CARD_KEYS.filter(key => chartable(latest[key])).map(key =>
     `<div class="card"><div class="k">${esc(key)}</div><div class="v">${esc(fmt(latest[key]))}</div></div>`);
-  return cards.join("") || '<div class="card">Esperando training.jsonl</div>';
+  return (stage + cards.join("")) || '<div class="card">Esperando training.jsonl</div>';
 }
 function renderCharts(series) {
   const names = PRIORITY.filter(name => series[name])
@@ -273,8 +276,9 @@ function renderVideo(video) {
 let currentVideo = null;
 async function tick() {
   const payload = await fetch("metrics.json?t=" + Date.now(), {cache: "no-store"}).then(r => r.json());
+  const stage = (payload.latest && payload.latest.curriculum_stage) || "sin etapa";
   document.getElementById("sub").textContent =
-    `${payload.run} · ${payload.rows} filas · actualizado ${payload.generated_at}`;
+    `${payload.run} · etapa ${stage} · ${payload.rows} filas · actualizado ${payload.generated_at}`;
   document.getElementById("cards").innerHTML = renderCards(payload.latest || {});
   document.getElementById("charts").innerHTML = renderCharts(payload.series || {});
   const videos = payload.videos || [];
@@ -301,6 +305,10 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     series = payload.get('series') or {}
     videos = list(payload.get('videos') or [])
     cards = []
+    if latest.get('curriculum_stage'):
+        cards.append(
+            f'<div class="card"><div class="k">curriculum_stage</div>'
+            f'<div class="v">{html.escape(str(latest["curriculum_stage"]))}</div></div>')
     for key in ('step', 'curriculum_index', 'loss', 'entropy', 'reward_mean',
                 'evaluation/success_rate', 'evaluation/mean_closest_distance_m',
                 'evaluation/harvest_successes', 'training_transitions_per_second',
@@ -318,6 +326,7 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
     generated = html.escape(str(payload.get('generated_at', '')))
     run = html.escape(str(payload.get('run', '')))
     rows = int(payload.get('rows', 0))
+    stage = html.escape(str(latest.get('curriculum_stage') or 'sin etapa'))
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -343,7 +352,7 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
 <body>
   <header>
     <h1>Monitor de entrenamiento</h1>
-    <div class="sub" id="sub">{run} · {rows} filas · actualizado {generated}</div>
+    <div class="sub" id="sub">{run} · etapa {stage} · {rows} filas · actualizado {generated}</div>
     <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página.</div>
     <div class="cards" id="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
   </header>
@@ -459,6 +468,19 @@ def checkpoint_paths(checkpoint: str | Path) -> dict[str, Any]:
                 config=config, meta=meta)
 
 
+def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any]:
+    """CPU clip reset/locomotion flags from checkpoint metadata. Not a harvest demo."""
+    from treesim.kiwi_rl.curriculum import reset_mode_for_goal, stage_named
+    meta = dict(info.get('meta') or {})
+    config = dict(info.get('config') or {})
+    name = meta.get('curriculum_stage') or config.get('stage')
+    if not name:
+        return dict(stage=None, reset_mode=0, allow_locomotion=False)
+    stage = stage_named(str(name))
+    return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
+                allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal)
+
+
 def _tcp_fruit_ids(model, manifest):
     robot = manifest['robot']
     fruit = manifest.get('fruits') or manifest.get('fruit') or []
@@ -486,6 +508,57 @@ def _arm_limits(model, controller):
     lower[limited] = ranges[limited, 0]
     upper[limited] = ranges[limited, 1]
     return lower, upper
+
+
+def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
+                             approach_offset_m: float = 1.0) -> None:
+    """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
+    import mujoco
+    import numpy as np
+    if reset_mode not in (0, 1, 2, 3):
+        raise ValueError('reset_mode must be 0, 1, 2 or 3')
+    if not np.isfinite(approach_offset_m) or approach_offset_m < 0:
+        raise ValueError('approach_offset_m must be finite and >= 0')
+    mujoco.mj_forward(model, data)
+    tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
+    fruit = (manifest.get('fruits') or manifest.get('fruit') or [None])[0]
+    if not fruit:
+        raise ValueError('Fast scene must contain fruit for a skill reset')
+    joint = int(model.body_jntadr[fruit_body])
+    if joint < 0:
+        raise ValueError('Fruit body must keep an independent free joint')
+    qposadr = int(model.jnt_qposadr[joint])
+    dofadr = int(model.jnt_dofadr[joint])
+    if reset_mode == 1:
+        tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+        data.qpos[qposadr:qposadr + 3] = tcp
+        data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)
+        data.qvel[dofadr:dofadr + 6] = 0.0
+        equality = fruit.get('equality')
+        if equality:
+            data.eq_active[int(model.equality(equality).id)] = 0
+        jaw_joint = int(controller.joints[18])
+        closed = float(model.jnt_range[jaw_joint, 0])
+        if not np.isfinite(closed):
+            closed = 0.0
+        data.qpos[int(controller.qids[18])] = closed
+        controller.targets[18] = closed
+    if reset_mode == 3:
+        chassis_joint = int(model.body_jntadr[controller.chassis])
+        data.qpos[int(model.jnt_qposadr[chassis_joint])] -= approach_offset_m
+    mujoco.mj_forward(model, data)
+
+
+N3_SCALE_MPS = (0.4, 0.3, 0.7)
+N3_SLEW_MPS = (0.02, 0.02, 0.04)
+
+
+def _n3_command(previous, raw_base):
+    import numpy as np
+    previous = np.asarray(previous, dtype=np.float32)
+    desired = np.clip(np.asarray(raw_base, dtype=np.float32), -1.0, 1.0) * np.asarray(N3_SCALE_MPS, dtype=np.float32)
+    slew = np.asarray(N3_SLEW_MPS, dtype=np.float32)
+    return previous + np.clip(desired - previous, -slew, slew)
 
 
 def _capture_rgbd(renderer, data, camera, *, minimum_m=.05, maximum_m=4.):
@@ -559,6 +632,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     controller = NativeSpotControl(model, manifest['robot'], gait)
     policy = build_policy().to('cpu').eval()
     load_checkpoint(info['checkpoint'], {'student': policy}, expected_meta={'camera': camera})
+    preview = curriculum_preview_from_checkpoint(info)
+    apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'])
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
     lower, upper = _arm_limits(model, controller)
@@ -582,6 +657,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     memory = torch.zeros(1, 64)
     rgbd = None
     distances = []
+    command = np.zeros(3, dtype=np.float32)
+    stage_label = preview['stage'] or 'hanging'
     try:
         for index in range(steps):
             mujoco.mj_camlight(model, data)
@@ -591,12 +668,16 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 policy_renderer.disable_depth_rendering()
                 policy_renderer.update_scene(data, camera=camera)
                 grip_u8 = policy_renderer.render().copy()
-            r84 = controller.observe(data, np.zeros(3, dtype=np.float32))[None]
+            r84 = controller.observe(data, command)[None]
             with torch.no_grad():
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
-            controller.update_gait(data, np.zeros(3, dtype=np.float32))
+            controller.update_gait(data, command)
+            if preview['allow_locomotion'] and action.shape[0] >= 10:
+                command = _n3_command(command, action[:3])
+            else:
+                command = np.zeros(3, dtype=np.float32)
             controller.targets[12:] = np.clip(
                 controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
@@ -615,7 +696,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             image = Image.fromarray(frame)
             draw = ImageDraw.Draw(image)
             update = info['completed_updates']
-            draw.text((8, 8), f'CPU preview  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
+            draw.text((8, 8), f'CPU preview  {stage_label}  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
             draw.text((8, 22), f'TCP-fruit {distance:.3f} m  gripper RGB overlay  curriculum preview not harvest proof', fill=(244, 211, 94))
             try:
                 encoder.stdin.write(np.asarray(image).tobytes())
@@ -634,6 +715,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                   label='CPU native curriculum preview; not a harvest demonstration',
                   checkpoint=str(info['checkpoint']), scene=str(info['scene']),
                   gait_checkpoint=str(info['gait_checkpoint']), camera=camera,
+                  curriculum_stage=preview['stage'], reset_mode=preview['reset_mode'],
+                  allow_locomotion=preview['allow_locomotion'],
                   update=info['completed_updates'], steps=steps, fps=fps,
                   control_dt_s=control_dt, backend=f'cpu-native-mujoco-{os.environ.get("MUJOCO_GL", "egl")}',
                   mean_tcp_fruit_distance_m=float(np.mean(distances)),

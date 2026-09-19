@@ -37,6 +37,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
         carry['reset'] = torch.ones(runtime.worlds, device='cuda:0', dtype=torch.bool)
         carry['rgbd'] = runtime.pixels().clone()
     memory, reset, rgbd = carry['memory'], carry['reset'], carry['rgbd']
+    memory0 = memory.clone()
     rows = []
     for index in range(steps):
         r84 = runtime.observe().clone()
@@ -58,6 +59,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 reset=reset.clone(), distance=info['distance_m'].clone(),
                 success=info['success'].clone(), detached=info['detached'].clone(),
                 grasped=info['grasped'].clone(), retained_detach=info['retained_detach'].clone()))
+            if index == 0:
+                rows[0]['memory0'] = memory0
             reset = done.clone()
             if bool(reset.any()):
                 runtime.reset(reset)
@@ -91,11 +94,18 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
         raise ValueError('epochs must be an integer in [1, 8]')
     if not np_finite(entropy_coef) or entropy_coef < 0:
         raise ValueError('entropy_coef must be finite and >= 0')
-    for _ in range(epochs):
+    if 'memory0' in rows[0]:
+        memory_root = rows[0]['memory0']
+    else:
+        memory_root = torch.zeros(rows[0]['r84'].shape[0], 64, device=rows[0]['r84'].device,
+                                  dtype=rows[0]['r84'].dtype)
+    completed_epochs = 0
+    for epoch in range(epochs):
         optimizer.zero_grad(set_to_none=True)
+        stop_extra = False
         for start in range(0, rewards.shape[1], batch_size):
             sl = slice(start, start + batch_size)
-            memory = torch.zeros_like(rows[0]['r84'][sl, :64])
+            memory = memory_root[sl].clone()
             logps, predictions, entropies = [], [], []
             for row in rows:
                 memory = memory * (~row['reset'][sl])[:, None]
@@ -109,20 +119,32 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             kl = ((ratio - 1.) - logratio).mean()
             if not torch.isfinite(kl):
                 raise RuntimeError('Nonfinite PPO divergence')
-            if float(kl.detach()) > .03:
+            mismatch = float(kl.detach())
+            if epoch == 0 and mismatch > .03:
                 raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
+            if epoch > 0 and mismatch > .03:
+                optimizer.zero_grad(set_to_none=True)
+                stop_extra = True
+                break
             actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
             critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
             entropy = torch.stack(entropies).mean()
             loss = actor + .5 * critic - entropy_coef * entropy
             (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
             metrics.append((float(loss.detach()), float(kl.detach()), float(entropy.detach())))
+        if stop_extra:
+            break
         grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
         optimizer.step()
+        completed_epochs += 1
+    if not metrics:
+        raise RuntimeError('PPO produced no minibatches')
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
                 entropy=sum(m[2] for m in metrics)/len(metrics),
                 logstd_mean=float(policy.logstd.detach().mean()),
-                grad_norm=float(grad), minibatches=len(metrics), optimized_transitions=int(rewards.numel()*epochs),
+                grad_norm=float(grad), minibatches=len(metrics),
+                optimized_transitions=int(rewards.numel() * completed_epochs),
+                ppo_epochs_completed=completed_epochs,
                 reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)))
 
 
