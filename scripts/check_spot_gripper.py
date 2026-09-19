@@ -15,9 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mujoco
 import numpy as np
 from treesim.kiwi_material import XUXIANG, damage_increment
+from treesim.native_kiwi import flesh_mass, FLESH_DENSITY_KG_M3, CONTACT_TIME_S
 
 
-def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0.):
+def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0., count=9):
     from scipy.spatial.transform import Rotation
     position = np.array([.195, -.005, .24]) + np.asarray(offset_mm)/1000
     rotation = Rotation.from_euler('z', tilt_deg, degrees=True) * Rotation.from_euler('x', 90, degrees=True)
@@ -29,7 +30,7 @@ def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0.):
       <option gravity="0 0 0" timestep="{dt}" integrator="implicitfast" solver="Newton" iterations="100" tolerance="1e-9"/>
       <size memory="128M"/>
       <visual><global offwidth="1280" offheight="720"/><headlight ambient=".5 .5 .5"/></visual>
-      <default><geom friction=".44 .005 .0001" solref=".004 1" solimp=".95 .99 .001"/></default>
+      <default><geom friction=".44 .005 .0001" solref="{CONTACT_TIME_S} 1" solimp=".95 .99 .001"/></default>
       <asset/>
       <worldbody><light pos="0 -.4 1"/>
         <geom name="floor" type="plane" pos="0 0 0" size=".4 .4 .01" rgba=".2 .24 .27 1"/>
@@ -64,17 +65,17 @@ def scene(asset, dt, rigid=False, torque=.3, offset_mm=(0.,0.,0.), tilt_deg=0.):
     if rigid:
         fruit=ET.SubElement(world,'body',name='kiwi',**pose)
         ET.SubElement(fruit,'freejoint')
-        ET.SubElement(fruit,'geom',name='kiwi',type='ellipsoid',size='.027 .027 .036',mass='.09',rgba='.45 .29 .11 1')
+        ET.SubElement(fruit,'geom',name='kiwi',type='ellipsoid',size='.027 .027 .036',mass=str(flesh_mass(count)),rgba='.45 .29 .11 1')
     else:
-        flex=ET.SubElement(world,'flexcomp',name='kiwi',type='ellipsoid',dim='3',count='7 7 7',spacing='.009 .009 .012',**pose,mass='.09',radius='.0003',rgba='.45 .29 .11 1')
+        flex=ET.SubElement(world,'flexcomp',name='kiwi',type='ellipsoid',dim='3',count=f'{count} {count} {count}',spacing=' '.join(str(v/(count-1)) for v in (.054,.054,.072)),**pose,mass=str(flesh_mass(count)),radius='.0003',rgba='.45 .29 .11 1')
         ET.SubElement(flex,'elasticity',young=str(XUXIANG['flesh'].young),poisson=str(XUXIANG['flesh'].poisson),damping='.00001')
-        ET.SubElement(flex,'contact',selfcollide='none',internal='false',condim='3',friction='.44 .005 .0001',solref='.004 1',solimp='.95 .99 .001')
+        ET.SubElement(flex,'contact',selfcollide='none',internal='false',condim='3',friction='.44 .005 .0001',solref=f'{CONTACT_TIME_S} 1',solimp='.95 .99 .001')
     return ET.tostring(root,encoding='unicode')
 
 
 def run(args):
     out=args.output; out.mkdir(parents=True,exist_ok=True)
-    xml=scene(args.relic.resolve()/'source/relic/relic/assets/spot',args.timestep,args.rigid,args.torque,args.offset_mm,args.tilt_deg)
+    xml=scene(args.relic.resolve()/'source/relic/relic/assets/spot',args.timestep,args.rigid,args.torque,args.offset_mm,args.tilt_deg,args.count)
     (out/'scene.xml').write_text(xml)
     m=mujoco.MjModel.from_xml_string(xml); d=mujoco.MjData(m)
     d.qpos[0]=-1.; d.ctrl[0]=-1.; mujoco.mj_forward(m,d)
@@ -172,7 +173,7 @@ def run(args):
             if encoder.wait(): raise RuntimeError('ffmpeg failed')
         if renderer: renderer.close()
     metrics = dict(
-        rigid=args.rigid, timestep_s=args.timestep, torque_limit_Nm=args.torque,
+        rigid=args.rigid, mass_kg=flesh_mass(args.count), mesh_count=args.count, contact_time_s=CONTACT_TIME_S, flesh_density_kg_m3=FLESH_DENSITY_KG_M3, timestep_s=args.timestep, torque_limit_Nm=args.torque,
         offset_mm=list(args.offset_mm), tilt_deg=args.tilt_deg,
         hold_bilateral_fraction=bilateral_samples/max(hold_samples,1),
         peak_jaw_force_N=peak.tolist(), max_hold_displacement_m=max(held),
@@ -208,8 +209,10 @@ if __name__=='__main__':
     p.add_argument('--video',type=Path); p.add_argument('--rigid',action='store_true'); p.add_argument('--check',action='store_true')
     p.add_argument('--offset-mm',type=float,nargs=3,default=(0.,0.,0.))
     p.add_argument('--tilt-deg',type=float,default=0.)
-    p.add_argument('--timestep',type=float,default=.00001); p.add_argument('--torque',type=float,default=.3)
+    p.add_argument('--count',type=int,default=9)
+    p.add_argument('--timestep',type=float,default=.00002); p.add_argument('--torque',type=float,default=.3)
     a=p.parse_args()
+    if a.count < 4: p.error('Mesh count must be >= 4')
     if not np.isfinite([a.timestep,a.torque]).all() or not 0<a.timestep<=.001 or not 0<a.torque<=15.32: p.error('Invalid timestep or jaw torque')
     if not np.isfinite([*a.offset_mm,a.tilt_deg]).all() or max(map(abs,a.offset_mm))>10 or abs(a.tilt_deg)>30:
         p.error('Pose bounds: offsets up to 10 mm, tilt up to 30 degrees')

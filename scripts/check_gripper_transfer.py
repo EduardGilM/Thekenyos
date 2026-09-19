@@ -1,5 +1,6 @@
 """Matched pose/torque screen; agreement is not real-fruit calibration."""
 import argparse
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
 import numpy as np
@@ -15,25 +16,31 @@ def main():
     p.add_argument('--resume', action='store_true', help='Reuse matching recorded cases, including failures')
     p.add_argument('--workers', type=int, default=4)
     a = p.parse_args()
+    if not 1 <= a.workers <= 4: p.error('Use 1..4 workers')
     a.output.mkdir(parents=True, exist_ok=True)
+    root=Path(__file__).resolve().parents[1]
+    fingerprint={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in
+                 ('scripts/check_spot_gripper.py','treesim/native_kiwi.py','treesim/kiwi_material.py')}
     poses = [('center', [0,0,0], 0), ('offset_plus', [4,0,0], 0),
              ('offset_minus', [-4,0,0], 0), ('tilt', [0,0,0], 15)]
-    cases = [(name, offset, tilt, rigid, .3, .00001)
+    cases = [(name, offset, tilt, rigid, .3, .00002)
              for name,offset,tilt in poses for rigid in (True,False)]
-    cases += [('strong', [0,0,0], 0, rigid, 1., .00001) for rigid in (True,False)]
-    cases += [('halfstep', [0,0,0], 0, False, .3, .000005),
-              ('tilt_halfstep', [0,0,0], 15, False, .3, .000005),
-              ('offset_plus_halfstep', [4,0,0], 0, False, .3, .000005)]
+    cases += [('strong', [0,0,0], 0, rigid, 1., .00002) for rigid in (True,False)]
+    cases += [('halfstep', [0,0,0], 0, False, .3, .00001),
+              ('tilt_halfstep', [0,0,0], 15, False, .3, .00001),
+              ('offset_plus_halfstep', [4,0,0], 0, False, .3, .00001)]
     def run(case):
         name, offset, tilt, rigid, torque, dt = case
         key = f'{name}-{"rigid" if rigid else "flex"}'
         out = a.output/key
+        out.mkdir(exist_ok=True)
         if a.resume and (out/'metrics.json').exists():
             previous=json.loads((out/'metrics.json').read_text())
             if (previous['offset_mm']==offset and previous['tilt_deg']==tilt
                 and previous['timestep_s']==dt and previous['torque_limit_Nm']==torque
-                and previous['rigid']==rigid):
+                and previous['rigid']==rigid and previous.get('source_sha256')==fingerprint):
                 return key,previous
+        (out/'metrics.json').unlink(missing_ok=True)
         cmd = [sys.executable, str(Path(__file__).with_name('check_spot_gripper.py')),
                '--relic', str(a.relic.resolve()), '--output', str(out),
                '--offset-mm', *map(str,offset), '--tilt-deg', str(tilt),
@@ -42,13 +49,15 @@ def main():
         with (a.output/f'{key}.log').open('w') as log:
             result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode:
-            failure = dict(rigid=rigid, execution_returncode=result.returncode,
+            failure = dict(rigid=rigid, execution_returncode=result.returncode, source_sha256=fingerprint,
                            passed_contact_check=False, numerical_success=False,
                            timestep_s=dt, offset_mm=offset, tilt_deg=tilt,
                            torque_limit_Nm=torque)
             (out/'metrics.json').write_text(json.dumps(failure,indent=2)+'\n')
             return key, failure
         metrics = json.loads((out/'metrics.json').read_text())
+        metrics['source_sha256']=fingerprint
+        (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n')
         print(key, metrics['passed_contact_check'], metrics['max_hold_displacement_m'], flush=True)
         return key, metrics
     with ThreadPoolExecutor(max_workers=a.workers) as pool:

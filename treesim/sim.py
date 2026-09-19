@@ -66,7 +66,8 @@ def _make_solver(name, model, *, collisions, iterations, ls_iterations,
             # See check_hand_contacts.py. Do not use missed contacts as training
             # data or substitute contact softness for tissue deformation.
             solver.mj_model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_MIDPHASE)
-            # Match the native gripper bench's numerical contact response.
+            # Legacy rigid-pilot numerical response. The refined native flex
+            # bench uses a shorter contact time; equivalence is NOT established.
             # These are solver settings, NOT kiwi tissue material parameters.
             mapping = solver.mjc_geom_to_newton_shape.numpy()[0]
             bodies = model.shape_body.numpy()

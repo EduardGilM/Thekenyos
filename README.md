@@ -10,6 +10,14 @@ Built on [OrchardBench](https://github.com/humphreymunn/orchardbench),
 The first milestone is one robot. All fruit starts harvestable. Multi-robot
 coordination, maturity perception and automatic unloading come later.
 
+The current programme is **simulation-only**. Numerical tests and consistency
+with published material data are separate from real-fruit calibration, which
+is pending. The 0–6 kg fruit range remains a simulation stress-test range.
+Spot's [14 kg combined payload limit](https://dev.bostondynamics.com/docs/payload/payload_configuration_requirements.html)
+includes its 8 kg arm, basket and other payloads. With an assumed 1.2 kg basket,
+at most 4.8 kg remains before additional payload hardware. This is a mass budget,
+not approval of the basket geometry or loaded workspace.
+
 ## What works, and what does not
 
 | Component | Current implementation |
@@ -317,9 +325,10 @@ converted model's MuJoCo midphase skipped the front jaw and tooth, allowing
 27.5 mm overlap with the fruit. A nonzero load on another jaw section did not
 establish whole-hand collision correctness. The CPU native-contact path now
 bypasses that optimization and retains the original collision masks and native
-narrowphase. Hand/fruit contact solver settings match the native bench
+narrowphase. The CPU rigid pilot retains the original numerical settings
 (`solref=.004 1`, `solimp=.95 .99 .001 .5 2`); these are numerical settings,
-not measured tissue compliance. The GPU path is unchanged and needs its own
+not measured tissue compliance. The refined native deformable bench uses a
+shorter contact time; response equivalence is not established. The GPU path is unchanged and needs its own
 equivalent coverage check before training resumes.
 
 ```bash
@@ -358,17 +367,72 @@ the flex benchmark without further contact and mesh-resolution checks.
 
 ## Continue the project
 
-1. Fit compression/hold/release and impact tests to one cultivar and harvest
-   condition. Add layered, viscoelastic/plastic response without mixing datasets.
-2. Resolve rigid/deformable contact disagreement and improve force-aware approach
-   in the [local PPO pilot](docs/harvest-task.md#local-reachgrasp-pilot) before longer training.
-3. Train locomotion over 0–6 kg payload and arm configurations; compare against
-   the existing policy on matched seeds, spills, tracking and falls.
-4. Train reach, grip, detach and deposit, then integrate a full harvesting task.
-5. Add station unloading and, later, multi-robot coordination.
+The agreed sequence is: finish native physics checks; define the shared
+observation/action interface and recorder; check full-cycle reachability and
+payload; establish a conventional harvesting baseline; train a compact local RL
+policy with realistic sensing; then compare imitation or diffusion if the
+results justify them. Native and GPU collision equivalence must pass before
+GPU training. A failed physics gate must not be bypassed by another pilot.
 
-PufferLib is not installed or integrated. Select a GPU training implementation
-only after the native material and contact benchmarks agree with measurements.
+The native compression bench now derives mass from its tetrahedral volume and
+the selected Xuxiang flesh density, 1,030 kg/m³. At mesh count 7 this is about
+109.5 g, replacing the inconsistent 90 g assumption. Matched rigid/flex gripper
+tests share that mass; their surface geometry still differs slightly. These are
+homogeneous flesh benchmarks, not calibrated whole Hayward fruit. Earlier 90 g
+gripper results above are historical and require revalidation.
+
+```bash
+python scripts/check_compression_convergence.py --workers 4 --video
+python scripts/check_gripper_transfer.py --relic ../relic \
+  --output output/contact-refined --workers 4
+python scripts/check_detachment_angles.py --device cpu \
+  --output output/detachment-native.json
+python scripts/check_detachment_angles.py --device cpu --timestep .0005 \
+  --output output/detachment-native-halfstep.json
+```
+
+Compression convergence compares counts 9/11 at 20/10 µs. Engineering tolerances
+are 2% force change for timestep refinement, 10% for mesh refinement, and 0.5
+percentage points of compression change. A failed child process remains a
+failed case. Gripper resume checks source fingerprints before reusing results.
+New rigid-fruit training requires `transfer_accepted=true`; archived checkpoint
+evaluation remains available. This agreement is necessary, not a complete
+physical-calibration or deployment approval.
+
+The native benches now use a 0.2 ms numerical contact time. The compression
+pad-gap command accounts for the flex's 0.3 mm collision radius on each side,
+so requested tissue strain is not confused with the inflated contact envelope.
+The gripper bench now defaults to count 9 (387 vertices), with matched rigid
+and flex mass of about 111.1 g. Retain failed coarse-mesh and old-contact
+comparisons; changing density or contact settings invalidates earlier results.
+
+Latest simulation-only screen (2026-09-19):
+
+- Compression: all four count-9/11, 20/10 µs cases passed. Held force was
+  14.15/14.30 N per pad; mesh difference 1.04%, timestep difference below
+  0.000001%. Actual compression was 2.99% for the 3% command. No inverted
+  tetrahedra or numerical warnings. Elastic recovery is not a bruise test.
+- Native detachment: 60°, 120° and 180° fixtures passed at 1 and 0.5 ms.
+  This verifies the implemented angle law, not its real-world calibration.
+- Gripper: the 13-case screen failed rigid/flex agreement. The centred flex
+  case moved 24 mm at 20 µs and dropped at 10 µs. The +4 mm flex case retained
+  fruit at both timesteps, but peak forces differed substantially. One −4 mm
+  flex process exited with SIGSEGV; separate default and alternate-collision
+  repeats completed without a crash. The intermittent crash remains unresolved.
+- New training is blocked. Next: isolate the native contact failure and initial
+  force transients, then repeat gripper timestep checks. Do not tune material
+  constants merely to make a grasp succeed.
+
+Raw reports on JP are `output/compression-refined/summary.json`,
+`output/contact-refined/summary.json`, `output/detachment-native.json` and
+`output/detachment-native-halfstep.json`. Reports include executed source hashes
+where available. Generated artifacts stay outside Git.
+
+Continue the agreed sequence above after the numerical contact gate passes.
+Real-world calibration remains pending while the project is simulation-only.
+PufferLib is not installed or integrated. Select a GPU implementation only after
+native contact is stable and matched CPU/GPU checks pass; retain the explicit
+limits of the uncalibrated tissue and damage models.
 
 | Path | Purpose |
 |---|---|

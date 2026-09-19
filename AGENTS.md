@@ -3,9 +3,19 @@
 ## Objective and current scope
 
 Build a reproducible kiwi-harvesting simulation: one Spot with one arm, a 1.6 m
-pergola and a rear basket carrying 0–6 kg. All fruit starts harvestable. Preserve
+pergola and a rear basket. The 0–6 kg fruit range is a simulation stress-test
+range, not a supported hardware load: Spot's 14 kg combined payload includes
+the 8 kg arm, basket, mounts and other payloads. All fruit starts harvestable. Preserve
 OrchardBench's existing apple workflows. Multi-robot coordination and automatic
 unloading are later work.
+
+Current programme is simulation-only; no physical Spot or fruit calibration
+data is available. Follow the agreed sequence: native physics checks, shared
+observation/action contract and recording, full-cycle workspace/payload check,
+conventional full-cycle baseline, compact local RL with realistic sensing, then
+compare imitation/diffusion only when evidence warrants it. Do not resume the
+rigid-fruit pilot while its rigid/flex contact agreement gate fails. Real-fruit
+calibration remains separate from numerical and literature consistency.
 
 Read README.md, then the files affected by the task. For material changes read
 docs/kiwi-material-evidence.md. Check git status before editing; preserve work
@@ -70,7 +80,8 @@ replace numerical checks; metrics do not replace visual inspection.
 
 For the reach/grasp pilot, retain matched-seed untrained/trained evaluations
 with guidance off. Keep failed contact cases and native crashes in the report;
-model disagreement permits only a labelled diagnostic rigid pilot. CPU contact
+model disagreement blocks new rigid-fruit training, but archived checkpoint
+evaluation remains available. CPU contact
 adapter changes require `check_harvest_env.py --device cpu` at both timesteps.
 Whole-hand contacts require `check_hand_contacts.py`: a force on one jaw does
 not prove collision coverage of the palm, opposite jaw or teeth. Preserve the

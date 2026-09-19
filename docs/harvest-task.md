@@ -190,8 +190,10 @@ Use `--evaluate-only` to evaluate saved checkpoints without training again.
 Keep the same output directory and evaluation seed count. Checkpoints and
 results remain under `output/reach-grasp-pilot`; no weights are redistributed.
 Contact screening failures remain in the report. The trainer refuses numerical
-failures in the rigid benchmark, but explicitly permits a **diagnostic rigid
-pilot** when rigid/deformable transfer fails. This is not a production gate pass.
+failures in the rigid benchmark and now rejects new training when rigid/flex
+transfer fails. The earlier diagnostic exception has been removed. Evaluation
+of archived checkpoints remains available for regression. Agreement alone is
+not a complete physics or deployment gate pass.
 
 ### Results, 19 September 2026
 

@@ -14,6 +14,7 @@ import time
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from treesim.kiwi_material import XUXIANG, damage_increment
+from treesim.native_kiwi import flesh_mass, FLESH_DENSITY_KG_M3, FLEX_RADIUS_M, CONTACT_TIME_S
 
 import mujoco
 import numpy as np
@@ -25,7 +26,7 @@ def scene(timestep=0.00001, young=1.57e6, count=7):
       <option gravity="0 0 0" timestep="{timestep}" integrator="implicitfast" solver="Newton" tolerance="1e-9" iterations="100"/>
       <size memory="64M"/>
       <visual><global offwidth="1280" offheight="720"/><headlight ambient=".4 .4 .4"/></visual>
-      <default><geom friction=".5 .005 .0001" solref=".004 1" solimp=".95 .99 .001"/></default>
+      <default><geom friction=".5 .005 .0001" solref="{CONTACT_TIME_S} 1" solimp=".95 .99 .001"/></default>
       <worldbody>
         <light pos=".1 -.2 .4" diffuse=".8 .8 .8"/>
         <geom name="table" type="plane" size=".3 .3 .01" rgba=".19 .23 .25 1"/>
@@ -37,16 +38,16 @@ def scene(timestep=0.00001, young=1.57e6, count=7):
           <geom name="right_pad" type="box" size=".008 .04 .045" rgba=".12 .15 .17 1"/>
           <geom type="box" pos=".012 0 0" size=".004 .033 .033" rgba=".95 .65 .05 1" contype="0" conaffinity="0"/>
         </body>
-        <flexcomp name="kiwi" type="ellipsoid" dim="3" count="{count} {count} {count}" spacing="{' '.join(map(str, spacing))}" pos="0 0 .039" mass=".09" radius=".0003" rgba=".42 .25 .10 1">
+        <flexcomp name="kiwi" type="ellipsoid" dim="3" count="{count} {count} {count}" spacing="{' '.join(map(str, spacing))}" pos="0 0 .039" mass="{flesh_mass(count)}" radius=".0003" rgba=".42 .25 .10 1">
           <elasticity young="{young}" poisson=".4" damping=".00001"/>
-          <contact selfcollide="none" internal="false" condim="3" friction=".5 .005 .0001" solref=".004 1" solimp=".95 .99 .001"/>
+          <contact selfcollide="none" internal="false" condim="3" friction=".5 .005 .0001" solref="{CONTACT_TIME_S} 1" solimp=".95 .99 .001"/>
         </flexcomp>
       </worldbody>
     </mujoco>'''
 
 
 def gap_at(t, compression=.10):
-    closure = .074 - .054*(1-compression)
+    closure = .074 - (.054*(1-compression) + 2*FLEX_RADIUS_M)
     # Smooth motion removes velocity jumps from the force measurement.
     if t < 2:
         return .074, 'settle'
@@ -148,9 +149,12 @@ def run(output, timestep=.00001, young=1.57e6, count=7, video=None, compression=
         'scope': 'Homogeneous Xuxiang flesh elasticity with persistent strain damage proxy; no skin/core layers or plastic constitutive response; zero gravity; ideal pads, not Spot jaws. Damping and damage accumulation uncalibrated.',
         'material_source': 'https://doi.org/10.3390/foods13213523',
         'commanded_compression': compression,
+        'contact_time_s': CONTACT_TIME_S, 'contact_radius_m': FLEX_RADIUS_M,
         'mujoco_version': mujoco.__version__, 'timestep_s': timestep,
         'wall_time_s': time.perf_counter() - started,
-        'young_modulus_Pa': young, 'poisson_ratio': .4, 'mass_kg': .09,
+        'young_modulus_Pa': young, 'poisson_ratio': .4, 'mass_kg': flesh_mass(count),
+        'flesh_density_kg_m3': FLESH_DENSITY_KG_M3,
+        'reference_mesh_volume_m3': float(np.abs(initial_volumes).sum()),
         'vertices': model.nflexvert, 'tetrahedra': len(elements),
         'baseline_dimensions_m': baseline.tolist(), 'recovered_dimensions_m': final.tolist(),
         'compression_fraction': float(1-held[:, 2].mean()/baseline[0]),
