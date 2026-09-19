@@ -82,10 +82,11 @@ EASY_PRESET = {
     'shaping_length_m': 0.60,
     'n_start_poses': 24,
     'start_x_span_m': 0.08,
-    'start_y_span_m': 0.10,
-    # Front-side of the opening (radius 0.15 m). The student already grazes
-    # this lip; start there so the last motion is a lateral slide in.
-    'start_side_y_m': 0.16,
+    'start_y_span_m': 0.04,
+    # Opening radius is 0.15 m. 0.16–0.26 m Y plus a backward swing tracked
+    # the exterior side wall (easy21 clip) and crushed at 300–500 N. Keep
+    # |Y| in [0.10, 0.14] so a retract lands over the hole, still off-center.
+    'start_side_y_m': 0.10,
     'start_z_span_m': 0.08,
     # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
     # stay away. 100 is an engineering jackpot, not a measured harvest value.

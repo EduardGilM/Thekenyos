@@ -54,7 +54,7 @@ class ReachTeacherMathTest(unittest.TestCase):
         far = easy_start_local_m(1.0)
         centered = easy_start_local_m(0.0, side_y_m=0.0)
         self.assertGreaterEqual(float(near[0]), float(hi[0] + 0.32) - 1e-9)
-        self.assertAlmostEqual(float(near[1]), float(CENTER[1] + 0.16))
+        self.assertAlmostEqual(float(near[1]), float(CENTER[1] + 0.10))
         self.assertAlmostEqual(float(centered[1]), float(CENTER[1]))
         self.assertGreater(float(far[0]), float(near[0]))
         self.assertTrue(tcp_outside_basket(near, margin_m=0.04, above_rim_m=0.0))
