@@ -182,6 +182,20 @@ a guarantee of unbruised real fruit. Outputs are generated under `output/`.
 
 ## Continue the project
 
+See the [RL implementation specification](docs/rl-blueprint.html) (Spanish) for
+the proposed end-to-end RGB-D policies, concurrent low-learning-rate RELIC
+adaptation, tensor contracts, task curriculum and acceptance criteria. Open the
+HTML locally in a browser; it works offline and includes a print/PDF layout.
+`treesim/kiwi_rl/` scaffolds its contracts (schemas, reward ledger, arbiter,
+model interfaces, single-env wrapper) with `scripts/train_kiwi.py --dry-run`;
+optimisation, cameras and RELIC retraining remain integration work.
+`scripts/check_relic_parity.py --relic ../relic` gates the pinned ONNX policy
+(contract [1,84]->[1,12], finiteness, determinism) against an external checkout.
+Torch actors/critics/PPO (`treesim/kiwi_rl/models_torch.py`, `ppo.py`), the Spot
+camera rig (`sensors.py`), arm IK (`arm_ik.py`) and the jp runbook
+(`docs/jp-runbook.md`) are ready for the training host; CPU-only machines run
+the numpy contracts and `--dry-run` only.
+
 1. Fit compression/hold/release and impact tests to one cultivar and harvest
    condition. Add layered, viscoelastic/plastic response without mixing datasets.
 2. Validate the actual Spot jaw contact and a stem angle/torque break law.
