@@ -152,12 +152,29 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('release_over_opening', run_src)
         self.assertIn('release_max_above_rim_m', run_src)
         self.assertIn('far_frac_cap', run_src)
+        self.assertIn('ppo_clip', run_src)
+        self.assertIn('ppo_adv_std_cap', run_src)
+        self.assertIn('normalize_advantages', inspect.getsource(train_fast))
+        self.assertIn('adv_std_cap', inspect.getsource(train_fast.update))
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
         self.assertIn('latest.pt', run_src)
         self.assertIn('nonfinite_worlds', run_src)
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_advantage_std_cap_keeps_jackpot_large(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import normalize_advantages
+        adv = torch.zeros(1000)
+        adv[0] = 10000.0
+        full = normalize_advantages(adv)
+        capped = normalize_advantages(adv, std_cap=1.0)
+        self.assertGreater(float(capped[0]), float(full[0]) * 5.0)
+        with self.assertRaises(ValueError):
+            normalize_advantages(adv, std_cap=0.0)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):

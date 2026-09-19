@@ -99,11 +99,18 @@ EASY_PRESET = {
     # around CENTER + [inset_x, 0], not this side Y.
     'start_side_y_m': 0.10,
     'start_z_span_m': 0.08,
-    # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
-    # stay away. 100 was still small next to a window of ground hits.
-    # 500 is the enable_easy ceiling: an engineering jackpot, not a
-    # measured harvest value.
-    'deposit_reward': 500.0,
+    # +20 lost to -25 ground; +500 still vanished after advantage
+    # normalization and the 0.2 PPO clip. 10000 is an engineering jackpot
+    # so a rare settled deposit can move the student. Not a measured value.
+    'deposit_reward': 10000.0,
+    # Wide clip / high grad cap / capped adv std: a jackpot stays large
+    # after whitening. Value coef stays small so critic MSE on +10000 does
+    # not steal the actor step. Extra PPO epochs may continue up to KL 0.15.
+    'ppo_clip': 0.5,
+    'ppo_grad_clip': 5.0,
+    'ppo_adv_std_cap': 1.0,
+    'ppo_value_coef': 0.05,
+    'ppo_target_kl': 0.15,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,

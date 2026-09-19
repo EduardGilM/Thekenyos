@@ -209,12 +209,38 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
     return rows, bootstrap, carry
 
 
+def normalize_advantages(advantages, std_cap=None):
+    """Center advantages. Optionally cap the std so a rare jackpot stays large.
+
+    Full whitening makes +500 and +10000 look the same after a sparse
+    deposit. ``std_cap`` is an engineering lever, not a measured scale.
+    """
+    import torch
+    centered = advantages - advantages.mean()
+    std = advantages.std(unbiased=False)
+    if std_cap is None:
+        return centered / (std + 1e-8)
+    cap = float(std_cap)
+    if not np_finite(cap) or cap <= 0:
+        raise ValueError('adv_std_cap must be finite and > 0')
+    return centered / (torch.clamp(std, max=cap) + 1e-8)
+
+
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coef=0.005,
-           gamma=0.9996, epochs=1, dim_mask=None):
+           gamma=0.9996, epochs=1, dim_mask=None, clip=0.2, grad_clip=0.5,
+           adv_std_cap=None, value_coef=0.5, target_kl=0.03):
     import torch
     from treesim.kiwi_rl.ppo import (
         compute_gae_torch, gaussian_entropy, tanh_gaussian_entropy, tanh_logprob,
     )
+    if not np_finite(clip) or not 0.05 <= clip <= 2.0:
+        raise ValueError('clip must be finite in [0.05, 2]')
+    if not np_finite(grad_clip) or not 0.1 <= grad_clip <= 20.0:
+        raise ValueError('grad_clip must be finite in [0.1, 20]')
+    if not np_finite(value_coef) or not 0.0 <= value_coef <= 2.0:
+        raise ValueError('value_coef must be finite in [0, 2]')
+    if not np_finite(target_kl) or not 0.01 <= target_kl <= 1.0:
+        raise ValueError('target_kl must be finite in [0.01, 1]')
     rewards = torch.stack([r['reward'] for r in rows])
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
@@ -226,7 +252,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     advantages = compute_gae_torch(rewards, values, torch.cat((values[1:], bootstrap[None])),
                                    ended, truncated, gamma, .95)
     returns = (advantages + values).detach()
-    advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+    advantages = normalize_advantages(advantages, std_cap=adv_std_cap)
     batch_size = min(minibatch_worlds, rewards.shape[1])
     metrics = []
     if not isinstance(epochs, int) or not 1 <= epochs <= 8:
@@ -263,15 +289,16 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             mismatch = float(kl.detach())
             if epoch == 0 and mismatch > .03:
                 raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
-            if epoch > 0 and mismatch > .03:
+            if epoch > 0 and mismatch > target_kl:
                 optimizer.zero_grad(set_to_none=True)
                 stop_extra = True
                 break
-            actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
+            lo, hi = 1.0 - clip, 1.0 + clip
+            actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(lo, hi) * advantages[:, sl]).mean()
             critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
             entropy = torch.stack(entropies).mean()
             entropy_g = torch.stack(gaussians).mean()
-            loss = actor + .5 * critic - entropy_coef * entropy
+            loss = actor + value_coef * critic - entropy_coef * entropy
             (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
             if dim_mask is None:
                 action_dim = int(logstd.shape[-1])
@@ -281,7 +308,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                             float(entropy_g.detach()), action_dim))
         if stop_extra:
             break
-        grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
+        grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip, error_if_nonfinite=True)
         optimizer.step()
         completed_epochs += 1
     if not metrics:
@@ -297,6 +324,9 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 grad_norm=float(grad), minibatches=len(metrics),
                 optimized_transitions=int(rewards.numel() * completed_epochs),
                 ppo_epochs_completed=completed_epochs,
+                ppo_clip=float(clip), ppo_grad_clip=float(grad_clip),
+                ppo_value_coef=float(value_coef), ppo_target_kl=float(target_kl),
+                ppo_adv_std_cap=None if adv_std_cap is None else float(adv_std_cap),
                 reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)))
 
 
@@ -488,6 +518,11 @@ def run(args):
             config['hold_close_frac'] = easy_info.get('hold_close_frac')
             config['shaping_length_m'] = easy_info.get('shaping_length_m')
             config['deposit_reward'] = easy_info.get('deposit_reward')
+            config['ppo_clip'] = float(EASY_PRESET['ppo_clip'])
+            config['ppo_grad_clip'] = float(EASY_PRESET['ppo_grad_clip'])
+            config['ppo_adv_std_cap'] = float(EASY_PRESET['ppo_adv_std_cap'])
+            config['ppo_value_coef'] = float(EASY_PRESET['ppo_value_coef'])
+            config['ppo_target_kl'] = float(EASY_PRESET['ppo_target_kl'])
             config['start_over_opening'] = EASY_PRESET['start_over_opening']
             config['start_open_radius_m'] = EASY_PRESET['start_open_radius_m']
             config['start_inset_x_m'] = EASY_PRESET['start_inset_x_m']
@@ -566,9 +601,18 @@ def run(args):
                                              teacher_mix=mix)
             torch.cuda.synchronize()
             rollout_seconds = time.monotonic() - began
+            if easy:
+                ppo_clip = float(EASY_PRESET['ppo_clip'])
+                ppo_grad = float(EASY_PRESET['ppo_grad_clip'])
+                ppo_std_cap = float(EASY_PRESET['ppo_adv_std_cap'])
+                ppo_value = float(EASY_PRESET['ppo_value_coef'])
+                ppo_kl = float(EASY_PRESET['ppo_target_kl'])
+            else:
+                ppo_clip, ppo_grad, ppo_std_cap, ppo_value, ppo_kl = 0.2, 0.5, None, 0.5, 0.03
             metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
                              entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=args.ppo_epochs,
-                             dim_mask=dim_mask)
+                             dim_mask=dim_mask, clip=ppo_clip, grad_clip=ppo_grad,
+                             adv_std_cap=ppo_std_cap, value_coef=ppo_value, target_kl=ppo_kl)
             torch.cuda.synchronize()
             duration = time.monotonic() - began
             metrics.update(update=iteration+1, transitions=(iteration+1)*args.steps*args.worlds,

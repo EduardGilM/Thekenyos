@@ -1031,8 +1031,8 @@ class FastRuntime:
             deposit = float(EASY_PRESET['deposit_reward'])
         else:
             deposit = float(W_DEPOSIT)
-        if not np.isfinite(deposit) or not 1.0 <= deposit <= 500.0:
-            raise ValueError('deposit_reward must be finite in [1, 500]')
+        if not np.isfinite(deposit) or not 1.0 <= deposit <= 10000.0:
+            raise ValueError('deposit_reward must be finite in [1, 10000]')
         self._deposit_w.assign(np.full(self.worlds, deposit, dtype=np.float32))
         if self._easy and self._hold_sweep is None:
             self._hold_sweep = self._run_hold_sweep()
