@@ -497,9 +497,8 @@ class FastRuntime:
             chassis_joint = int(self.model.body_jntadr[self.control.chassis])
             self._chassis_qposadr = int(self.model.jnt_qposadr[chassis_joint])
             self._jaw_qposadr = int(self.control.contract.qids[18])
-            jaw_range = np.asarray(self.model.jnt_range[self.control.contract.joints[18]], dtype=np.float32)
-            self._jaw_closed = float(jaw_range[0] if np.isfinite(jaw_range[0]) else 0.0)
-            self._jaw_open = float(jaw_range[1] if np.isfinite(jaw_range[1]) else 0.8)
+            from .reach_teacher import jaw_open_closed_q
+            self._jaw_open, self._jaw_closed = jaw_open_closed_q(self.model, self._jaw_qposadr)
             from treesim.basket import CENTER
             self._basket_center = wp.vec3(*CENTER)
             robot = self.manifest['robot']

@@ -4,8 +4,8 @@ import numpy as np
 from treesim.kiwi_rl.reach_teacher import (
     axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
     hover_tcp_world_m, basket_chassis_aabb_m, easy_start_local_m,
-    grasp_local_near_tcp, hold_close_fracs, jaw_hold_q, offset_grasp_local,
-    scripted_jaw_target, select_hold_close, tcp_outside_basket,
+    grasp_local_near_tcp, hold_close_fracs, jaw_hold_q, jaw_open_closed_from_gaps,
+    offset_grasp_local, scripted_jaw_target, select_hold_close, tcp_outside_basket,
 )
 
 
@@ -105,6 +105,18 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertAlmostEqual(empty['close_frac'], 0.6)
         with self.assertRaises(ValueError):
             select_hold_close([])
+
+    def test_jaw_open_closed_follows_pad_gap_not_range_sign(self):
+        opened, closed = jaw_open_closed_from_gaps(-1.5708, 0.0, 0.143, 0.024)
+        self.assertAlmostEqual(opened, -1.5708)
+        self.assertAlmostEqual(closed, 0.0)
+        swapped_open, swapped_closed = jaw_open_closed_from_gaps(-1.5708, 0.0, 0.024, 0.143)
+        self.assertAlmostEqual(swapped_open, 0.0)
+        self.assertAlmostEqual(swapped_closed, -1.5708)
+        with self.assertRaises(ValueError):
+            jaw_open_closed_from_gaps(-1.5708, 0.0, 0.10, 0.10)
+        with self.assertRaises(ValueError):
+            jaw_open_closed_from_gaps(0.0, -1.5708, 0.14, 0.02)
 
     def test_scripted_jaw_holds_away_and_opens_over_basket(self):
         self.assertAlmostEqual(scripted_jaw_target([1.0, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15), -1.2)

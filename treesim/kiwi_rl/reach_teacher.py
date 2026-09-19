@@ -220,6 +220,77 @@ def _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold, *,
     return 'motor'
 
 
+def pad_center_gap_m(model, data):
+    """Smallest jaw-to-finger collision-geom centre distance. Not a surface gap."""
+    jaw_geoms, finger_geoms = _pad_geom_ids(model)
+    if not jaw_geoms or not finger_geoms:
+        raise ValueError('pad collision geoms are required to measure the jaw opening')
+    best = None
+    for jaw in jaw_geoms:
+        for finger in finger_geoms:
+            delta = (np.asarray(data.geom_xpos[int(jaw)], dtype=np.float64).reshape(3)
+                     - np.asarray(data.geom_xpos[int(finger)], dtype=np.float64).reshape(3))
+            dist = float(np.linalg.norm(delta))
+            if not np.isfinite(dist):
+                continue
+            if best is None or dist < best:
+                best = dist
+    if best is None or not np.isfinite(best) or best < 0.0:
+        raise ValueError('pad centre gap must be a finite distance')
+    return best
+
+
+def jaw_open_closed_from_gaps(lower, upper, gap_at_lower, gap_at_upper):
+    """Assign open/closed from pad gap. ``jnt_range`` order is not the close direction.
+
+    Spot ``arm_f1x`` is open near ``-pi/2`` (large gap) and closed near ``0``.
+    Treating ``range[0]`` as closed opens the jaws on every hold command.
+    """
+    lo, hi = float(lower), float(upper)
+    gap_lo, gap_hi = float(gap_at_lower), float(gap_at_upper)
+    if not np.isfinite([lo, hi, gap_lo, gap_hi]).all() or lo > hi:
+        raise ValueError('jaw limits and pad gaps must be finite with lower<=upper')
+    if gap_lo < 0.0 or gap_hi < 0.0:
+        raise ValueError('pad gaps must be >= 0')
+    if abs(gap_lo - gap_hi) < 1e-6:
+        raise ValueError('pad gap must change between the jaw limits')
+    if gap_lo > gap_hi:
+        return lo, hi
+    return hi, lo
+
+
+def jaw_open_closed_q(model, jaw_qposadr, data=None):
+    """Measure ``(open_q, closed_q)`` by closing the side with the smaller pad gap."""
+    import mujoco
+    qadr = int(jaw_qposadr)
+    joint_id = None
+    for index in range(int(model.njnt)):
+        if int(model.jnt_qposadr[index]) == qadr:
+            joint_id = int(index)
+            break
+    if joint_id is None:
+        raise ValueError('jaw_qposadr does not match a joint')
+    lo, hi = (float(value) for value in model.jnt_range[joint_id])
+    if not np.isfinite([lo, hi]).all() or lo > hi:
+        raise ValueError('jaw joint range must be finite and ordered')
+    own = data is None
+    if own:
+        data = mujoco.MjData(model)
+    saved = float(data.qpos[qadr])
+    try:
+        data.qpos[qadr] = lo
+        mujoco.mj_forward(model, data)
+        gap_lo = pad_center_gap_m(model, data)
+        data.qpos[qadr] = hi
+        mujoco.mj_forward(model, data)
+        gap_hi = pad_center_gap_m(model, data)
+    finally:
+        data.qpos[qadr] = saved
+        if not own:
+            mujoco.mj_forward(model, data)
+    return jaw_open_closed_from_gaps(lo, hi, gap_lo, gap_hi)
+
+
 def _pad_geom_ids(model):
     """Collision geoms on the moving finger vs the fixed jaw. Visuals are skipped."""
     jaw, finger = [], []
@@ -430,10 +501,10 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                    jaw_actuator=None, jaw_kp=2.0, jaw_kd=0.04, jaw_cap_nm=0.3):
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
-    Fruit stays a free body. The pocket is the open-mouth axial COM, then each
-    close-fraction shuts the jaw around that same point. The chosen command is
-    not a weld and not a calibrated kiwi-safe force. Uses a 5 ms CPU timestep
-    so a 0.4 s hold does not expand into tens of thousands of native substeps.
+    Fruit stays a free body. Each close-fraction sets the jaw first, then
+    places the kiwi in that mouth. The chosen command is not a weld and not a
+    calibrated kiwi-safe force. Uses a 5 ms CPU timestep so a 0.4 s hold does
+    not expand into tens of thousands of native substeps.
     """
     import mujoco
     from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
@@ -474,10 +545,6 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                               cap_nm=cap, kp=kp, kd=kd)
         mujoco.mj_forward(model, data)
         local = grasp_local_in_body_m(model, data, tcp_site)
-        body = int(model.site_bodyid[int(tcp_site)])
-        origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
-        rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
-        pocket0 = origin + rot @ local
         rows = []
         for frac in fracs:
             hold = jaw_hold_q(frac, jaw_open, jaw_closed)
@@ -487,9 +554,15 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                 data.eq_active[eq] = 0
             data.qpos[arm_qids] = start
-            data.qpos[int(jaw_qposadr)] = jaw_open
-            _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, jaw_open,
+            data.qpos[int(jaw_qposadr)] = hold
+            _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold,
                                   cap_nm=cap, kp=kp, kd=kd)
+            mujoco.mj_forward(model, data)
+            local = grasp_local_in_body_m(model, data, tcp_site)
+            body = int(model.site_bodyid[int(tcp_site)])
+            origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+            rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+            pocket0 = origin + rot @ local
             data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = pocket0
             data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0

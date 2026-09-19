@@ -173,11 +173,14 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('jaw_open_closed_q', inspect.getsource(apply_native_skill_reset))
         self.assertIn('grasp_pocket_world_m', inspect.getsource(apply_native_skill_reset))
+        self.assertNotIn('model.jnt_range[jaw_joint, 1]', inspect.getsource(apply_native_skill_reset))
         self.assertIn('hold_close_frac', inspect.getsource(apply_native_skill_reset))
         self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
         self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
+        self.assertIn('jaw_open_closed_q', inspect.getsource(_record_progress_video_locked))
         html_easy_video = render_dashboard_html(dict(
             schema='training-monitor/v1', training_ready=False, run='x', rows=1,
             latest=dict(step=1), series={}, generated_at='now',

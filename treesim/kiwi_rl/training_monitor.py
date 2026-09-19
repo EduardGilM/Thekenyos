@@ -736,38 +736,31 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     if easy and reset_mode == 1:
         apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
-        from treesim.kiwi_rl.reach_teacher import grasp_pocket_world_m, jaw_hold_q
-        jaw_joint = int(controller.joints[18])
-        opened = float(model.jnt_range[jaw_joint, 1])
-        closed = float(model.jnt_range[jaw_joint, 0])
-        if not np.isfinite(opened):
-            opened = 0.8
-        if not np.isfinite(closed):
-            closed = 0.0
+        from treesim.kiwi_rl.reach_teacher import grasp_pocket_world_m, jaw_hold_q, jaw_open_closed_q
+        opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
+        frac = 0.75 if hold_close_frac is None else float(hold_close_frac)
+        if not easy:
+            frac = 1.0
+        if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+            raise ValueError('hold_close_frac must be finite in [0, 1]')
+        hold = jaw_hold_q(frac, opened, closed)
+        data.qpos[int(controller.qids[18])] = hold
+        controller.targets[18] = hold
+        mujoco.mj_forward(model, data)
         if easy:
             pocket = grasp_pocket_world_m(model, data, tcp_site)
             data.qpos[qposadr:qposadr + 3] = pocket
-            frac = 0.75 if hold_close_frac is None else float(hold_close_frac)
-            if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
-                raise ValueError('hold_close_frac must be finite in [0, 1]')
-            hold = jaw_hold_q(frac, opened, closed)
         else:
             tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
             data.qpos[qposadr:qposadr + 3] = tcp
-            hold = jaw_hold_q(1.0, opened, closed)
-        if hold is not None:
-            data.qpos[int(controller.qids[18])] = hold
-            controller.targets[18] = hold
         data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)
         data.qvel[dofadr:dofadr + 6] = 0.0
         equality = fruit.get('equality')
         if equality:
             data.eq_active[int(model.equality(equality).id)] = 0
     if reset_mode == 2:
-        jaw_joint = int(controller.joints[18])
-        opened = float(model.jnt_range[jaw_joint, 1])
-        if not np.isfinite(opened):
-            opened = 0.8
+        from treesim.kiwi_rl.reach_teacher import jaw_open_closed_q
+        opened, _closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
         data.qpos[int(controller.qids[18])] = opened
         controller.targets[18] = opened
     if reset_mode == 3:
@@ -910,14 +903,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
             if preview.get('easy'):
-                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, scripted_jaw_target
-                jaw_joint = int(controller.joints[18])
-                opened = float(model.jnt_range[jaw_joint, 1])
-                closed = float(model.jnt_range[jaw_joint, 0])
-                if not np.isfinite(opened):
-                    opened = 0.8
-                if not np.isfinite(closed):
-                    closed = 0.0
+                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, jaw_open_closed_q, scripted_jaw_target
+                opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
                 frac = preview.get('hold_close_frac')
                 hold = jaw_hold_q(0.6 if frac is None else float(frac), opened, closed)
                 fruit_xy = np.asarray(data.xpos[fruit_body], dtype=np.float64)[:2]
