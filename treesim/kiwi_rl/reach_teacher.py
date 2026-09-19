@@ -392,6 +392,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
         steps = max(1, min(80, int(round(hold_time / float(model.opt.timestep)))))
         hand_geoms = _hand_geom_ids(model)
         jaw_act = _joint_actuator_id(model, jaw_qposadr)
+        fruit_geoms = _fruit_geom_ids(model, fruit_qposadr)
         data = mujoco.MjData(model)
         eq = None if fruit_equality is None else int(fruit_equality)
         data.qpos[:] = q0
@@ -426,15 +427,19 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
             mujoco.mj_forward(model, data)
             max_load = 0.0
-            for _ in range(steps):
+            ramp = max(1, min(20, steps))
+            for step in range(steps):
+                alpha = min(1.0, float(step + 1) / float(ramp))
+                q_jaw = float(jaw_open + alpha * (hold - jaw_open))
                 data.qpos[arm_qids] = start
-                data.qpos[int(jaw_qposadr)] = hold  # kinematic jaw hold during sweep
+                data.qpos[int(jaw_qposadr)] = q_jaw  # ramped kinematic close, then hold
                 if jaw_act is not None:
                     data.ctrl[jaw_act] = hold
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
                     data.eq_active[eq] = 0
                 mujoco.mj_step(model, data)
-                max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
+                max_load = max(max_load, _hand_fruit_contact_load_n(
+                    model, data, hand_geoms, fruit_geoms))
             mujoco.mj_forward(model, data)
             fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
             slip = float(np.linalg.norm(fruit - pocket0))
@@ -464,6 +469,27 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
     }
 
 
+def _fruit_geom_ids(model, fruit_qposadr):
+    """Collision geoms on the free fruit body that owns ``fruit_qposadr``."""
+    qposadr = int(fruit_qposadr)
+    joint_id = None
+    for index in range(int(model.njnt)):
+        if int(model.jnt_qposadr[index]) == qposadr:
+            joint_id = int(index)
+            break
+    if joint_id is None:
+        return tuple()
+    body = int(model.jnt_bodyid[joint_id])
+    ids = []
+    for index in range(int(model.ngeom)):
+        if int(model.geom_bodyid[index]) != body:
+            continue
+        if int(model.geom_contype[index]) == 0 and int(model.geom_conaffinity[index]) == 0:
+            continue
+        ids.append(int(index))
+    return tuple(ids)
+
+
 def _hand_geom_ids(model):
     tokens = ('jaw', 'fngr', 'finger', 'hand', 'pad', 'grip')
     ids = []
@@ -474,7 +500,28 @@ def _hand_geom_ids(model):
     return tuple(ids)
 
 
+def _hand_fruit_contact_load_n(model, data, hand_geoms, fruit_geoms):
+    """Normal load from hand/fruit contacts only. Jaw-vs-finger is ignored."""
+    import mujoco
+    if not hand_geoms or not fruit_geoms:
+        return 0.0
+    hand = set(int(g) for g in hand_geoms)
+    fruit = set(int(g) for g in fruit_geoms)
+    load = 0.0
+    force = np.zeros(6, dtype=np.float64)
+    for index in range(int(data.ncon)):
+        contact = data.contact[index]
+        pair = {int(contact.geom1), int(contact.geom2)}
+        if not (pair & hand) or not (pair & fruit):
+            continue
+        mujoco.mj_contactForce(model, data, index, force)
+        if np.isfinite(force[0]):
+            load += abs(float(force[0]))
+    return load
+
+
 def _hand_contact_load_n(model, data, hand_geoms):
+    """All hand contacts, including jaw-finger. Prefer ``_hand_fruit_contact_load_n``."""
     import mujoco
     if not hand_geoms:
         return 0.0
