@@ -60,6 +60,16 @@ SPEEDRUN_PRESET = {
     'mask_idle_locomotion': True,
     'eval_profile': 'speedrun',
 }
+# Experimental student-side facilitation. Does not weld fruit, teleport into
+# the liner, change promotion gates, or turn the oracle into an action teacher.
+# Eval still uses guidance_weight=0 and teacher_mix=0.
+EASY_PRESET = {
+    'teacher_mix': 0.4,
+    'shaping_coef': 5.0,
+    'open_xy_m': 0.15,
+    'hover_clearance_m': 0.12,
+    'default_shaping_coef': 2.0,
+}
 
 
 @dataclass(frozen=True)
@@ -295,6 +305,15 @@ def apply_speedrun_preset(values: dict) -> dict:
         raise TypeError('values must be a dict')
     out = dict(values)
     out.update(SPEEDRUN_PRESET)
+    return out
+
+
+def apply_easy_preset(values: dict) -> dict:
+    """Overlay privileged deposit facilitation. Gates and fruit freedom stay."""
+    if not isinstance(values, dict):
+        raise TypeError('values must be a dict')
+    out = dict(values)
+    out.update(EASY_PRESET)
     return out
 
 

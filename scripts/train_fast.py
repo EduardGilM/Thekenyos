@@ -10,9 +10,9 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    apply_speedrun_preset, evaluate_skills, evaluation_horizon_steps,
-    fruit_block_reason, idle_locomotion_mask, next_stage, promotion_ready,
-    sample_world_skills, stage_named, summarise_stage,
+    EASY_PRESET, apply_easy_preset, apply_speedrun_preset, evaluate_skills,
+    evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask, next_stage,
+    promotion_ready, sample_world_skills, stage_named, summarise_stage,
 )
 
 
@@ -70,12 +70,45 @@ def apply_speedrun_cli(args, *, video_default=10):
     return args
 
 
+def apply_easy_cli(args):
+    """Privileged deposit facilitation. Explicit --teacher-mix, including 0, wins."""
+    if not getattr(args, 'easy', False):
+        if getattr(args, 'teacher_mix', None) is None:
+            args.teacher_mix = 0.0
+        if getattr(args, 'shaping_coef', None) is None:
+            args.shaping_coef = EASY_PRESET['default_shaping_coef']
+        return args
+    preset = apply_easy_preset({})
+    if getattr(args, 'teacher_mix', None) is None:
+        args.teacher_mix = preset['teacher_mix']
+    if getattr(args, 'shaping_coef', None) is None:
+        args.shaping_coef = preset['shaping_coef']
+    return args
+
+
+def mix_privileged_actions(raw, teacher_applied, mix_mask):
+    """Replace pre-tanh samples with atanh(teacher) where mix_mask is true."""
+    import torch
+    if raw.shape != teacher_applied.shape:
+        raise ValueError('teacher actions must match the student sample shape')
+    if mix_mask.shape != raw.shape[:1]:
+        raise ValueError('mix_mask must be one flag per world')
+    applied = teacher_applied.clamp(-0.999, 0.999)
+    teacher_raw = torch.atanh(applied)
+    return torch.where(mix_mask[:, None], teacher_raw, raw)
+
+
 def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, carry=None,
-            reset_all=False, dim_mask=None):
+            reset_all=False, dim_mask=None, teacher_mix=0.0):
     import torch
     from treesim.kiwi_rl.ppo import tanh_logprob
     if carry is None:
         carry = {}
+    mix_prob = float(teacher_mix)
+    if not np_finite(mix_prob) or not 0.0 <= mix_prob <= 1.0:
+        raise ValueError('teacher_mix must be finite in [0, 1]')
+    if mix_prob > 0.0 and deterministic:
+        raise ValueError('privileged teacher mix stays off during deterministic eval')
     if reset_all or carry.get('memory') is None:
         runtime.reset()
         carry['memory'] = torch.zeros(runtime.worlds, 64, device='cuda:0')
@@ -85,6 +118,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
     memory0 = memory.clone()
     recovered_total = 0
     overflow_total = 0
+    teacher_used = 0
     rows = []
     for index in range(steps):
         r84 = runtime.observe().clone()
@@ -94,6 +128,10 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             memory = memory * (~reset)[:, None]
             mean, logstd, value, memory = policy(rgbd, r84, memory)
             raw = mean if deterministic else mean + logstd.exp() * torch.randn_like(mean)
+            if mix_prob > 0.0:
+                mix_mask = torch.rand(runtime.worlds, device=raw.device) < mix_prob
+                raw = mix_privileged_actions(raw, runtime.privileged_deposit_action(), mix_mask)
+                teacher_used += int(mix_mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
             base, arm = _split_action(raw)
             runtime.set_base_commands(base.contiguous())
@@ -110,12 +148,17 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             timeout = info['timed_out']
             if faults['recovered_worlds']:
                 timeout = timeout | faults['mask']
-            rows.append(dict(rgbd=rgbd, r84=r84, raw=raw, logp=logp, value=value,
+            row = dict(rgbd=rgbd, r84=r84, raw=raw, logp=logp, value=value,
                 reward=reward.clone(), terminated=physical.clone(), truncated=timeout.clone(),
                 reset=reset.clone(), distance=info['distance_m'].clone(),
                 success=info['success'].clone(), detached=info['detached'].clone(),
                 grasped=info['grasped'].clone(), retained_detach=info['retained_detach'].clone(),
-                harvested=info['harvested'].clone() if 'harvested' in info else info['success'].clone()))
+                harvested=info['harvested'].clone() if 'harvested' in info else info['success'].clone())
+            if 'basket_distance_m' in info:
+                row['basket_distance'] = info['basket_distance_m'].clone()
+            if 'basket_xy_m' in info:
+                row['basket_xy'] = info['basket_xy_m'].clone()
+            rows.append(row)
             if index == 0:
                 rows[0]['memory0'] = memory0
             reset = done.clone()
@@ -127,6 +170,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
     carry['memory'], carry['reset'], carry['rgbd'] = memory, reset, rgbd
     carry['recovered_worlds'] = recovered_total
     carry['overflow_worlds'] = overflow_total
+    carry['teacher_actions'] = teacher_used
     return rows, bootstrap, carry
 
 
@@ -238,7 +282,9 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     reset = torch.ones(worlds, device='cuda:0', dtype=torch.bool)
     rgbd = runtime.pixels().clone()
     closest = torch.full((worlds,), float('inf'), device='cuda:0')
+    closest_basket = torch.full((worlds,), float('inf'), device='cuda:0')
     final_distance = torch.zeros(worlds, device='cuda:0')
+    final_basket = torch.zeros(worlds, device='cuda:0')
     success_any = torch.zeros(worlds, dtype=torch.bool, device='cuda:0')
     grasp_any = torch.zeros_like(success_any)
     detach_any = torch.zeros_like(success_any)
@@ -266,6 +312,9 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
             dist = info['distance_m']
             closest = torch.minimum(closest, dist)
             final_distance = dist.clone()
+            if 'basket_distance_m' in info:
+                closest_basket = torch.minimum(closest_basket, info['basket_distance_m'])
+                final_basket = info['basket_distance_m'].clone()
             success_any |= info['success'].bool()
             grasp_any |= info['grasped'].bool()
             detach_any |= info['detached'].bool()
@@ -280,12 +329,18 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
                 runtime.reset(reset)
                 rgbd = runtime.pixels().clone()
     harvest_fraction = harvested_peak / required
+    if not bool(torch.isfinite(closest_basket).all()):
+        closest_basket = closest
+        final_basket = final_distance
     return {
         'evaluation/horizon_s': float(horizon * control_dt),
         'evaluation/horizon_steps': int(horizon),
         'evaluation/final_distance_m': float(final_distance.mean()),
         'evaluation/closest_distance_m': float(closest.min()),
         'evaluation/mean_closest_distance_m': float(closest.mean()),
+        'evaluation/final_basket_distance_m': float(final_basket.mean()),
+        'evaluation/closest_basket_distance_m': float(closest_basket.min()),
+        'evaluation/mean_closest_basket_distance_m': float(closest_basket.mean()),
         'evaluation/terminal_transitions': terminals,
         'evaluation/harvest_successes': int(success_any.sum()),
         'evaluation/success_rate': float(success_any.float().mean()),
@@ -355,12 +410,19 @@ def run(args):
     eval_profile = getattr(args, 'eval_profile', 'default')
     mask_idle = bool(getattr(args, 'mask_idle_locomotion', True))
     checkpoint_every = int(getattr(args, 'checkpoint_every', 1))
+    easy = bool(getattr(args, 'easy', False))
+    teacher_mix = float(getattr(args, 'teacher_mix', 0.0))
+    shaping_coef = float(getattr(args, 'shaping_coef', EASY_PRESET['default_shaping_coef']))
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
                   curriculum=summarise_stage(stage, profile=eval_profile),
                   training_ready=False,
                   speedrun=bool(getattr(args, 'speedrun', False)),
+                  easy=easy,
+                  teacher_mix=teacher_mix,
+                  shaping_coef=shaping_coef,
+                  weld=False,
                   eval_profile=eval_profile,
                   mask_idle_locomotion=mask_idle,
                   entropy_kind='tanh_gaussian_differential_nats',
@@ -376,6 +438,13 @@ def run(args):
     try:
         runtime = FastRuntime(args.scene, worlds=args.worlds, camera='hand_color_sensor',
                               nconmax=args.nconmax, njmax=args.njmax)
+        if easy:
+            easy_info = runtime.enable_easy(True, shaping_coef=shaping_coef)
+            config['hover_error_m'] = easy_info['hover_error_m']
+            config['easy_scope'] = easy_info['scope']
+            (args.output / 'config.json').write_text(
+                json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
+                           indent=2, default=str) + '\n')
         gait = load_gait_artifact(args.gait_checkpoint, precision_profile='cuda-fp32').to('cuda:0').eval()
         policy = build_policy().to('cuda:0')
         if args.initialize_from:
@@ -384,7 +453,8 @@ def run(args):
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
         apply_stage(runtime, stage, numpy_rng)
-        collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask)
+        collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
+                teacher_mix=teacher_mix)
         torch.cuda.synchronize()
         start = time.monotonic()
         reports = []
@@ -413,7 +483,8 @@ def run(args):
         for iteration in range(args.updates):
             began = time.monotonic()
             rows, bootstrap, carry = collect(runtime, policy, gait, args.steps, args.camera_every,
-                                             carry=carry, reset_all=False, dim_mask=dim_mask)
+                                             carry=carry, reset_all=False, dim_mask=dim_mask,
+                                             teacher_mix=teacher_mix)
             torch.cuda.synchronize()
             rollout_seconds = time.monotonic() - began
             metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
@@ -439,7 +510,18 @@ def run(args):
                 guidance_weight=stage.guidance_weight,
                 eval_profile=eval_profile,
                 idle_locomotion_masked=int(dim_mask is not None),
+                easy=int(easy),
+                teacher_mix=teacher_mix,
+                teacher_actions=int(carry.get('teacher_actions', 0)),
+                shaping_coef=shaping_coef,
+                hover_error_m=float(runtime.hover_error_m),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
+            if 'basket_distance' in rows[0]:
+                basket = torch.stack([r['basket_distance'] for r in rows])
+                metrics['basket_distance_mean_m'] = float(basket.mean())
+                metrics['basket_distance_closest_m'] = float(basket.min(dim=0).values.mean())
+            if 'basket_xy' in rows[0]:
+                metrics['basket_xy_mean_m'] = float(torch.stack([r['basket_xy'] for r in rows]).mean())
             del rows, bootstrap
             promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
@@ -543,6 +625,12 @@ def main():
                    help='TK-RL-003 curriculum stage to start from')
     p.add_argument('--speedrun', action='store_true',
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
+    p.add_argument('--easy', action='store_true',
+                   help='Hover-over-basket free-fruit reset, privileged deposit mix, stronger shaping; not a weld')
+    p.add_argument('--teacher-mix', type=float, default=None,
+                   help='Fraction of training actions replaced by the privileged deposit teacher')
+    p.add_argument('--shaping-coef', type=float, default=None,
+                   help='Potential-shaping scale; --easy defaults to 5, otherwise 2')
     p.add_argument('--eval-profile', choices=['default', 'speedrun'], default='default')
     p.add_argument('--mask-idle-locomotion', action=argparse.BooleanOptionalAction, default=True,
                    help='Drop N3 from PPO log-prob/entropy while the stage holds the chassis')
@@ -553,6 +641,7 @@ def main():
     add_monitor_args(p)
     a = p.parse_args()
     apply_speedrun_cli(a)
+    apply_easy_cli(a)
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
     if not 1 <= a.checkpoint_every <= 10000:
@@ -563,6 +652,10 @@ def main():
         p.error(f'Unknown curriculum stage {a.stage}')
     if not 0 <= a.entropy_coef <= 0.1 or not 0.9 <= a.gamma <= 1.0 or not 1 <= a.ppo_epochs <= 8:
         p.error('Invalid PPO entropy, gamma or epochs')
+    if not 0.0 <= a.teacher_mix <= 1.0:
+        p.error('Invalid teacher-mix')
+    if not 0.0 <= a.shaping_coef <= 20.0:
+        p.error('Invalid shaping-coef')
     run(a)
 
 

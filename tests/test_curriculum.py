@@ -111,6 +111,28 @@ class CurriculumTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluation_horizon_s(deposit, profile='cheat')
 
+    def test_easy_preset_does_not_change_gates_or_weld(self):
+        from treesim.kiwi_rl.curriculum import EASY_PRESET, apply_easy_preset
+        from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m
+        from treesim.basket import CENTER, SIZE
+        deposit = stage_named('deposit_pixels')
+        preset = apply_easy_preset({'gate_success_rate': deposit.gate_success_rate,
+                                    'gate_episodes': deposit.gate_episodes})
+        self.assertEqual(preset['teacher_mix'], 0.4)
+        self.assertEqual(preset['shaping_coef'], 5.0)
+        self.assertEqual(preset['default_shaping_coef'], 2.0)
+        self.assertEqual(preset['gate_success_rate'], 0.90)
+        self.assertEqual(preset['gate_episodes'], 200)
+        self.assertNotIn('weld', EASY_PRESET)
+        self.assertEqual(deposit.gate_success_rate, 0.90)
+        local = hover_tcp_local_m(0.12)
+        np.testing.assert_allclose(local, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
+        self.assertGreater(float(local[2]), float(CENTER[2] + SIZE[2]))
+        with self.assertRaises(ValueError):
+            hover_tcp_local_m(0.0)
+        with self.assertRaises(ValueError):
+            hover_tcp_local_m(-0.1)
+
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')
         self.assertIsNone(first_unsatisfied_stage(start, 5))

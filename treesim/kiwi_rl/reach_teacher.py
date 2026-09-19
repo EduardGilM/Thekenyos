@@ -5,6 +5,79 @@ from __future__ import annotations
 import numpy as np
 
 
+def hover_tcp_local_m(clearance_m=0.12):
+    """Chassis-frame TCP target above the open basket rim.
+
+    This is a privileged reset/teacher pose, not a liner teleport. Fruit still
+    has to fall under gravity and settle. ``clearance_m`` is extra +Z above
+    ``CENTER + (0, 0, SIZE_z)``, the same top used by the deposit oracle.
+    """
+    from treesim.basket import CENTER, SIZE
+    clearance = float(clearance_m)
+    if not np.isfinite(clearance) or not 0 < clearance <= 0.5:
+        raise ValueError('hover clearance must be finite in (0, 0.5] m')
+    local = np.asarray(CENTER, dtype=np.float64) + np.array(
+        [0.0, 0.0, float(SIZE[2]) + clearance], dtype=np.float64)
+    if not np.isfinite(local).all():
+        raise ValueError('hover TCP local frame must be finite')
+    return local
+
+
+def hover_tcp_world_m(chassis_xpos, chassis_xmat, clearance_m=0.12):
+    """World TCP target from chassis pose and the basket-hover local offset."""
+    xpos = np.asarray(chassis_xpos, dtype=np.float64).reshape(3)
+    xmat = np.asarray(chassis_xmat, dtype=np.float64).reshape(3, 3)
+    if not np.isfinite(xpos).all() or not np.isfinite(xmat).all():
+        raise ValueError('chassis pose must be finite')
+    return xpos + xmat @ hover_tcp_local_m(clearance_m)
+
+
+def solve_tcp_hover(model, qpos, site_id, target_world, joint_qposadr, joint_dofadr,
+                    q_init, ranges, *, damping=.05, max_step=.1, steps=80, tol_m=0.02):
+    """CPU DLS that moves one site toward a world point. Fruit stays a free body."""
+    import mujoco
+    qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
+    target_world = np.asarray(target_world, dtype=np.float64).reshape(3)
+    joint_qposadr = np.asarray(joint_qposadr, dtype=int).reshape(-1)
+    joint_dofadr = np.asarray(joint_dofadr, dtype=int).reshape(-1)
+    q_init = np.asarray(q_init, dtype=np.float64).reshape(-1)
+    ranges = np.asarray(ranges, dtype=np.float64)
+    n_arm = joint_qposadr.shape[0]
+    if n_arm != 6 or joint_dofadr.shape[0] != 6 or q_init.shape != (6,) or ranges.shape != (6, 2):
+        raise ValueError('hover IK uses the six arm joints, not the jaw')
+    if not isinstance(site_id, (int, np.integer)) or int(site_id) < 0:
+        raise ValueError('site_id must be a non-negative integer')
+    if not isinstance(steps, int) or isinstance(steps, bool) or not 1 <= steps <= 200:
+        raise ValueError('steps must be an integer in [1, 200]')
+    if not np.isfinite(target_world).all() or not np.isfinite(qpos).all() or not np.isfinite(q_init).all():
+        raise ValueError('hover IK inputs must be finite')
+    if not np.isfinite(tol_m) or tol_m <= 0:
+        raise ValueError('tol_m must be finite and positive')
+    data = mujoco.MjData(model)
+    q = qpos.copy()
+    commands = q_init.copy()
+    q[joint_qposadr] = commands
+    error_norm = np.inf
+    for _ in range(steps):
+        data.qpos[:] = q
+        mujoco.mj_kinematics(model, data)
+        mujoco.mj_comPos(model, data)
+        hand = np.asarray(data.site_xpos[int(site_id)], dtype=np.float64)
+        error = target_world - hand
+        error_norm = float(np.linalg.norm(error))
+        if error_norm <= float(tol_m):
+            break
+        jacp = np.zeros((3, model.nv))
+        jacr = np.zeros((3, model.nv))
+        mujoco.mj_jacSite(model, data, jacp, jacr, int(site_id))
+        delta = bounded_damped_least_squares(
+            jacp[:, joint_dofadr], error, commands,
+            ranges[:, 0], ranges[:, 1], damping, max_step)
+        commands = np.clip(commands + delta.astype(np.float64), ranges[:, 0], ranges[:, 1])
+        q[joint_qposadr] = commands
+    return commands.astype(np.float32), float(error_norm)
+
+
 def damped_least_squares(J, error, damping=.05, max_step=.1):
     """Return a bounded joint increment for a Cartesian position error."""
     J, error = np.asarray(J, dtype=np.float64), np.asarray(error, dtype=np.float64)

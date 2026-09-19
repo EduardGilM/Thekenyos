@@ -62,6 +62,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('evaluate_mission', source)
         self.assertIn('drain_faults', source)
         self.assertIn('--speedrun', source)
+        self.assertIn('--easy', source)
         self.assertIn('should_persist_checkpoint', source)
         run_src = inspect.getsource(train_fast.run)
         self.assertIn('fruit-count', run_src)
@@ -97,6 +98,37 @@ class FastTrainerCLITest(unittest.TestCase):
             speedrun=True, video_every=10, eval_every=50, checkpoint_every=1,
             entropy_coef=0.005, eval_profile='default', mask_idle_locomotion=True))
         self.assertEqual(filled.video_every, 50)
+
+    def test_easy_cli_fills_teacher_mix_but_keeps_explicit_zero(self):
+        import argparse
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import apply_easy_cli
+        filled = apply_easy_cli(argparse.Namespace(
+            easy=True, teacher_mix=None, shaping_coef=None))
+        self.assertEqual(filled.teacher_mix, 0.4)
+        self.assertEqual(filled.shaping_coef, 5.0)
+        kept = apply_easy_cli(argparse.Namespace(
+            easy=True, teacher_mix=0.0, shaping_coef=2.0))
+        self.assertEqual(kept.teacher_mix, 0.0)
+        self.assertEqual(kept.shaping_coef, 2.0)
+        off = apply_easy_cli(argparse.Namespace(
+            easy=False, teacher_mix=None, shaping_coef=None))
+        self.assertEqual(off.teacher_mix, 0.0)
+        self.assertEqual(off.shaping_coef, 2.0)
+        import inspect
+        import train_fast
+        self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_privileged_mix_uses_atanh_of_teacher_action(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import mix_privileged_actions
+        raw = torch.zeros(2, 7)
+        teacher = torch.full((2, 7), 0.5)
+        mixed = mix_privileged_actions(raw, teacher, torch.tensor([True, False]))
+        self.assertAlmostEqual(float(mixed[0, 0]), float(torch.atanh(torch.tensor(0.5))), places=5)
+        self.assertEqual(float(mixed[1, 0]), 0.0)
 
 
 if __name__ == '__main__':

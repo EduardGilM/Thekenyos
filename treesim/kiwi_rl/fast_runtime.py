@@ -15,6 +15,7 @@ import numpy as np
 import warp as wp
 
 from .control_warp import WarpSpotControl, _set_gait_targets
+from .curriculum import EASY_PRESET
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
     W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
@@ -52,9 +53,11 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      previous_damage: wp.array(dtype=float), previous_action: wp.array2d(dtype=float),
                      actions: wp.array2d(dtype=float), episode_time: wp.array(dtype=float),
                      timeout_s: wp.array(dtype=float), guidance: wp.array(dtype=float),
+                     shaping_coef: wp.array(dtype=float),
                      goal: wp.array(dtype=int), reward: wp.array(dtype=float),
                      terminated: wp.array(dtype=wp.uint8), timed_out: wp.array(dtype=wp.uint8),
-                     distance: wp.array(dtype=float), mask: wp.array(dtype=wp.uint8),
+                     distance: wp.array(dtype=float), basket_distance: wp.array(dtype=float),
+                     basket_xy: wp.array(dtype=float), mask: wp.array(dtype=wp.uint8),
                      success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8),
                      detached: wp.array(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8),
                      retained_detach: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
@@ -78,13 +81,17 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     distance[world] = d_tcp
     rotation = xmat[world, chassis]
     basket_world = xpos[world, chassis] + rotation @ basket_center
-    d_basket = wp.length(xpos[world, fruit] - basket_world)
+    fruit_world = xpos[world, fruit]
+    diff = fruit_world - basket_world
+    d_basket = wp.length(diff)
+    basket_distance[world] = d_basket
+    basket_xy[world] = wp.sqrt(diff[0] * diff[0] + diff[1] * diff[1])
     use_basket = 1 if (goal[world] == 0 or detached[world] != 0) else 0
     d_shape = d_basket if use_basket != 0 else d_tcp
     phi = wp.exp(-d_shape / 0.25)
     shaped = float(0.)
     if shaping_ref[world] == use_basket:
-        shaped = guidance[world] * 2.0 * (gamma_step * phi - previous_potential[world])
+        shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
     previous_potential[world] = phi
     shaping_ref[world] = use_basket
     r = shaped
@@ -282,6 +289,54 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
         qpos[world, chassis_qposadr + 1] = qpos[world, chassis_qposadr + 1] + layout_dy[world]
 
 
+@wp.kernel
+def _apply_easy_hover(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                      qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
+                      qids: wp.array(dtype=int), hover_q: wp.array(dtype=float),
+                      jaw_qposadr: int, jaw_closed: float):
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 1:
+        return
+    for joint in range(6):
+        qid = qids[joint + 12]
+        qpos[world, qid] = hover_q[joint]
+        targets[world, joint + 12] = hover_q[joint]
+    qpos[world, jaw_qposadr] = jaw_closed
+    targets[world, 18] = jaw_closed
+
+
+@wp.kernel
+def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                               chassis: int, fruit_bodies: wp.array(dtype=int),
+                               active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
+                               goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
+                               targets: wp.array2d(dtype=float), hover_q: wp.array(dtype=float),
+                               jaw_closed: float, jaw_open: float, open_xy_m: float,
+                               max_delta: float, out_applied: wp.array2d(dtype=float)):
+    world, joint = wp.tid()
+    active = 1 if (goal[world] == 0 or detached[world] != 0) else 0
+    if active == 0:
+        out_applied[world, joint] = 0.0
+        return
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    fruit_pos = xpos[world, fruit]
+    dx = fruit_pos[0] - basket_world[0]
+    dy = fruit_pos[1] - basket_world[1]
+    over = wp.sqrt(dx * dx + dy * dy) < open_xy_m
+    if joint < 6:
+        desired = hover_q[joint]
+        current = targets[world, joint + 12]
+    else:
+        desired = jaw_open if over else jaw_closed
+        current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    out_applied[world, joint] = delta / max_delta
+
+
 class FastRuntime:
     """Bounded rigid-fruit runtime.
 
@@ -349,10 +404,13 @@ class FastRuntime:
             self._episode_time = wp.zeros(worlds, dtype=float, device=self.device)
             self._timeout_s = wp.array(np.full(worlds, 180.0, dtype=np.float32), dtype=float, device=self.device)
             self._guidance = wp.ones(worlds, dtype=float, device=self.device)
+            self._shaping_coef = wp.full(worlds, float(EASY_PRESET['default_shaping_coef']),
+                                         dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
             self._allow_locomotion = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
             self._basket_distance = wp.zeros(worlds, dtype=float, device=self.device)
+            self._basket_xy = wp.zeros(worlds, dtype=float, device=self.device)
             self._timed_out = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
             self._base_commands = wp.zeros((worlds, 3), dtype=float, device=self.device)
             self._distance = wp.zeros(worlds, dtype=float, device=self.device)
@@ -406,6 +464,12 @@ class FastRuntime:
             self.task = FastHarvestTask(self.model, self.data, self.manifest)
             self.task.goal.assign(np.full(worlds, 2, dtype=np.int32))
             self._gamma_step = 0.9996
+            self._easy = False
+            self._open_xy_m = float(EASY_PRESET['open_xy_m'])
+            hover_q, hover_err = self._solve_hover_q(initial.qpos)
+            self._hover_q = wp.array(hover_q, dtype=float, device=self.device)
+            self.hover_error_m = float(hover_err) if np.isfinite(hover_err) else 1.0
+            self._teacher_applied = wp.zeros((worlds, 7), dtype=float, device=self.device)
             self._refresh(mw)
             self._measure_reward()
             self.reset()
@@ -444,8 +508,10 @@ class FastRuntime:
                           self.tcp_site, self.task.fruit_body, self.task.active_fruit, self.chassis,
                           self._previous_potential,
                           self._shaping_ref, self._previous_damage, self._previous_action, self._actions,
-                          self._episode_time, self._timeout_s, self._guidance, self.task.goal,
-                          self._reward, self._terminated, self._timed_out, self._distance, mask,
+                          self._episode_time, self._timeout_s, self._guidance, self._shaping_coef,
+                          self.task.goal,
+                          self._reward, self._terminated, self._timed_out, self._distance,
+                          self._basket_distance, self._basket_xy, mask,
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
@@ -472,6 +538,8 @@ class FastRuntime:
             wp.capture_launch(self.graph)
         return self.observe(), wp.to_torch(self._reward), wp.to_torch(self._terminated).bool(), {
             'distance_m': wp.to_torch(self._distance),
+            'basket_distance_m': wp.to_torch(self._basket_distance),
+            'basket_xy_m': wp.to_torch(self._basket_xy),
             'fallen': (wp.to_torch(self.data.xpos)[:,self.chassis,2] < .3) |
                       (wp.to_torch(self.data.xmat)[:,self.chassis,2,2] < .6967067),
             'reached': wp.to_torch(self._distance) < 0.08,
@@ -538,6 +606,79 @@ class FastRuntime:
         self._layout_dx.assign(_arr('layout_dx_m', np.float32, 0.0))
         self._layout_dy.assign(_arr('layout_dy_m', np.float32, 0.0))
 
+    def _solve_hover_q(self, initial_qpos):
+        """One-shot CPU IK to a point above the basket rim. Fruit is not moved."""
+        from .reach_teacher import hover_tcp_world_m, solve_tcp_hover
+        contract = self.control.contract
+        qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
+        qids = np.asarray(contract.qids[12:18], dtype=int)
+        dofs = np.asarray(contract.dofs[12:18], dtype=int)
+        ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+        limited = np.asarray(self.model.jnt_limited[contract.joints[12:18]], dtype=bool)
+        ranges[limited] = np.asarray(self.model.jnt_range[contract.joints[12:18]], dtype=np.float64)[limited]
+        q_init = qpos[qids]
+        import mujoco
+        data = mujoco.MjData(self.model)
+        data.qpos[:] = qpos
+        mujoco.mj_kinematics(self.model, data)
+        target = hover_tcp_world_m(
+            data.xpos[self.chassis], data.xmat[self.chassis],
+            EASY_PRESET['hover_clearance_m'])
+        arm_q, err = solve_tcp_hover(
+            self.model, qpos, self.tcp_site, target, qids, dofs, q_init, ranges)
+        if not np.isfinite(arm_q).all() or not np.isfinite(err):
+            return q_init.astype(np.float32), float('inf')
+        return arm_q, err
+
+    def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
+        """Train-only facilitation: hover reset + stronger shaping buffer.
+
+        Does not weld fruit or write it into the liner. Eval still sets
+        guidance_weight=0; the caller must keep teacher_mix at 0 there.
+        """
+        self._easy = bool(enabled)
+        if shaping_coef is None:
+            coef = EASY_PRESET['shaping_coef'] if self._easy else EASY_PRESET['default_shaping_coef']
+        else:
+            coef = float(shaping_coef)
+        if not np.isfinite(coef) or coef < 0 or coef > 20:
+            raise ValueError('shaping_coef must be finite in [0, 20]')
+        if open_xy_m is None:
+            self._open_xy_m = float(EASY_PRESET['open_xy_m'])
+        else:
+            self._open_xy_m = float(open_xy_m)
+        if not np.isfinite(self._open_xy_m) or not 0 < self._open_xy_m <= 0.5:
+            raise ValueError('open_xy_m must be finite in (0, 0.5] m')
+        self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
+        return {
+            'easy': self._easy,
+            'shaping_coef': coef,
+            'open_xy_m': self._open_xy_m,
+            'hover_error_m': float(self.hover_error_m),
+            'weld': False,
+            'scope': 'experimental privileged deposit facilitation; fruit stays free',
+        }
+
+    def privileged_deposit_action(self):
+        """Joint increments toward hover + open jaw when XY is over the basket.
+
+        Returns tanh-space applied actions in [-1, 1]. The fruit remains free;
+        this is not an oracle demonstration and must stay off during eval.
+        """
+        import torch
+        max_delta = 2.5 * self.control_dt
+        with wp.ScopedDevice(self.device):
+            wp.launch(_privileged_deposit_action, dim=(self.worlds, 7), inputs=[
+                self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
+                self.task.active_fruit, self._basket_center, self.task.goal,
+                self.task.detached, self.control.targets, self._hover_q,
+                self._jaw_closed, self._jaw_open, float(self._open_xy_m),
+                float(max_delta), self._teacher_applied], device=self.device)
+        applied = wp.to_torch(self._teacher_applied)
+        if tuple(applied.shape) != (self.worlds, 7):
+            raise RuntimeError('privileged deposit action has the wrong shape')
+        return applied
+
     def pixels(self):
         if self.rig is None or self.policy_camera is None:
             raise RuntimeError('FastRuntime was created without a gripper camera')
@@ -568,6 +709,13 @@ class FastRuntime:
             self.task.reset(mask_wp)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
+            if self._easy:
+                wp.launch(_apply_easy_hover, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
+                    self.control.qids, self._hover_q, self._jaw_qposadr, self._jaw_closed],
+                    device=self.device)
+                mw.forward(self.gpu_model, self.data)
+                self._refresh(mw)
             wp.launch(_configure_skill_reset, dim=self.worlds, inputs=[
                 mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
                 self.data.site_xpos, self._fruit_qposadrs, self._fruit_dofadrs, self.tcp_site,
