@@ -549,10 +549,27 @@ def publish_hub(monitor_dir: str | Path, hub: str | Path) -> None:
         if source.exists():
             shutil.copy2(source, hub / name)
     videos, target = monitor_dir / 'videos', hub / 'videos'
-    if target.is_symlink() or target.is_file():
+    if not videos.exists():
+        return
+    desired = videos.resolve()
+    if target.is_symlink():
+        try:
+            current = target.resolve()
+        except OSError:
+            current = None
+        if current == desired:
+            return
         target.unlink()
-    if videos.exists() and not target.exists():
-        target.symlink_to(videos)
+    elif target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        try:
+            next(target.iterdir())
+        except StopIteration:
+            target.rmdir()
+        else:
+            return
+    target.symlink_to(desired)
 
 
 class LiveDashboard:

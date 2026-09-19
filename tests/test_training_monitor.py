@@ -98,6 +98,10 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertEqual(payload['videos'][0]['step'], 10)
             self.assertIn('progress-0010.mp4', html)
             self.assertTrue((hub / 'videos').is_symlink())
+            link = (hub / 'videos').readlink()
+            dashboard.refresh()
+            self.assertTrue((hub / 'videos').is_symlink())
+            self.assertEqual((hub / 'videos').readlink(), link)
             html_two = render_dashboard_html(dict(
                 schema='training-monitor/v1', training_ready=False, run=str(run), rows=1,
                 latest=payload['latest'], series=payload['series'], generated_at='now',

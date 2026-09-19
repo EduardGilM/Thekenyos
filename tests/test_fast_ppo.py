@@ -136,6 +136,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('def _scripted_jaw_hold', runtime_src)
         self.assertIn('def _pin_scripted_jaw', runtime_src)
         self.assertIn('def _in_release_zone', runtime_src)
+        self.assertIn('self._shaping_length', runtime_src)
+        self.assertIn('HOLD_SWEEP_CLEARANCE_M', runtime_src)
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)

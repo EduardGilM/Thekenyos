@@ -113,7 +113,8 @@ class CurriculumTest(unittest.TestCase):
 
     def test_easy_preset_does_not_change_gates_or_weld(self):
         from treesim.kiwi_rl.curriculum import (
-            EASY_PRESET, apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
+            EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M,
+            apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
         )
         from treesim.kiwi_rl.reach_teacher import (
             basket_chassis_aabb_m, easy_start_local_m, hold_close_fracs, hover_tcp_local_m,
@@ -129,7 +130,11 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertEqual(preset['start_margin_m'], 0.32)
         self.assertEqual(preset['start_x_span_m'], 0.08)
-        self.assertEqual(preset['start_clearance_m'], 0.28)
+        self.assertEqual(preset['start_clearance_m'], 0.10)
+        self.assertEqual(preset['shaping_length_m'], 0.60)
+        self.assertEqual(preset['default_shaping_length_m'], 0.25)
+        self.assertEqual(HOLD_SWEEP_MARGIN_M, 0.40)
+        self.assertEqual(HOLD_SWEEP_CLEARANCE_M, 0.28)
         self.assertEqual(preset['n_start_poses'], 24)
         self.assertEqual(preset['n_hold_levels'], 10)
         self.assertEqual(preset['hold_close_min'], 0.25)
@@ -190,6 +195,8 @@ class CurriculumTest(unittest.TestCase):
             self.assertTrue(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
             self.assertGreaterEqual(float(pose[0]), float(hi[0] + 0.32) - 1e-9)
             self.assertLessEqual(float(pose[0]), float(hi[0] + 0.32 + 0.08) + 1e-9)
+            self.assertGreaterEqual(float(pose[2]), float(hi[2] + 0.10) - 1e-9)
+            self.assertLessEqual(float(pose[2]), float(hi[2] + 0.10 + 0.08) + 1e-9)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
@@ -199,7 +206,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _adapt_scripted_jaw', src)
         self.assertIn('def _in_release_zone', src)
         self.assertIn('self._hold_sweep_q', src)
-        self.assertIn('margin_m=0.40', src)
+        self.assertIn('margin_m=HOLD_SWEEP_MARGIN_M', src)
+        self.assertIn('clearance_m=HOLD_SWEEP_CLEARANCE_M', src)
+        self.assertIn('self._shaping_length', src)
         self.assertIn('self._easy_pin', src)
         self.assertIn('qpos[world, jaw_qposadr] = hold', src)
         self.assertIn('def _run_hold_sweep', src)

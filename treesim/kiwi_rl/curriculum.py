@@ -72,9 +72,14 @@ EASY_PRESET = {
     # 0.40 m + 0.32 m span put the mean start ~0.56 m in front of the rim;
     # the 1.28 s PPO window then never sees a settled deposit. 0.12 m clips
     # the wrist; 0.22 m put the pads through the front wall and dumped.
-    # 0.32 m / 0.08 m span stays outside. The hold sweep still uses 0.40 m.
+    # 0.32 m / 0.08 m span stays outside. Start Z is 0.10 m above the rim
+    # so a 1.28 s window can finish the lower; the hold sweep stays at
+    # 0.40 m / 0.28 m so a closer student pose cannot poison close-fraction.
+    # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
+    # not a measured length.
     'start_margin_m': 0.32,
-    'start_clearance_m': 0.28,
+    'start_clearance_m': 0.10,
+    'shaping_length_m': 0.60,
     'n_start_poses': 24,
     'start_x_span_m': 0.08,
     'start_y_span_m': 0.10,
@@ -85,7 +90,13 @@ EASY_PRESET = {
     'hold_close_max': 0.70,
     'far_horizon_updates': 200,
     'default_shaping_coef': 2.0,
+    'default_shaping_length_m': 0.25,
 }
+
+# Hold sweep stays farther out / higher than training starts so a closer
+# student pose cannot knock the free fruit into the front wall.
+HOLD_SWEEP_MARGIN_M = 0.40
+HOLD_SWEEP_CLEARANCE_M = 0.28
 
 
 @dataclass(frozen=True)

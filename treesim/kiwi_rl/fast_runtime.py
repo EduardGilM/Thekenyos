@@ -15,7 +15,7 @@ import numpy as np
 import warp as wp
 
 from .control_warp import WarpSpotControl, _set_gait_targets
-from .curriculum import EASY_PRESET
+from .curriculum import EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
     W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
@@ -57,6 +57,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      actions: wp.array2d(dtype=float), episode_time: wp.array(dtype=float),
                      timeout_s: wp.array(dtype=float), guidance: wp.array(dtype=float),
                      shaping_coef: wp.array(dtype=float),
+                     shaping_length: wp.array(dtype=float),
                      goal: wp.array(dtype=int), reward: wp.array(dtype=float),
                      terminated: wp.array(dtype=wp.uint8), timed_out: wp.array(dtype=wp.uint8),
                      distance: wp.array(dtype=float), basket_distance: wp.array(dtype=float),
@@ -91,7 +92,10 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     basket_xy[world] = wp.sqrt(diff[0] * diff[0] + diff[1] * diff[1])
     use_basket = 1 if (goal[world] == 0 or detached[world] != 0) else 0
     d_shape = d_basket if use_basket != 0 else d_tcp
-    phi = wp.exp(-d_shape / 0.25)
+    length = shaping_length[world]
+    if length <= 0.0:
+        length = 0.25
+    phi = wp.exp(-d_shape / length)
     shaped = float(0.)
     if shaping_ref[world] == use_basket:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
@@ -204,13 +208,17 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
                           previous_potential: wp.array(dtype=float), reward: wp.array(dtype=float),
                           goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
                           shaping_ref: wp.array(dtype=int), basket_distance: wp.array(dtype=float),
-                          episode_time: wp.array(dtype=float), timed_out: wp.array(dtype=wp.uint8)):
+                          episode_time: wp.array(dtype=float), timed_out: wp.array(dtype=wp.uint8),
+                          shaping_length: wp.array(dtype=float)):
     world = wp.tid()
     if mask[world] == 0:
         return
     use_basket = 1 if (goal[world] == 0 or detached[world] != 0) else 0
     d_shape = basket_distance[world] if use_basket != 0 else distance[world]
-    previous_potential[world] = wp.exp(-d_shape / 0.25)
+    length = shaping_length[world]
+    if length <= 0.0:
+        length = 0.25
+    previous_potential[world] = wp.exp(-d_shape / length)
     shaping_ref[world] = use_basket
     reward[world] = 0.0
     episode_time[world] = 0.0
@@ -523,6 +531,8 @@ class FastRuntime:
             self._guidance = wp.ones(worlds, dtype=float, device=self.device)
             self._shaping_coef = wp.full(worlds, float(EASY_PRESET['default_shaping_coef']),
                                          dtype=float, device=self.device)
+            self._shaping_length = wp.full(worlds, float(EASY_PRESET['default_shaping_length_m']),
+                                           dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
             self._allow_locomotion = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
@@ -652,7 +662,7 @@ class FastRuntime:
                           self._previous_potential,
                           self._shaping_ref, self._previous_damage, self._previous_action, self._actions,
                           self._episode_time, self._timeout_s, self._guidance, self._shaping_coef,
-                          self.task.goal,
+                          self._shaping_length, self.task.goal,
                           self._reward, self._terminated, self._timed_out, self._distance,
                           self._basket_distance, self._basket_xy, mask,
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
@@ -830,8 +840,8 @@ class FastRuntime:
         # Static hold sweep stays at 0.40 m so a closer training start cannot
         # knock the fruit into the front wall and poison close-fraction choice.
         sweep_local = easy_start_local_m(
-            0.0, home_local, margin_m=0.40,
-            clearance_m=EASY_PRESET['start_clearance_m'])
+            0.0, home_local, margin_m=HOLD_SWEEP_MARGIN_M,
+            clearance_m=HOLD_SWEEP_CLEARANCE_M)
         sweep_q, sweep_err = solve_tcp_hover(
             self.model, qpos, self.tcp_site, chassis_p + chassis_R @ sweep_local,
             qids, dofs, q_home, ranges)
@@ -888,6 +898,13 @@ class FastRuntime:
         if not np.isfinite(self._open_xy_m) or not 0 < self._open_xy_m <= 0.5:
             raise ValueError('open_xy_m must be finite in (0, 0.5] m')
         self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
+        if self._easy:
+            length = float(EASY_PRESET['shaping_length_m'])
+        else:
+            length = float(EASY_PRESET['default_shaping_length_m'])
+        if not np.isfinite(length) or not 0.05 <= length <= 2.0:
+            raise ValueError('shaping_length_m must be finite in [0.05, 2.0] m')
+        self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
         if self._easy and self._hold_sweep is None:
             self._hold_sweep = self._run_hold_sweep()
             self._chosen_close_frac = float(self._hold_sweep['chosen_close_frac'])
@@ -917,6 +934,7 @@ class FastRuntime:
         return {
             'easy': self._easy,
             'shaping_coef': coef,
+            'shaping_length_m': length,
             'open_xy_m': self._open_xy_m,
             'open_rim_z_m': self._open_rim_z_m,
             'hover_error_m': float(self.hover_error_m),
@@ -1068,7 +1086,8 @@ class FastRuntime:
             wp.launch(_masked_seed_distance, dim=self.worlds,
                       inputs=[mask_wp, self._distance, self._previous_potential, self._reward,
                               self.task.goal, self.task.detached, self._shaping_ref,
-                              self._basket_distance, self._episode_time, self._timed_out], device=self.device)
+                              self._basket_distance, self._episode_time, self._timed_out,
+                              self._shaping_length], device=self.device)
         return self.observe()
 
     def drain_faults(self):
