@@ -12,6 +12,7 @@ import torch
 from .counterfactual import restore_worlds, replay_position_errors
 from .fast_teacher import privileged_observation
 from .harvest_training import signals, GRAPH_PROFILE
+from .reward_graph import CONTROL_GRAPH_PROFILE
 
 
 def expand_application(application, mapping):
@@ -69,7 +70,7 @@ class BranchCTI:
         if (not 1 <= roots <= 64 or not 2 <= alternatives <= 32 or
                 not 1 <= search_iterations <= 5 or runtime.worlds != roots*(alternatives+1)):
             raise ValueError('CTI runtime must contain roots times (alternatives + factual) worlds')
-        if getattr(runtime, 'task_profile', None) != GRAPH_PROFILE:
+        if getattr(runtime, 'task_profile', None) not in (GRAPH_PROFILE, CONTROL_GRAPH_PROFILE):
             raise ValueError('Branch CTI requires the temporal reward graph')
         if not 0 < intervention_seconds < horizon_seconds or block_steps < 1:
             raise ValueError('Invalid CTI search horizon')
@@ -201,7 +202,7 @@ class BranchCTI:
     def run(self, policy, batch):
         if batch is None or len(batch.source_world_ids) != self.roots:
             raise ValueError('CTI requires an actual PPO decision batch with matching roots')
-        if batch.initial_progress.reward_profile != GRAPH_PROFILE:
+        if batch.initial_progress.reward_profile != self.runtime.task_profile:
             raise ValueError('CTI roots must use the same reward graph')
         started = time.perf_counter()
         self.rounds += 1

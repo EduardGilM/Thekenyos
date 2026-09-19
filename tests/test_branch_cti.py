@@ -52,6 +52,7 @@ class BranchGpuTest(unittest.TestCase):
         from treesim.kiwi_rl.fast_teacher import build_privileged_policy
         from treesim.kiwi_rl.control import load_gait_artifact
         from treesim.kiwi_rl.harvest_training import HarvestCollector,GRAPH_PROFILE
+        GRAPH_PROFILE=os.environ.get('GRAPH_TEST_PROFILE',GRAPH_PROFILE)
         from treesim.kiwi_rl.ppo_cti import PPODecisionQueue
         from treesim.kiwi_rl.cti_learning import update_branch_cti
         torch.set_num_threads(1);torch.manual_seed(42);wp.init();stream=torch.cuda.Stream()

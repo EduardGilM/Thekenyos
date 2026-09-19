@@ -2,7 +2,7 @@
 import torch
 import warp as wp
 from treesim.basket import CENTER
-from .reward_graph import GRAPH_PROFILE, SOFT_GRAPH_PROFILE, PREREQUISITE_GRAPH_PROFILES, REGRESSION_WEIGHTS, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
+from .reward_graph import GRAPH_PROFILE, SOFT_GRAPH_PROFILE, CONTROL_GRAPH_PROFILE, PREREQUISITE_GRAPH_PROFILES, REGRESSION_WEIGHTS, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -201,6 +201,8 @@ class EpisodeProgress:
     def _graph_step(self, now, physical_done):
         self.age += 1; self.stale += 1
         previous_detached = self.graph_detached.clone()
+        previous_position_dwell = self.graph_position_dwell.clone()
+        previous_settle_time = self.previous['settle_time'].clone()
         previous_score = self.graph_score.clone()
         previous_components = self.graph_components
         previous_stage = self.graph_stage.clone()
@@ -265,7 +267,7 @@ class EpisodeProgress:
             self.shaping_reward = self.gamma*torch.where(terminated,0.,score)-previous_score
             for name in STAGE_NAMES:
                 self.graph_progress_reward[name] = self.gamma*torch.where(terminated,0.,self.graph_components[name])-previous_components[name]
-        if self.reward_profile == SOFT_GRAPH_PROFILE:
+        if self.reward_profile in (SOFT_GRAPH_PROFILE, CONTROL_GRAPH_PROFILE):
             # Irreversible bad extraction is negative experience, not an early
             # reset. Physical failure/drop and the episode limits still end it.
             new_invalid = self.graph_invalid_extract & ~previous_detached
@@ -280,6 +282,22 @@ class EpisodeProgress:
                 self.graph_loss_reward[name] = 2*REGRESSION_WEIGHTS[name]*loss
                 self.graph_progress_reward[name] = self.graph_gain_reward[name]-self.graph_loss_reward[name]
                 self.graph_peak_components[name] = torch.maximum(self.graph_peak_components[name], current)
+            self.shaping_reward = sum(self.graph_progress_reward.values())
+        if self.reward_profile == CONTROL_GRAPH_PROFILE:
+            # Physical control loss, not every exploratory correction. A valid
+            # basket release is intentional and must not incur a lost-grip cost.
+            penalties = dict(
+                position=.25*((previous_position_dwell >= .1) & ~self.graph_enclosed & ~self.graph_valid_release),
+                grip=.75*(previous_grip & ~self.graph_grip & ~self.graph_valid_release),
+                extract=torch.zeros_like(score),
+                carry=1.5*((previous_stage >= 3) & (previous_stage <= 4) & (self.graph_stage < 3) & ~self.graph_valid_release),
+                deposit=.5*((previous_settle_time > 0) & (now['settle_time'] <= 0) & ~self.graph_success),
+                complete=torch.zeros_like(score))
+            for name, current in self.graph_components.items():
+                delta = self.gamma*current-previous_components[name]
+                self.graph_gain_reward[name] = delta.clamp_min(0)
+                self.graph_loss_reward[name] = (-delta).clamp_min(0)+penalties[name]
+                self.graph_progress_reward[name] = delta-penalties[name]
             self.shaping_reward = sum(self.graph_progress_reward.values())
         return self.task_reward+self.shaping_reward, terminated, truncated, stalled
 

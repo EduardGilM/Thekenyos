@@ -46,11 +46,19 @@ chart('stageConditional',rows,stageNames.map((name,i)=>({key:'episode/conditiona
 chart('stageRegressions',rows,stageNames.map((name,i)=>({key:'episode/regression/'+name,color:colors[i]})));
 chart('acceptedSkills',rows.map((r,i)=>i===0?{...r,...Object.fromEntries(Object.entries(r).filter(([k])=>k.startsWith('evaluation/')).map(([k,v])=>[k.replace('evaluation/','accepted/'),v]))}:r),stageNames.map((name,i)=>({key:'accepted/completed/'+name,color:colors[i]})));
 chart('acceptanceGate',rows,[{key:'acceptance/promoted',color:colors[0]},{key:'acceptance/rollback',color:'#f69c8d'}]);
-if(s.config?.reward_profile==='graph-harvest/v4'){
+if(['graph-harvest/v4','graph-harvest/v5'].includes(s.config?.reward_profile)){
+const controlGraph=s.config.reward_profile==='graph-harvest/v5';
+if(!s.config.cti){
 $('ctiKind').textContent='Disabled';
 $('ctinote').textContent='PPO only. No counterfactual learner or branch search.';
-$('runDescription').textContent='Fresh harvesting policy · 4,096 PPO worlds · weighted regression rewards · no curriculum or rollback';
+
 $('accepted').textContent='Off'; $('acceptedLabel').textContent='CTI disabled';
+}
+$('runDescription').textContent=controlGraph?`Continued checkpoint 95 · 4,096 PPO worlds · continuous progress and control-loss costs · CTI ${s.config.cti?'on':'off'}`:'Fresh harvesting policy · 4,096 PPO worlds · weighted regression rewards · no curriculum or rollback';
+if(controlGraph){
+$('stageGains').parentElement.querySelector('.chart-note').textContent='Continuous positive progress, including recovery.';
+$('stageLosses').parentElement.querySelector('.chart-note').textContent='Negative progress plus costs for losing sustained physical control.';
+}
 $('evalScope').textContent='Training and held-out scenes · nominal and seeded stochastic trials';
 $('selectedTitle').textContent='Best recorded policy skills';
 $('selectedTitle').parentElement.querySelector('.chart-note').textContent='Evaluation selects a recording; the active learner continues uninterrupted.';

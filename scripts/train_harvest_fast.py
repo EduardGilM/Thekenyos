@@ -9,7 +9,7 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from train_fast import update
 from train_physical_smoke import build_policy
-from treesim.kiwi_rl.reward_graph import SOFT_GRAPH_PROFILE as GRAPH_PROFILE
+from treesim.kiwi_rl.reward_graph import CONTROL_GRAPH_PROFILE as GRAPH_PROFILE
 from treesim.kiwi_rl.graph_training import graph_rank, save_acceptance
 from treesim.kiwi_rl.fast_teacher import TEACHER_SCHEMA, build_privileged_policy, validate_teacher_report
 
@@ -82,8 +82,10 @@ def run(args):
     from treesim.kiwi_rl.ppo import save_checkpoint,load_checkpoint
     from treesim.kiwi_rl.training_log import TrainingLog
     role=args.role
-    if args.reward_graph and args.cti:
-        raise ValueError('Graph v4 is a PPO-only baseline; omit --cti')
+    if args.reward_graph and args.cti and args.stall_seconds < 6.:
+        raise ValueError('Graph CTI requires at least six seconds before inactivity termination')
+    if sum(bool(x) for x in (args.continue_from, args.initialize_from, args.resume_from)) > 1:
+        raise ValueError('Choose one checkpoint initialization mode')
     if args.cti and role != 'teacher':
         raise ValueError('Selective CTI currently supports the privileged teacher only')
     if role == 'teacher' and (args.eval_scene is None or args.eval_worlds < args.teacher_min_eval_episodes):
@@ -121,16 +123,16 @@ def run(args):
         solver_iterations=100,
         jaw_cap_Nm=1.0,
         force_limit_scope='per_jaw_and_nonpad_group',
-        optimizer_resume=('full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
+        optimizer_resume=('ppo_optimizer_continuation' if args.continue_from else 'full_optimizer_checkpoint' if args.resume_from else 'fresh_optimizer'),
         cti_version=(8 if args.reward_graph else 5) if args.cti else 0,
-        initialization=('checkpoint' if args.initialize_from or args.resume_from else 'random'),
+        initialization=('checkpoint' if args.initialize_from or args.resume_from or args.continue_from else 'random'),
         cti_optimizer=('independent_adam_vtrace' if args.reward_graph else 'independent_adam') if args.cti else None,
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     if args.reward_graph:
         config.update(stage_practice_fraction=0., evaluation_trials=3, evaluation_scenes=2,
-            checkpoint_rollback=False, regression_loss_multiplier=2., reward_accounting='episode_peak_gain_minus_weighted_loss')
-        from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS, REGRESSION_WEIGHTS
-        config['regression_weights']=REGRESSION_WEIGHTS
+            checkpoint_rollback=False, reward_accounting='continuous_progress_plus_control_loss',
+            control_loss_penalties=dict(position=.25, grip=.75, carry=1.5, deposit=.5))
+        from treesim.kiwi_rl.reward_graph import GRAPH_CONSTANTS
         config['reward_graph_constants']={k:v for k,v in GRAPH_CONSTANTS.items()
             if k not in ('approach_radius_m','approach_outer_m','insertion_range_m')}
         config['reward_graph_constants'].update(position_scale_m=.15, reset_settle_seconds=4., cti_minimum_remaining_seconds=6.)
@@ -198,6 +200,13 @@ def run(args):
         if args.resume_from:
             restored=load_checkpoint(args.resume_from,role_state,optimizer_states,expected_meta={
                 'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
+
+        if args.continue_from:
+            # Keep both heads and factual Adam moments across this reward change.
+            # The CTI arm starts a separate auxiliary optimizer from zero.
+            restored=load_checkpoint(args.continue_from,role_state,{role:optimizer},expected_meta={
+                'role':role,'schema':schema,'model_sha256':runtime.manifest['model_sha256']})
+            for group in optimizer.param_groups: group['lr']=args.learning_rate
 
         def evaluate_candidate():
             result=evaluate(evaluation_runtime,policy,gait,args,role=role)
@@ -275,7 +284,7 @@ def run(args):
             torch.set_rng_state(restored['rng']['torch'])
             torch.cuda.set_rng_state_all(restored['rng']['cuda'])
             event=dict(event='resume',phase=phase,version=config['cti_version'],at=time.time(),
-                elapsed_seconds=offset,update=index,source_checkpoint=str(args.resume_from),
+                elapsed_seconds=offset,update=index,source_checkpoint=str(args.continue_from or args.resume_from),
                 episodes_reset=True,remaining_seconds=args.train_seconds-offset)
             with (args.output/'phase-events.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')
             print(json.dumps(event),flush=True)
@@ -466,6 +475,7 @@ def main():
     for name in ('scene','gait-checkpoint','output'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--initialize-from',type=Path)
+    p.add_argument('--continue-from',type=Path,help='New run preserving actor, critic and factual PPO Adam state; apply requested learning rate')
     p.add_argument('--resume-from',type=Path)
     p.add_argument('--wandb-run-id')
     p.add_argument('--eval-scene',type=Path)

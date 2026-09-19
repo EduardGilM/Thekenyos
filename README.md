@@ -51,13 +51,14 @@ calibrated angle/torque-dependent abscission remain open work. Research ranges a
 interchangeable across cultivars and test conditions.
 
 
-The current graph teacher uses [weighted regression graph v4](docs/reward-graph.md).
-Run with `--reward-graph --role teacher`, without `--cti`, `--curriculum`,
-`--initialize-from` or `--resume-from` for a fresh PPO baseline. It pays new
-valid progress once per episode and weights losses more heavily. No stage
-practice or evaluation rollback is active. Archived v1–v3 checkpoints retain
-their original rendering/reward profiles. `--resume-from` is only for the same
-reward profile and W&B run.
+The current graph teacher uses [continuous progress and control-loss graph v5](docs/reward-graph.md).
+Use `--reward-graph --role teacher --continue-from /path/to/checkpoint.pt
+--learning-rate .0001` to preserve actor, critic and factual Adam state under the
+new objective. Add `--cti --cti-time-fraction .2 --cti-worlds 32` only for the
+matched CTI arm. Both arms share the same source checkpoint and time budget.
+There is no explicit curriculum, stage practice or checkpoint rollback. Archived
+v1–v4 profiles retain their original scoring. `--resume-from` is only for the same
+reward profile and run; `--initialize-from` resets critic/optimizers instead.
 
 ## Install
 

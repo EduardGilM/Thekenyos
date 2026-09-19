@@ -1,4 +1,34 @@
-# Weighted regression graph v4
+# Continuous progress and control-loss graph v5
+
+Current profile: `graph-harvest/v5`. Continuous progress reward is restored:
+`gamma * current_component - previous_component`, gamma .999, for all graph
+components. Recovery can earn positive feedback again; discounted closed loops
+remain nonpositive. No episode-peak reward restriction or blanket 2x backward
+motion cost applies. Stalls retain partial physical progress; real drops and
+invalid extraction still remove dependent credit.
+
+Additional one-step control-loss costs: .25 for losing an enclosure sustained
+for .1 seconds, .75 for losing secure grip, 1.5 for losing controlled carry,
+and .5 for losing basket settling. Qualified basket release is exempt from
+lost-grip/carry penalties. These are physical events, not learned-policy mastery
+estimates. No explicit curriculum, stage practice or evaluation rollback.
+Physical success still requires controlled extraction and two-second settling.
+
+`--continue-from` starts a new recorded run from the exact actor, critic and
+factual Adam state. It applies the requested learning rate (1e-4 for this
+experiment), resets physical episodes, and records source provenance. It does
+not reset the critic. An optional CTI arm uses a fresh independent auxiliary
+Adam optimizer. PPO and CTI use identical reward and termination rules.
+
+The matched comparison continues checkpoint 95 from teacher-graph-ppo-004.
+Both arms have 30 additional minutes, the same evaluation schedule, scenes,
+seed, policy, factual optimizer and learning rate. Run sequentially on the same
+GPU; CTI uses its previous 20% wall-time budget. This is a one-seed experiment,
+not definitive evidence of general benefit. Report both wall time and transitions.
+Use `tests.test_control_graph`, archived reward checks, and `tests.test_branch_cti`
+with `CTI_GPU_TEST=1 GRAPH_TEST_PROFILE=graph-harvest/v5` before launch.
+
+## Archived weighted regression graph v4
 
 The current profile is `graph-harvest/v4`, a PPO-only experiment with a random
 harvesting actor and critic. The fixed gait is reused. CTI, stage practice,

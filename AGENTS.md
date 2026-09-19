@@ -307,3 +307,12 @@ harvesting actor and critic. Keep physical success prerequisites and archived
 profiles, but replace rollback with weighted progress-loss penalties. Read
 `docs/reward-graph.md`; run `tests.test_soft_graph` and the affected archived/GPU
 checks. A best display checkpoint never replaces the active learner.
+
+## Continuous graph v5 comparison
+
+The user approved restoring continuous approach feedback and learning rate 1e-4,
+with penalties for losing sustained physical control, and a matched CTI on/off
+comparison continued from the current checkpoint. Preserve actor, critic and
+factual Adam state via `--continue-from`; reset physical episodes explicitly.
+No curriculum or evaluation rollback. Keep archived v4 replay. Read the v5
+section of docs/reward-graph.md and run its reward and CTI replay checks.
