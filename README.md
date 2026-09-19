@@ -1308,3 +1308,20 @@ available; see the [upstream documentation](docs/orchardbench-upstream.md) and
 [Apache-2.0 license](LICENSE). RELIC assets have separate terms. Do not copy
 external model weights, robot meshes or research PDFs into this repository
 without checking their licenses.
+
+### Live reward/CTI run dashboard
+
+For the current `teacher-reward-cti-001` experiment, run locally:
+
+```bash
+python3 scripts/training_dashboard.py --cache output/live-dashboard
+```
+
+Open `http://127.0.0.1:8765`. This standard-library server polls JP every five
+seconds and shows physical outcomes, reward components, throughput, CTI comparisons,
+and a cached rollout of the best evaluated checkpoint with the arm-camera inset.
+Changed best checkpoints render no more often than every three minutes. Video is
+recorded, not a live camera feed. Render errors retain the previous video. The
+server binds only to localhost; SSH access to `jp` is required. Use `--no-render`
+for metrics only. Current run paths and PID are explicit constants in the script.
+Run `python3 -B -m unittest tests.test_training_dashboard -v` for the focused checks.
