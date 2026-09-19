@@ -1,11 +1,10 @@
-"""Record a policy rollout and render synchronized world/arm/front inset views."""
+"""Record a policy rollout and render synchronized world and arm-camera views."""
 import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 os.environ.setdefault('MUJOCO_GL', 'egl')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,46 +26,48 @@ def main():
     p.add_argument('--gait-checkpoint', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--steps', type=int, default=300)
+    p.add_argument('--replay', type=Path, help='Re-render recorded states without another physics rollout')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=False)
-    torch.set_num_threads(1)
-    wp.init()
-    stream = torch.cuda.Stream()
-    states = []
-    with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
-        rt = FastRuntime(a.scene, worlds=1, camera='hand_camera')
-        gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
-        policy = build_policy().cuda().eval()
-        load_checkpoint(a.checkpoint, {'student': policy}, expected_meta={
-            'camera': 'hand_camera', 'camera_profile': rt.manifest['cameras']})
-        memory = torch.zeros(1,64,device='cuda')
-        with torch.no_grad():
-            for i in range(a.steps):
-                if i % 2 == 0:
-                    rgbd = rt.pixels()
-                    states.append(rt.data.qpos.numpy()[0].copy())
-                obs = rt.observe()
-                mean, _, _, memory = policy(rgbd, obs, memory)
-                rt.set_gait_actions(gait(obs))
-                _, _, done, info = rt.step(mean.tanh())
-                if bool(done.any()):
-                    states.append(rt.data.qpos.numpy()[0].copy())
-                    break
-        numerical = rt.check()
-        metadata = dict(checkpoint=str(a.checkpoint), scene=str(a.scene), frames=len(states), fps=25,
-                        simulated_seconds=(i+1)*.02, terminated=bool(done.any()),
-                        success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
-                        numerical=numerical, front_camera='approximate nose mount; video only; not actor input',
-                        arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
-                        training_horizon_seconds=1.28)
-        np.savez_compressed(a.output/'states.npz', qpos=np.array(states))
-        robot = rt.manifest['robot']
-    # Only the replay model gains a presentation camera; physics is already recorded.
-    root = ET.fromstring((a.scene/'scene.xml').read_text())
-    chassis = root.find(f".//body[@name='{robot['chassis']}']")
-    ET.SubElement(chassis, 'camera', name='front_preview', pos='.46 0 .025',
-                  xyaxes='0 -1 0 0 0 1', fovy='75')
-    model = mujoco.MjModel.from_xml_string(ET.tostring(root,encoding='unicode'))
+    if a.replay:
+        states = np.load(a.replay/'states.npz')['qpos']
+        metadata = json.loads((a.replay/'report.json').read_text())
+        metadata.pop('front_camera', None)
+        robot = json.loads((a.scene/'manifest.json').read_text())['robot']
+    else:
+        torch.set_num_threads(1)
+        wp.init()
+        stream = torch.cuda.Stream()
+        states = []
+        with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
+            rt = FastRuntime(a.scene, worlds=1, camera='hand_camera')
+            gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
+            policy = build_policy().cuda().eval()
+            load_checkpoint(a.checkpoint, {'student': policy}, expected_meta={
+                'camera': 'hand_camera', 'camera_profile': rt.manifest['cameras']})
+            memory = torch.zeros(1,64,device='cuda')
+            with torch.no_grad():
+                for i in range(a.steps):
+                    if i % 2 == 0:
+                        rgbd = rt.pixels()
+                        states.append(rt.data.qpos.numpy()[0].copy())
+                    obs = rt.observe()
+                    mean, _, _, memory = policy(rgbd, obs, memory)
+                    rt.set_gait_actions(gait(obs))
+                    _, _, done, info = rt.step(mean.tanh())
+                    if bool(done.any()):
+                        states.append(rt.data.qpos.numpy()[0].copy())
+                        break
+            numerical = rt.check()
+            metadata = dict(checkpoint=str(a.checkpoint), scene=str(a.scene), frames=len(states), fps=25,
+                            simulated_seconds=(i+1)*.02, terminated=bool(done.any()),
+                            success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
+                            numerical=numerical, 
+                            arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
+                            training_horizon_seconds=1.28)
+            np.savez_compressed(a.output/'states.npz', qpos=np.array(states))
+            robot = rt.manifest['robot']
+    model = mujoco.MjModel.from_xml_path(str(a.scene/'scene.xml'))
     model.vis.global_.offwidth = 1280
     model.vis.global_.offheight = 720
     model.vis.map.znear = .0001
@@ -86,9 +87,13 @@ def main():
     try:
         for index,qpos in enumerate(states):
             data.qpos[:] = qpos; mujoco.mj_forward(model,data)
+            model.vis.map.znear = .01
             main_render.update_scene(data,camera=world,scene_option=option)
+            # Imported visual shells include faces visible from both sides.
+            main_render.scene.flags[mujoco.mjtRndFlag.mjRND_CULL_FACE] = False
             image = Image.fromarray(main_render.render())
-            for name,y,label in [('hand_camera',50,'ARM CAMERA'),('front_preview',375,'FRONT - APPROXIMATE MOUNT')]:
+            for name,y,label in [('hand_camera',50,'ARM CAMERA')]:
+                model.vis.map.znear = .0001
                 inset_render.update_scene(data,camera=name,scene_option=option)
                 inset = Image.fromarray(inset_render.render())
                 image.paste(inset,(940,y+27))
