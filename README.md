@@ -696,6 +696,64 @@ Raw reports on JP are `output/compression-refined/summary.json`,
 `output/detachment-native-halfstep.json`. Reports include executed source hashes
 where available. Generated artifacts stay outside Git.
 
+### Full Spot assisted pick and basket deposit
+
+`scripts/assisted_harvest_cycle.py` runs a scripted, fixed-base native MuJoCo
+fixture with the existing Spot arm, chassis-mounted basket and seeded pergola.
+It starts at a clear pregrasp pose, approaches the kiwi, closes both jaws,
+activates the explicitly labelled ideal grip, rotates, commands a vertical
+pull, carries the fruit around the side of the basket, opens the jaw and
+removes the assist. The released fruit falls under gravity and must settle
+inside the collision liner. Arm motion uses torque-limited joint actuators;
+only the initial fixture pose is set directly. IK uses the RELIC URDF link
+geometry and joint position limits; actuator effort limits also come from RELIC.
+The URDF lists 100 rad/s for every arm joint, so it does not establish usable
+hardware speed limits. Manufacturer speed/acceleration limits and complete
+self-collision coverage remain unverified.
+
+```bash
+MUJOCO_GL=egl python scripts/assisted_harvest_cycle.py \
+  --relic /path/to/relic --output output/assisted-cycle --video
+MUJOCO_GL=egl python scripts/assisted_harvest_cycle.py \
+  --relic /path/to/relic --output output/assisted-cycle-half \
+  --timestep 0.00001
+python -m unittest tests.test_assisted_harvest_cycle -v
+```
+
+The script writes `scene.xml`, `workspace.json`, `result.json`, a final-state
+snapshot and, with `--video`, `cycle.mp4` with a close-up inset. It exits nonzero
+on failure. Success requires load-triggered detachment during the downward
+pull, assist removal, no ground hit, bounded fruit/stalk/arm-obstacle overlap,
+and at least 0.5 s of low linear and angular velocity fully inside the basket
+with liner contact at the end of the observation period.
+
+This fixture uses rigid fruit and a secure artificial grasp. It does **not**
+validate fruit safety, contact-only grasp strength, balance, hardware workspace,
+RL or GPU parity. The basket liner uses a 0.5 ms contact time constant with
+high impedance to limit numerical penetration. Six-dimensional contacts enable
+its existing sliding, torsional and rolling friction coefficients
+(`0.7`, `0.005 m`, `0.0001 m`). These are engineering assumptions, not measured
+kiwi–liner friction or cushioning.
+The fixed stalk root excludes collision only with its two joined canopy canes;
+hand/stalk and fruit/stalk collisions remain active. Canopy joints and the
+chassis are fixed for this workspace diagnostic. The default RL environment
+and its training gate are unchanged.
+
+Validated on JP (2026-09-19): the full 20 µs rerun passed, detaching at
+27.024 N with 0.437 mm maximum fruit contact overlap, no ground hit and no
+recorded arm/basket or arm/canopy overlap. The 10 µs trajectory detached at
+27.023 N with 0.428 mm maximum overlap. Its saved final state passed a 1 s
+settling continuation after correcting the containment evaluator to accept
+wall contact within 1 µm. The earlier strict-boundary failure report remains
+archived; it was not a failure to deposit the fruit. Three containment
+regression tests pass, and separate outside-basket falls trigger ground-contact
+failure at both timesteps. Reports are in `output/assisted-cycle-verified`,
+`output/assisted-cycle-half/settlement-recheck.json` and
+`output/assisted-cycle-ground-negative.json` on JP. Peak jaw force was about
+62 N in this rigid assisted fixture; no fruit-safety claim follows from it.
+
+### Native stem extraction bench
+
 The native stem-attached diagnostic is `scripts/check_grasp_pull.py`.
 It uses Spot's jaw collision meshes, an unpinned fruit and a collidable stalk.
 `treesim/native_stem.py` builds four massive capsule segments with bending,
