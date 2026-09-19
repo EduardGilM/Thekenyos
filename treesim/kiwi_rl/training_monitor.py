@@ -407,7 +407,7 @@ def record_progress_video(checkpoint: str | Path, output: str | Path, *,
 
 def _record_progress_video_locked(info, output, *, steps, camera_every, control_dt,
                                   width, height, resolution, fps):
-    partial = output.with_suffix(output.suffix + '.partial')
+    partial = output.with_name(output.stem + '.partial.mp4')
     camera_every = info['camera_every'] if camera_every is None else int(camera_every)
     if not 1 <= camera_every <= 5:
         raise ValueError('camera_every must be in [1, 5]')
@@ -445,7 +445,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     encoder = subprocess.Popen([
         ffmpeg, '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
         '-s', f'{width}x{height}', '-r', str(fps), '-i', '-', '-an',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(partial),
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+        '-f', 'mp4', str(partial),
     ], stdin=subprocess.PIPE)
     scene_renderer = mujoco.Renderer(model, height=height, width=width)
     policy_renderer = mujoco.Renderer(model, height=resolution, width=resolution)
@@ -487,7 +488,10 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             update = info['completed_updates']
             draw.text((8, 8), f'CPU preview  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
             draw.text((8, 22), f'TCP-fruit {distance:.3f} m  gripper RGB overlay  not harvest proof', fill=(244, 211, 94))
-            encoder.stdin.write(np.asarray(image).tobytes())
+            try:
+                encoder.stdin.write(np.asarray(image).tobytes())
+            except BrokenPipeError as exc:
+                raise RuntimeError('ffmpeg exited while writing the progress video') from exc
     finally:
         scene_renderer.close()
         policy_renderer.close()
@@ -516,7 +520,7 @@ def spawn_progress_video(checkpoint: str | Path, output: str | Path, *,
                          python: str | None = None) -> subprocess.Popen | None:
     """Start a CPU recording subprocess that leaves the training GPU alone."""
     output = Path(output)
-    if output.exists() or Path(str(output) + '.partial').exists() or (output.parent / '.recording.lock').exists():
+    if output.exists() or output.with_name(output.stem + '.partial.mp4').exists() or (output.parent / '.recording.lock').exists():
         return None
     output.parent.mkdir(parents=True, exist_ok=True)
     script = Path(__file__).resolve().parents[2] / 'scripts' / 'watch_training.py'
