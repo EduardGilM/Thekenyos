@@ -76,7 +76,10 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     rewards = torch.stack([r['reward'] for r in rows])
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
-    truncated = torch.stack([r.get('truncated', torch.zeros_like(ended)) for r in rows])
+    if 'truncated' in rows[0]:
+        truncated = torch.stack([r['truncated'] for r in rows])
+    else:
+        truncated = torch.zeros_like(ended)
     truncated[-1] = True
     advantages = compute_gae_torch(rewards, values, torch.cat((values[1:], bootstrap[None])),
                                    ended, truncated, gamma, .95)
