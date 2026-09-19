@@ -689,6 +689,62 @@ uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
 python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
 ```
 
+W&B logging is available in `scripts/train_physical_smoke.py`. Add
+`--wandb-mode online --wandb-project Thekenyos --wandb-entity juampab`
+to the training command after authenticating with `wandb login` on the host.
+Logs include losses, rewards, policy transitions per second, evaluation distance,
+and fall fraction. Every run also appends local `training.jsonl`; `offline`
+queues W&B data locally, and `disabled` needs no W&B connection. Checkpoint
+uploads require `--upload-checkpoints`. Run outputs and W&B caches stay under
+`--output`; credentials are never stored in the repository.
+
+The approved fast hackathon profile uses rigid fruit with compliant contacts
+and a load-triggered point connection. It retains the robot, basket, cameras,
+collisions and gravity from a base scene, with static canopy supports. It omits
+volumetric fruit deformation; the 8 N stem threshold and 15 N force-based damage
+limit are explicit engineering assumptions. It currently supports one target
+fruit per independent world.
+
+```bash
+python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
+  --output /path/to/fast-scene --timestep .005
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/new-run \
+  --worlds 4096 --steps 64 --updates 10 --minibatch-worlds 512 \
+  --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
+FAST_SCENE=/path/to/fast-scene python -B -m unittest \
+  tests.test_fast_scene tests.test_fast_task tests.test_fast_runtime \
+  tests.test_fast_ppo tests.test_training_log -v
+```
+
+`--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
+weights with a fresh optimizer. The GPU runtime captures each 50 Hz control
+interval and evaluates contact/release outcomes at every physics substep. The
+CLIs share a non-default Torch/Warp stream; use that same stream contract when
+embedding the runtime. PPO accumulates gradients across all world minibatches
+before updating, and resets recurrent memory only in terminated worlds.
+`--eval-every 10` records deterministic baseline and periodic evaluations.
+Average closest distance per world avoids selecting a batch just because its
+single best sample is closer. Initial and subsequent checkpoints are preserved;
+`best_reach_checkpoint` identifies the lowest average closest-distance checkpoint,
+which is a reaching metric, not proof of harvesting success.
+
+`benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
+and `--camera`. It reports policy transitions/s separately from physics steps/s.
+Training reports also include optimizer time and optimized sample count. A
+transition is one policy action in one world, not a complete harvesting episode.
+W&B losses, rewards and throughput are not proof of improved harvesting.
+
+On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
+about 157,000 policy transitions/s including PPO updates (three-update screen,
+64 steps per rollout, 200 Hz physics, 25 Hz 64x64 RGBD). All collected samples
+were used for optimization. This is a single-fruit approximate reaching workload;
+more fruit, higher camera resolution or longer episodes can change throughput.
+The numerical checks passed, but no successful harvest was observed. A ten-update
+screen also showed worse reaching distance despite lower loss; do not select a
+policy by loss alone. Live experiment metrics are in
+[W&B](https://wandb.ai/juampab/Thekenyos).
+
 `scripts/check_deformable_backend.py` checks real flex contact against ground,
 other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
 jaw, applies gravity, holds, opens, and checks release. Device-side checks latch

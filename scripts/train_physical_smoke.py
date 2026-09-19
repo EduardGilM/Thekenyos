@@ -13,6 +13,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
+from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 
 SCHEMA = 'physical-reach-rgbd-r84/v1'
 
@@ -161,7 +162,7 @@ def update(policy, optimizer, rows, bootstrap):
                 vision_changed=True, action_changed=True)
 
 
-def run(args):
+def _run(args, training_log):
     import torch
     from treesim.kiwi_rl.runtime import BatchedDeformableRuntime
     from treesim.kiwi_rl.physical_rollout import BatchedPhysicalRollout, RuntimeReachReward
@@ -172,13 +173,10 @@ def run(args):
     torch.set_num_threads(1)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    if args.output.exists():
-        raise FileExistsError('Preserve existing training outputs')
     manifest = json.loads((args.scene / 'manifest.json').read_text())
     gate = read_contact_gate(args.contact_gate, manifest, max_penetration_m=.002)
     if not gate['accepted']:
         raise RuntimeError(f'Contact evidence failed the hackathon screen: {gate}')
-    args.output.mkdir(parents=True)
     started = time.monotonic()
     def fresh_episode():
         # Reusing MJWarp state after reset produced nonfinite values in live
@@ -226,7 +224,9 @@ def run(args):
         del adapter
         policy.train()
     reports = []
+    transitions = 0
     for iteration in range(args.updates):
+        update_started = time.monotonic()
         adapter = fresh_episode()
         teacher = PrivilegedReachTeacher(adapter.runtime) if args.algorithm == 'imitation' else None
         rows, bootstrap = collect(adapter, policy, args.steps, gait, control_dt=args.control_dt,
@@ -262,8 +262,14 @@ def run(args):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
         torch.set_rng_state(saved['rng']['torch'])
         torch.cuda.set_rng_state_all(saved['rng']['cuda'])
+        transitions += len(rows) * args.worlds
+        metrics.update(transitions=transitions,
+            transitions_per_second=len(rows) * args.worlds / (time.monotonic() - update_started),
+            elapsed_seconds=time.monotonic() - started)
         metrics.update(event='optimizer_update', update=completed, checkpoint=str(checkpoint), sha16=digest)
         reports.append(metrics)
+        training_log.log(metrics, step=completed)
+        training_log.log_checkpoint(checkpoint, step=completed)
         print(json.dumps(metrics), flush=True)
         del adapter
     adapter = fresh_episode()
@@ -284,8 +290,36 @@ def run(args):
                         fallen=evaluation[-1]['terminated'].cpu().tolist(),
                         sensor_only=True, note='short deterministic reach evaluation; no harvesting success claim'),
         elapsed_seconds=time.monotonic() - started)
+    report['wandb_url'] = training_log.url
+    training_log.log({
+        'evaluation/final_distance_m': float(np.mean(evaluation[-1]['distance'])),
+        'evaluation/closest_distance_m': float(np.min([row['distance'] for row in evaluation])),
+        'evaluation/fall_fraction': float(evaluation[-1]['terminated'].float().mean()),
+        'evaluation/reward_mean': float(torch.stack([row['reward'] for row in evaluation]).mean()),
+    }, step=completed + 1)
     (args.output / 'report.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
     print(json.dumps(report), flush=True)
+    return report
+
+
+def run(args):
+    if args.output.exists():
+        raise FileExistsError('Preserve existing training outputs')
+    args.output.mkdir(parents=True)
+    training_log = TrainingLog(args.output, {
+        'approximations': {'policy_input': 'rgbd+r84', 'fruit': 'deformable'},
+        'exptseed': args.seed,
+        'worlds': args.worlds,
+        'rates': {'control_dt_s': args.control_dt},
+    }, wandb_mode=args.wandb_mode, wandb_project=args.wandb_project,
+       wandb_entity=args.wandb_entity, wandb_name=args.wandb_name,
+       upload_checkpoints=args.upload_checkpoints)
+    try:
+        report = _run(args, training_log)
+    except Exception:
+        training_log.finish(success=False)
+        raise
+    training_log.finish(success=True)
     return report
 
 
@@ -309,6 +343,7 @@ def main():
     parser.add_argument('--imitation-epochs', type=int, default=32)
     parser.add_argument('--camera', choices=('hand_color_sensor', 'hand_depth_sensor'),
                         default='hand_color_sensor')
+    add_training_log_args(parser)
     args = parser.parse_args()
     if not 1 <= args.imitation_epochs <= 1000:
         parser.error('Imitation epochs must be within 1 to 1000')
