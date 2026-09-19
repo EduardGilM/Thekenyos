@@ -763,10 +763,18 @@ FAST_SCENE=/path/to/near-scene GAIT_CHECKPOINT=/path/to/verified-gait.pt \
 ```
 
 The closer pose changes only the six arm joints and their initial motor targets.
-Guidance rewards approach, first bilateral contact sustained for 0.1 seconds,
-retained detachment, and movement toward the basket. Detachment guidance requires
-a current sustained bilateral grasp; positive guidance is removed on physical
-failure, so damaging a fruit cannot earn a detachment bonus. Checkpoint selection
+The `potential-harvest/v1` reward uses `gamma * Phi(next) - Phi(current)`
+with gamma 0.999, matching PPO. Phi is bounded from 0 to 8: attached reach
+credit (0–1 within 25 cm), current sustained grasp (2), and retained detachment
+(4 plus 0–2 for proximity to the basket within 1 m). These scales are engineering
+choices. Losing the grasp removes its credit; unheld falling fruit earns no
+carry credit. True terminals (including stalls) set the next potential to zero;
+hard timeouts retain it and bootstrap. There are no permanent event bonuses.
+The fixed guidance scale stays constant during training. The physical objective
+remains +20 collection, -5 failure, -0.5 stall and -0.001 per control step.
+Task and shaping means are logged separately. Evaluation uses guidance zero.
+This closes reward-accounting loopholes; successful learning is not yet proven.
+Checkpoint selection
 prioritizes success, then fewer physical failures, grasp rate, and approach
 distance; raw detachment rate cannot select a destructive policy. Bilateral contact requires
 more than 0.2 N on both actual finger/jaw bodies. This is a contact proxy, not
@@ -834,13 +842,25 @@ Student distillation uses a frozen learned teacher on states visited by the
 sensor-only student. It requires successful evaluation evidence for the exact
 teacher checkpoint; an unverified scripted controller is not a substitute.
 
-Counterfactual training remains disabled until there is a successful harvesting
-executor and verified continuation replay. `treesim/kiwi_rl/counterfactual.py`
-provides process-local snapshot checks for the fast profile, not a trained CTI
-decision head. Work package H in the Devin Megaplan requires matched initial
-state and randomness, a frozen continuation policy, final physical outcomes,
-separate counterfactual data, and equal-compute comparisons. Snapshot code alone
-does not establish any CTI learning benefit.
+Selective counterfactual training is available for the privileged teacher with
+`--cti --cti-worlds 16 --cti-every-seconds 120`. It runs a separate small batch
+with the same policy and scene. It rewinds before physical trouble or stalled
+progress, plus occasional exploratory roots, and compares the original action
+with short perturbed action segments under a frozen continuation policy.
+Branches use matched snapshot/RNG state and continue to an episode outcome.
+Unresolved timeouts and physically failed winners do not supply targets; merely
+postponing a stall is not an improvement. Successful collection and avoided
+physical failure are distinct outcomes, not interchangeable evidence of success.
+
+Accepted intervention actions feed a separate bounded-action imitation loss
+after factual PPO (`--cti-coef .1`). Branch rows never enter PPO. W&B logs CTI
+branch cost, selected worlds and loss separately. The launcher throttles CTI to
+a 15% amortized training wall-time target (one round can overshoot); the
+one-hour budget includes CTI work. Snapshots and the CTI runtime remain separate
+from the 4,096 main training worlds. This is an action-repair experiment, not
+proof of the Megaplan's high-level decision-head hypothesis or a learning gain.
+A reward-only control with matched total compute is still needed to measure CTI's
+contribution. Student observations and the teacher-distillation gate are unchanged.
 
 Train the privileged recurrent teacher on a training scene and evaluate it on a
 distinct held-out scene. The report includes the exact checkpoint hash, episode

@@ -3,6 +3,9 @@ import torch
 import warp as wp
 from treesim.basket import CENTER
 
+HARVEST_GAMMA = .999
+REWARD_PROFILE = 'potential-harvest/v1'
+
 
 def signals(runtime):
     pos = wp.to_torch(runtime.data.xpos)
@@ -23,8 +26,9 @@ def signals(runtime):
 
 class EpisodeProgress:
     """Track meaningful best-so-far progress, never motion or repeat events."""
-    def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1.):
+    def __init__(self, initial, *, stall_steps=200, max_steps=1500, guidance=1., gamma=HARVEST_GAMMA):
         self.stall_steps, self.max_steps, self.guidance = stall_steps, max_steps, guidance
+        self.gamma = gamma
         self.age = torch.zeros_like(initial['distance'], dtype=torch.long)
         self.stale = self.age.clone()
         self.closest = initial['distance'].clone()
@@ -33,6 +37,16 @@ class EpisodeProgress:
         self.ever_grasp = torch.zeros_like(self.closest, dtype=torch.bool)
         self.ever_detached = self.ever_grasp.clone()
         self.previous = {k:v.clone() for k,v in initial.items()}
+
+    @staticmethod
+    def potential(state):
+        # Bounded state credit, not permanent event bonuses. No angle or
+        # prescribed grasp sequence is part of the physical success criterion.
+        reach = (1 - state['distance'] / .25).clamp(0, 1)
+        carry = (1 - state['basket_distance'] / 1.).clamp(0, 1)
+        holding = state['holding'].float()
+        attached = (~state['detached']).float()
+        return attached * reach + 2 * holding + state['detached'].float() * holding * (4 + 2 * carry)
 
     def reset(self, mask, initial):
         self.age[mask] = 0; self.stale[mask] = 0
@@ -48,9 +62,9 @@ class EpisodeProgress:
         new_grasp = now['grasp'] & ~self.ever_grasp
         new_detach = now['detached'] & ~self.ever_detached
         reach_progress = ~now['detached'] & (now['distance'] < self.closest - .005)
-        carry_progress = now['detached'] & (now['basket_distance'] < self.best_basket - .005)
+        carry_progress = now['detached'] & now['holding'] & (now['basket_distance'] < self.best_basket - .005)
         pull_progress = now['holding'] & ~now['detached'] & (now['stem_force'] > self.best_force + .5)
-        progress = reach_progress | carry_progress | pull_progress | new_grasp | new_detach
+        progress = reach_progress | carry_progress | pull_progress | new_grasp | (new_detach & now['holding'])
         self.stale[progress] = 0
         self.closest[reach_progress] = now['distance'][reach_progress]
         # Start the carry progress tracker at actual detachment, not an old approach pose.
@@ -60,17 +74,13 @@ class EpisodeProgress:
         stalled = (self.stale >= self.stall_steps) & ~physical_done
         terminated = physical_done | stalled
         truncated = (self.age >= self.max_steps) & ~terminated
-        # Phase-specific progress differences avoid a reward jump at detachment.
-        reach = 5 * (self.previous['distance'] - now['distance'])
-        carry = 5 * (self.previous['basket_distance'] - now['basket_distance'])
-        guidance = torch.where(self.previous['detached'], carry, reach)
-        # A collision can detach fruit while also damaging it. Never pay a
-        # retained-detachment bonus for that hit or for a past, lost grasp.
-        guidance += 2 * new_grasp + 4 * (new_detach & now['holding'])
+        # Discount-consistent shaping telescopes over an episode. True terminals
+        # clear all credit; hard timeouts retain it for the critic bootstrap.
+        next_potential = torch.where(terminated, 0., self.potential(now))
+        self.shaping_reward = self.guidance * (self.gamma * next_potential - self.potential(self.previous))
         failure = physical_done & ~now['success']
-        guidance = torch.where(failure, torch.minimum(guidance, torch.zeros_like(guidance)), guidance)
-        reward = self.guidance * guidance - .001
-        reward += 20 * now['success'] - 5 * failure - .5 * stalled
+        self.task_reward = -.001 + 20 * now['success'] - 5 * failure - .5 * stalled
+        reward = self.task_reward + self.shaping_reward
         self.previous = {k:v.clone() for k,v in now.items()}
         return reward, terminated, truncated, stalled
 
@@ -134,7 +144,8 @@ class HarvestCollector:
                 if store:
                     row = dict(r84=obs,raw=raw,
                         logp=tanh_logprob(raw,mean,logstd),value=value,
-                        reward=reward,terminated=terminated,truncated=truncated,
+                        reward=reward,task_reward=self.progress.task_reward,
+                        shaping_reward=self.progress.shaping_reward,terminated=terminated,truncated=truncated,
                         timeout_value=timeout_value,reset=self.reset_mask.clone(),role=self.role,
                         kind='factual_on_policy')
                     if self.role == 'teacher':

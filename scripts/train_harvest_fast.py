@@ -37,11 +37,13 @@ def run(args):
     import torch
     import warp as wp
     from treesim.kiwi_rl.fast_runtime import FastRuntime
-    from treesim.kiwi_rl.harvest_training import HarvestCollector,episode_metrics
+    from treesim.kiwi_rl.harvest_training import HarvestCollector,episode_metrics,HARVEST_GAMMA,REWARD_PROFILE
     from treesim.kiwi_rl.control import load_gait_artifact
     from treesim.kiwi_rl.ppo import save_checkpoint,load_checkpoint
     from treesim.kiwi_rl.training_log import TrainingLog
     role=args.role
+    if args.cti and role != 'teacher':
+        raise ValueError('Selective CTI currently supports the privileged teacher only')
     if role == 'teacher' and (args.eval_scene is None or args.eval_worlds < args.teacher_min_eval_episodes):
         raise ValueError('Teacher runs need a distinct --eval-scene and enough eval worlds for the episode gate')
     if role == 'teacher':
@@ -69,7 +71,8 @@ def run(args):
     torch.backends.cudnn.allow_tf32=False
     args.output.mkdir(parents=True,exist_ok=False)
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
-    config.update(role=role,scope='full physical episodes; event-guided grasp-to-deposit curriculum',
+    config.update(role=role,scope='full physical episodes; bounded potential guidance',
+        reward_profile=REWARD_PROFILE,reward_gamma=HARVEST_GAMMA,
         actor_inputs=('privileged simulator state and R84' if role=='teacher' else 'gripper RGB-D and R84'),
         checkpoint_roles={'student':'sensor-only PPO actor','teacher':'privileged PPO actor'},
         solver_iterations=100,
@@ -83,8 +86,17 @@ def run(args):
         camera='hand_camera' if role=='student' else None
         runtime=FastRuntime(args.scene,worlds=args.worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'])
         evaluation_runtime=FastRuntime(args.eval_scene or args.scene,worlds=args.eval_worlds,camera=camera,arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],jaw_cap_Nm=config['jaw_cap_Nm'])
+        cti = None
+        if args.cti:
+            from treesim.kiwi_rl.selective_cti import SelectiveCTI, update_cti
+            cti_runtime=FastRuntime(args.scene,worlds=args.cti_worlds,camera=None,
+                arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'],
+                jaw_cap_Nm=config['jaw_cap_Nm'])
         config['epa_horizon_capacity']=runtime.epa_horizon_capacity
         gait=load_gait_artifact(args.gait_checkpoint).cuda().eval()
+        if args.cti:
+            cti=SelectiveCTI(cti_runtime,gait,stall_seconds=args.stall_seconds,
+                             max_episode_seconds=args.max_episode_seconds)
         policy=(build_privileged_policy() if role=='teacher' else build_policy()).cuda()
         teacher=None
         if args.teacher_checkpoint:
@@ -121,6 +133,8 @@ def run(args):
             rgb=runtime.pixels()[0,:3].permute(1,2,0).cpu().numpy()
             Image.fromarray((rgb.clip(0,1)*255).astype('uint8')).save(args.output/'policy-camera-start.png')
         started=time.monotonic(); last_eval=started
+        last_cti=started-args.cti_every_seconds
+        cti_seconds=0.; cti_transitions=0; cti_selected=0; cti_rounds=0
         index=0; total_episodes=0; evaluations=[dict(update=0,**baseline)]
         best=evaluation_score(baseline)
         best_checkpoint=initial; best_result=baseline
@@ -128,16 +142,37 @@ def run(args):
             tick=time.monotonic()
             rows,bootstrap,episodes=collector.collect(policy,gait,args.steps)
             teacher_coef=args.teacher_distill_weight if teacher is not None else 0.
-            metrics=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=.999,
+            metrics=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=collector.progress.gamma,
                            teacher_coef=teacher_coef)
             epochs=1
             for _ in range(2):
-                replay=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=.999,
+                replay=update(policy,optimizer,rows,bootstrap,args.minibatch_worlds,gamma=collector.progress.gamma,
                               check_replay=False,teacher_coef=teacher_coef)
                 if replay.get('early_stop'):
                     break
                 metrics.update(replay); epochs+=1
+            # Counterfactual targets use a separate loss after factual PPO.
+            # Target 15% amortized wall time; one in-progress round may overshoot.
+            elapsed=time.monotonic()-started
+            if (cti is not None and time.monotonic()-last_cti>=args.cti_every_seconds
+                    and cti_seconds <= .15*max(elapsed,1.)
+                    and (cti_rounds==0 or args.train_seconds-elapsed>60)):
+                cti_started=time.monotonic()
+                with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                    examples,cti_metrics=cti.run(policy)
+                    cti_metrics.update(update_cti(policy,optimizer,examples,coef=args.cti_coef))
+                cti_seconds+=time.monotonic()-cti_started
+                cti_transitions+=cti_metrics.get('transitions',0)
+                cti_selected+=cti_metrics.get('selected_worlds',0)
+                cti_rounds+=1;last_cti=time.monotonic()
+                metrics.update({f'cti/{k}':v for k,v in cti_metrics.items()})
+                del examples
+            if cti is not None:
+                metrics.update({'cti/total_seconds':cti_seconds,'cti/total_transitions':cti_transitions,
+                                'cti/total_selected_worlds':cti_selected,'cti/rounds':cti_rounds})
             metrics['optimizer_epochs']=epochs
+            metrics['reward/task_mean']=float(torch.stack([r['task_reward'] for r in rows]).mean())
+            metrics['reward/shaping_mean']=float(torch.stack([r['shaping_reward'] for r in rows]).mean())
             del rows,bootstrap
             torch.cuda.synchronize(); index+=1
             total_episodes+=len(episodes)
@@ -153,9 +188,6 @@ def run(args):
                 metrics.update({f'evaluation/{k}':v for k,v in result.items()})
                 score=evaluation_score(result)
                 if score>best:best,best_checkpoint,best_result=score,path,result
-                # Remove guidance only after unguided full-episode success is established.
-                if result['success']>=.5:collector.progress.guidance=.25
-                if result['success']>=.8:collector.progress.guidance=0.
                 last_eval=time.monotonic()
             log.log(metrics,step=index)
             print(json.dumps(metrics),flush=True)
@@ -169,6 +201,9 @@ def run(args):
             updates=index,transitions=index*args.worlds*args.steps,completed_episodes=total_episodes,
             elapsed_seconds=time.monotonic()-started,best_checkpoint=best_checkpoint,
             final_checkpoint=final,wandb_url=log.url,numerical_failures=sum(runtime.check()['flags']))
+        if cti is not None:
+            report['cti']=dict(rounds=cti_rounds,seconds=cti_seconds,transitions=cti_transitions,
+                               selected_worlds=cti_selected)
         if role=='teacher':
             report.update(role='teacher',schema=TEACHER_SCHEMA,
                 teacher_checkpoint=best_checkpoint,teacher_checkpoint_sha256=teacher_sha256,
@@ -182,7 +217,7 @@ def run(args):
         # Preserve bounded diagnostic evidence before a later process/reset can
         # discard it. This is the state at detection, not the first bad substep.
         import numpy as np
-        for name in ('runtime', 'evaluation_runtime'):
+        for name in ('runtime', 'evaluation_runtime', 'cti_runtime'):
             failed_runtime = locals().get(name)
             if failed_runtime is None:
                 continue
@@ -222,6 +257,10 @@ def main():
     p.add_argument('--teacher-report',type=Path)
     p.add_argument('--teacher-min-eval-episodes',type=int,default=32)
     p.add_argument('--teacher-distill-weight',type=float,default=1.)
+    p.add_argument('--cti',action='store_true',help='Selective counterfactual action repair for teacher training')
+    p.add_argument('--cti-worlds',type=int,default=16)
+    p.add_argument('--cti-every-seconds',type=float,default=120.)
+    p.add_argument('--cti-coef',type=float,default=.1)
     p.add_argument('--wandb-mode',choices=('disabled','online','offline'),default='online')
     a=p.parse_args()
     if not (1<=a.worlds<=4096 and 1<=a.eval_worlds<=256 and 2<=a.steps<=256 and
@@ -229,7 +268,8 @@ def main():
             1<=a.stall_seconds<a.max_episode_seconds<=60 and a.eval_every_seconds>=1 and
             0<a.arm_speed_rad_s<=2.5 and 1<=a.teacher_min_eval_episodes<=256 and
             (a.role!='teacher' or a.teacher_min_eval_episodes<=a.eval_worlds) and
-            0<=a.teacher_distill_weight<=10):
+            0<=a.teacher_distill_weight<=10 and 1<=a.cti_worlds<=64 and
+            a.cti_every_seconds>=1 and 0<a.cti_coef<=1 and (not a.cti or a.role=='teacher')):
         p.error('Invalid training size or duration')
     import torch,warp as wp
     wp.init(); stream=torch.cuda.Stream()

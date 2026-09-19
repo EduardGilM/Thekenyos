@@ -71,6 +71,77 @@ class ProgressTest(unittest.TestCase):
         reward,*_=p.step(hit,torch.tensor([False]))
         self.assertLess(reward.item(),0.)
 
+    def test_failed_sequence_cannot_keep_grasp_and_detachment_credit(self):
+        initial=state(distance=.1)
+        p=EpisodeProgress(initial,stall_steps=100)
+        sequence=[state(distance=.1,grasp=True),
+                  state(distance=.1,grasp=True,detached=True),
+                  state(distance=.1,grasp=True,detached=True)]
+        sequence[-1]['holding'][:]=False
+        sequence[-1]['failed'][:]=True
+        total=base=0.
+        for i,now in enumerate(sequence):
+            reward,*_=p.step(now,torch.tensor([i==2]))
+            total+=p.gamma**i*reward.item()
+            base+=p.gamma**i*p.task_reward.item()
+        self.assertLess(total,0.)
+        self.assertAlmostEqual(total,base-p.potential(initial).item(),places=5)
+
+    def test_terminal_shaping_telescopes_for_success_failure_and_stall(self):
+        # Different paths to the same terminal outcome cannot keep subgoal credit.
+        for outcome in ('success','failure','stall'):
+            for grasp in (False,True):
+                initial=state()
+                p=EpisodeProgress(initial,stall_steps=100)
+                total=base=0.
+                for i in range(5):
+                    now=state(distance=.02,grasp=grasp,detached=grasp,basket=.1)
+                    final=i==4
+                    if final and outcome=='stall': p.stall_steps=1
+                    now['success'][:]=final and outcome=='success'
+                    now['failed'][:]=final and outcome=='failure'
+                    reward,term,_,_=p.step(now,torch.tensor([final and outcome!='stall']))
+                    self.assertEqual(term.item(),final)
+                    total+=p.gamma**i*reward.item()
+                    base+=p.gamma**i*p.task_reward.item()
+                self.assertAlmostEqual(total,base-p.potential(initial).item(),places=5)
+
+    def test_unheld_fall_does_not_earn_credit_or_extend_stall(self):
+        initial=state(detached=True)
+        p=EpisodeProgress(initial,stall_steps=3)
+        for basket in (.6,.4,.2):
+            reward,_,_,stalled=p.step(state(detached=True,basket=basket),torch.tensor([False]))
+            self.assertLess(reward.item(),0.)
+            self.assertEqual(p.shaping_reward.item(),0.)
+        self.assertTrue(stalled.item())
+
+    def test_lost_grasp_removes_credit_and_regrasp_cannot_farm_it(self):
+        initial=state(grasp=True,detached=True)
+        p=EpisodeProgress(initial)
+        lost=state(grasp=True,detached=True);lost['holding'][:]=False
+        first,*_=p.step(lost,torch.tensor([False]))
+        self.assertLess(first.item(),-2.)
+        second,*_=p.step(initial,torch.tensor([False]))
+        self.assertLess((first+p.gamma*second).item(),0.)
+
+    def test_timeout_keeps_potential_for_bootstrap_and_reset_is_clean(self):
+        initial=state()
+        p=EpisodeProgress(initial,max_steps=1)
+        now=state(grasp=True)
+        reward,term,truncated,_=p.step(now,torch.tensor([False]))
+        self.assertFalse(term.item());self.assertTrue(truncated.item())
+        expected=p.gamma*p.potential(now)-p.potential(initial)-.001
+        torch.testing.assert_close(reward,expected)
+        p.reset(torch.tensor([True]),initial)
+        reward,*_=p.step(initial,torch.tensor([False]))
+        torch.testing.assert_close(reward,(p.gamma-1)*p.potential(initial)-.001)
+
+    def test_guidance_off_is_only_physical_objective(self):
+        p=EpisodeProgress(state(),guidance=0.)
+        reward,*_=p.step(state(grasp=True,detached=True),torch.tensor([False]))
+        self.assertAlmostEqual(reward.item(),-.001,places=6)
+        self.assertEqual(p.shaping_reward.item(),0.)
+
     def test_checkpoint_selection_rejects_destructive_detachment(self):
         import sys
         from pathlib import Path

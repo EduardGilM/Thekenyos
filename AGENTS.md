@@ -210,8 +210,10 @@ explicit `--role teacher` privileged actor/critic. Student distillation requires
 the exact teacher checkpoint and successful unguided evaluation report. Keep
 student observations RGB-D/R84 only and teacher parameters frozen during
 distillation. Run `tests.test_fast_teacher` for changes to this path.
-CTI remains gated on a competent executor and replay acceptance; process-local
-snapshots are a prerequisite, not evidence of CTI policy training or benefit.
+CTI requires replay acceptance and meaningful physical outcome comparisons, not
+a successful full harvest first. Early action-branch experiments may develop
+executor competence; keep their data separate from factual PPO. Process-local
+snapshots alone are not evidence of CTI policy training or benefit.
 
 ## Continuous visual leaf roof
 
