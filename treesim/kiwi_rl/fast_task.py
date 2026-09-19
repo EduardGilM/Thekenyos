@@ -51,13 +51,15 @@ def _contact_pass(
     if contact >= nacon[0]:
         return
     pair = geom[contact]
-    fruit_index = -1
+    fruit_index = int(-1)
     for index in range(MAX_FRUITS):
-        if index < fruit_count:
-            geom_id = fruit_geom[index]
-            if geom_id >= 0 and (pair[0] == geom_id or pair[1] == geom_id):
-                fruit_index = index
-                break
+        geom_id = fruit_geom[index]
+        matched = int(0)
+        if index < fruit_count and geom_id >= 0:
+            if pair[0] == geom_id or pair[1] == geom_id:
+                matched = int(1)
+        if fruit_index < 0 and matched != 0:
+            fruit_index = int(index)
     if fruit_index < 0:
         return
     world = worldid[contact]
@@ -67,11 +69,11 @@ def _contact_pass(
     other = pair[1] if pair[0] == fruit else pair[0]
     group = kind[other] if other >= 0 and other < kind.shape[0] else -1
     load = float(0.)
-    rows = 1
+    rows = int(1)
     if rows_per_contact > 1 and dim[contact] > 1:
-        rows = 2 * (dim[contact] - 1)
+        rows = int(2 * (dim[contact] - 1))
     if rows > address.shape[1]:
-        rows = address.shape[1]
+        rows = int(address.shape[1])
     for row_index in range(rows):
         row = address[contact, row_index]
         if row >= 0 and row < nefc[world]:
@@ -170,11 +172,13 @@ def _record(
             deposited[world, idx] = wp.uint8(1)
             harvested[world] = harvested[world] + 1
         if continue_after_success[world] != 0 and harvested[world] < required_harvests[world]:
-            next_i = -1
+            next_i = int(-1)
             for candidate in range(MAX_FRUITS):
+                free = int(0)
                 if candidate < fruit_count and deposited[world, candidate] == 0:
-                    next_i = candidate
-                    break
+                    free = int(1)
+                if next_i < 0 and free != 0:
+                    next_i = int(candidate)
             if next_i >= 0:
                 active_fruit[world] = next_i
                 settle_time[world] = 0.

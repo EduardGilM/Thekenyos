@@ -1,10 +1,20 @@
 import importlib.util
+from pathlib import Path
 import unittest
 
 import numpy as np
 
 
 GPU = importlib.util.find_spec('mujoco_warp') is not None and importlib.util.find_spec('warp') is not None
+
+
+class FastTaskKernelSourceTest(unittest.TestCase):
+    def test_contact_kernels_avoid_warp_break_and_constant_mutation(self):
+        text = Path(__file__).resolve().parents[1].joinpath('treesim/kiwi_rl/fast_task.py').read_text()
+        self.assertNotIn('\n                break', text)
+        self.assertIn('fruit_index = int(-1)', text)
+        self.assertIn('next_i = int(-1)', text)
+        self.assertIn('rows = int(1)', text)
 
 
 @unittest.skipUnless(GPU, 'MJWarp and Warp required')
