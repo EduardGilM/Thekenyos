@@ -41,6 +41,23 @@ def tanh_logprob(u, mu, logstd) -> "tensor":
     return logp - jacob
 
 
+def gaussian_entropy(logstd):
+    """Analytic differential entropy of N(μ, σ), nats. Peaked σ can make H < 0."""
+    torch = _torch()
+    ls = torch.clamp(logstd, -5.0, 1.0)
+    return (0.5 * (1.0 + float(np.log(2.0 * np.pi))) + ls).sum(-1)
+
+
+def tanh_gaussian_entropy(logstd, *, raw, mu):
+    """Monte-Carlo differential entropy of a=tanh(u), u~N(μ, σ).
+
+    This is −log π(a) for a freshly drawn pre-tanh sample. It is not Shannon
+    entropy of a discrete action and is allowed to be negative when the
+    squashed Gaussian is peaked (small σ).
+    """
+    return -tanh_logprob(raw, mu, logstd)
+
+
 def compute_gae(rewards, values, terminated, truncated, gamma, lam,
                 final_value=0.0, *, next_values=None):
     """GAE; timeouts bootstrap from V(final obs), terminals do not.

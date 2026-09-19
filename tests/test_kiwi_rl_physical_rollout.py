@@ -25,7 +25,7 @@ class _Runtime:
         self.control = _Control()
         self.model = SimpleNamespace(jnt_range=np.tile([[-1., 1.]], (19, 1)),
                                      jnt_limited=np.ones(19, dtype=bool))
-    def capture(self): return {"hand_camera": np.zeros((1, 5, 16, 16), dtype=np.float32)}
+    def capture(self): return {"hand_color_sensor": np.zeros((1, 5, 16, 16), dtype=np.float32)}
     def advance(self, control_dt_s=.04): self.step_index += round(control_dt_s / self.dt)
 
 
@@ -40,5 +40,9 @@ class PhysicalRolloutTest(unittest.TestCase):
         observation = BatchedPhysicalRollout(_Runtime()).observe()
         self.assertEqual(observation.rgbd.shape, (1, 5, 16, 16))
         self.assertIn("fruit_truth", observation.unsupported_fields)
+
+    def test_invented_body_mast_is_not_a_policy_camera(self):
+        with self.assertRaises(ValueError):
+            BatchedPhysicalRollout(_Runtime(), camera="body_camera")
 
 if __name__ == "__main__": unittest.main()
