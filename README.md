@@ -764,7 +764,11 @@ FAST_SCENE=/path/to/near-scene GAIT_CHECKPOINT=/path/to/verified-gait.pt \
 
 The closer pose changes only the six arm joints and their initial motor targets.
 Guidance rewards approach, first bilateral contact sustained for 0.1 seconds,
-retained detachment, and movement toward the basket. Bilateral contact requires
+retained detachment, and movement toward the basket. Detachment guidance requires
+a current sustained bilateral grasp; positive guidance is removed on physical
+failure, so damaging a fruit cannot earn a detachment bonus. Checkpoint selection
+prioritizes success, then fewer physical failures, grasp rate, and approach
+distance; raw detachment rate cannot select a destructive policy. Bilateral contact requires
 more than 0.2 N on both actual finger/jaw bodies. This is a contact proxy, not
 proof of secure retention. Physical success still requires detached fruit settled
 inside the basket without hand contact. Evaluations complete one unguided episode
@@ -774,6 +778,23 @@ discount 0.999 at 50 Hz. W&B and local JSONL report complete-episode outcomes.
 The wall-time training budget excludes startup compilation and initial evaluation;
 the final evaluation can add a few seconds. No successful harvest is claimed by
 the launcher itself.
+
+Harvest training limits joint-target increments to 0.5 rad/s by default
+(`--arm-speed-rad-s`), compared with 2.5 rad/s in the historical reaching
+benchmark. This reduces abrupt approaches without changing the robot's collision
+geometry, torque limits or the damage threshold. The rollout renderer reads this
+control rate from the checkpoint. A six-second deterministic probe of the earlier
+destructive policy avoided its original 0.54-second impact at the lower rate;
+it also made no contact, so this is not a demonstrated grasp. Failed runs write
+`failure.json` as well as their log and failed W&B status.
+
+The first sustained run stopped after 960 seconds because the contact solver
+reached its 20-iteration limit, not because a contact buffer filled. `FastRuntime`
+now permits up to 100 solver iterations with the existing early-convergence
+tolerance. Backend failure bits are latched across resets and decoded in a compact
+error report. Nonfinite state, capacity overflow and solver-limit failures still
+stop training. Checkpoints record this runtime solver override; older video replays
+retain their original 20-iteration setting.
 
 On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
 about 157,000 policy transitions/s including PPO updates (three-update screen,

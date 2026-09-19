@@ -6,7 +6,7 @@ from treesim.kiwi_rl.harvest_training import EpisodeProgress
 
 def state(distance=.2,basket=.8,grasp=False,detached=False,force=0.):
     return dict(distance=torch.tensor([distance]),basket_distance=torch.tensor([basket]),
-        grasp=torch.tensor([grasp]),detached=torch.tensor([detached]),touching=torch.tensor([grasp]),
+        grasp=torch.tensor([grasp]),holding=torch.tensor([grasp]),detached=torch.tensor([detached]),touching=torch.tensor([grasp]),
         stem_force=torch.tensor([force]),success=torch.tensor([False]),failed=torch.tensor([False]))
 
 
@@ -46,9 +46,38 @@ class ProgressTest(unittest.TestCase):
         p.step(state(grasp=True),zero)
         slipped=state(grasp=True,force=2.)
         slipped['touching']=torch.tensor([False])
+        slipped['holding']=torch.tensor([False])
         p.step(slipped,zero)
         self.assertEqual(p.stale.item(),1)
         self.assertEqual(p.best_force.item(),0)
+
+    def test_damaging_detachment_never_gets_positive_guidance(self):
+        for grasp in (False, True):
+            p=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+            hit=state(distance=.01,grasp=grasp,detached=True)
+            hit['touching']=torch.tensor([True])
+            hit['failed']=torch.tensor([True])
+            reward,term,_,_=p.step(hit,torch.tensor([True]))
+            self.assertTrue(term.item())
+            self.assertLessEqual(reward.item(),-5.)
+
+    def test_touching_without_current_grasp_does_not_earn_detachment_bonus(self):
+        p=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+        hit=state(detached=True,grasp=True)
+        hit['holding']=torch.tensor([False])
+        # An earlier grasp can be logged, but it is not a retained detachment.
+        p.ever_grasp[:]=True
+        reward,*_=p.step(hit,torch.tensor([False]))
+        self.assertLess(reward.item(),0.)
+
+    def test_checkpoint_selection_rejects_destructive_detachment(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+        from train_harvest_fast import evaluation_score
+        intact=dict(success=0.,physical_failure=0.,grasp=0.,closest_distance_m=.2)
+        destructive=dict(success=0.,physical_failure=1.,grasp=1.,closest_distance_m=.01)
+        self.assertGreater(evaluation_score(intact),evaluation_score(destructive))
 
 
 @unittest.skipUnless(os.environ.get('FAST_SCENE') and os.environ.get('GAIT_CHECKPOINT'),'JP scene and gait required')

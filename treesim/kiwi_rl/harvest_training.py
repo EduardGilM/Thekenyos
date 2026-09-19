@@ -13,6 +13,7 @@ def signals(runtime):
     return dict(distance=wp.to_torch(runtime._distance).clone(),
                 basket_distance=(pos[:, runtime.fruit_body] - basket).norm(dim=-1),
                 grasp=wp.to_torch(task.ever_grasped).bool().clone(),
+                holding=wp.to_torch(task.stable_grasp).bool().clone(),
                 detached=wp.to_torch(task.detached).bool().clone(),
                 touching=wp.to_torch(task.hand_contact).bool().clone(),
                 stem_force=wp.to_torch(task.stem_force).clone(),
@@ -48,7 +49,7 @@ class EpisodeProgress:
         new_detach = now['detached'] & ~self.ever_detached
         reach_progress = ~now['detached'] & (now['distance'] < self.closest - .005)
         carry_progress = now['detached'] & (now['basket_distance'] < self.best_basket - .005)
-        pull_progress = now['grasp'] & now['touching'] & ~now['detached'] & (now['stem_force'] > self.best_force + .5)
+        pull_progress = now['holding'] & ~now['detached'] & (now['stem_force'] > self.best_force + .5)
         progress = reach_progress | carry_progress | pull_progress | new_grasp | new_detach
         self.stale[progress] = 0
         self.closest[reach_progress] = now['distance'][reach_progress]
@@ -63,9 +64,13 @@ class EpisodeProgress:
         reach = 5 * (self.previous['distance'] - now['distance'])
         carry = 5 * (self.previous['basket_distance'] - now['basket_distance'])
         guidance = torch.where(self.previous['detached'], carry, reach)
-        guidance += 2 * new_grasp + 4 * (new_detach & now['touching'])
+        # A collision can detach fruit while also damaging it. Never pay a
+        # retained-detachment bonus for that hit or for a past, lost grasp.
+        guidance += 2 * new_grasp + 4 * (new_detach & now['holding'])
+        failure = physical_done & ~now['success']
+        guidance = torch.where(failure, torch.minimum(guidance, torch.zeros_like(guidance)), guidance)
         reward = self.guidance * guidance - .001
-        reward += 20 * now['success'] - 5 * (physical_done & ~now['success']) - .5 * stalled
+        reward += 20 * now['success'] - 5 * failure - .5 * stalled
         self.previous = {k:v.clone() for k,v in now.items()}
         return reward, terminated, truncated, stalled
 

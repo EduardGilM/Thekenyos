@@ -40,11 +40,14 @@ def main():
         stream = torch.cuda.Stream()
         states = []
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
-            rt = FastRuntime(a.scene, worlds=1, camera='hand_camera')
-            gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
             policy = build_policy().cuda().eval()
-            load_checkpoint(a.checkpoint, {'student': policy}, expected_meta={
-                'camera': 'hand_camera', 'camera_profile': rt.manifest['cameras']})
+            scene_manifest = json.loads((a.scene/'manifest.json').read_text())
+            saved = load_checkpoint(a.checkpoint, {'student': policy}, expected_meta={
+                'camera': 'hand_camera', 'camera_profile': scene_manifest['cameras']})
+            arm_speed = saved['meta'].get('config', {}).get('arm_speed_rad_s', 2.5)
+            solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
+            rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
+            gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
             memory = torch.zeros(1,64,device='cuda')
             with torch.no_grad():
                 for i in range(a.steps):
@@ -64,7 +67,7 @@ def main():
                             success=bool(info['success'][0]), final_distance_m=float(info['distance_m'][0]),
                             numerical=numerical,
                             arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
-                            training_horizon_seconds=1.28)
+                            arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
             np.savez_compressed(a.output/'states.npz', qpos=np.array(states))
             robot = rt.manifest['robot']
     model = mujoco.MjModel.from_xml_path(str(a.scene/'scene.xml'))

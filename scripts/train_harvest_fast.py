@@ -9,6 +9,12 @@ from train_fast import update
 from train_physical_smoke import build_policy
 
 
+def evaluation_score(result):
+    # A destructive detachment must not beat an intact, unsuccessful reach.
+    return (result['success'], -result['physical_failure'], result['grasp'],
+            -result['closest_distance_m'])
+
+
 def evaluate(runtime, policy, gait, args):
     from treesim.kiwi_rl.harvest_training import HarvestCollector,episode_metrics
     collector = HarvestCollector(runtime,stall_seconds=args.stall_seconds,
@@ -40,12 +46,13 @@ def run(args):
     config={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
     config.update(scope='full physical episodes; event-guided grasp-to-deposit curriculum',
         actor_inputs='gripper RGB-D and R84 only',
+        solver_iterations=100,
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     log=TrainingLog(args.output,config,wandb_mode=args.wandb_mode,wandb_project='Thekenyos',
                     wandb_entity='juampab',wandb_name=args.output.name)
     try:
-        runtime=FastRuntime(args.scene,worlds=args.worlds,camera='hand_camera')
-        evaluation_runtime=FastRuntime(args.eval_scene or args.scene,worlds=args.eval_worlds,camera='hand_camera')
+        runtime=FastRuntime(args.scene,worlds=args.worlds,camera='hand_camera',arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'])
+        evaluation_runtime=FastRuntime(args.eval_scene or args.scene,worlds=args.eval_worlds,camera='hand_camera',arm_speed_rad_s=args.arm_speed_rad_s,solver_iterations=config['solver_iterations'])
         gait=load_gait_artifact(args.gait_checkpoint).cuda().eval()
         policy=build_policy().cuda()
         if args.initialize_from:
@@ -72,7 +79,7 @@ def run(args):
         Image.fromarray((rgb.clip(0,1)*255).astype('uint8')).save(args.output/'policy-camera-start.png')
         started=time.monotonic(); last_eval=started
         index=0; total_episodes=0; evaluations=[dict(update=0,**baseline)]
-        best=(baseline['success'],baseline['detached'],baseline['grasp'],-baseline['closest_distance_m'])
+        best=evaluation_score(baseline)
         best_checkpoint=initial
         while time.monotonic()-started < args.train_seconds:
             tick=time.monotonic()
@@ -98,7 +105,7 @@ def run(args):
                 result=evaluate(evaluation_runtime,policy,gait,args)
                 evaluations.append(dict(update=index,**result))
                 metrics.update({f'evaluation/{k}':v for k,v in result.items()})
-                score=(result['success'],result['detached'],result['grasp'],-result['closest_distance_m'])
+                score=evaluation_score(result)
                 if score>best:best,best_checkpoint=score,path
                 # Remove guidance only after unguided full-episode success is established.
                 if result['success']>=.5:collector.progress.guidance=.25
@@ -109,7 +116,7 @@ def run(args):
         final=checkpoint(index)
         result=evaluate(evaluation_runtime,policy,gait,args)
         evaluations.append(dict(update=index,**result))
-        score=(result['success'],result['detached'],result['grasp'],-result['closest_distance_m'])
+        score=evaluation_score(result)
         if score>best:best,best_checkpoint=score,final
         report=dict(config=config,baseline=baseline,evaluation=result,evaluations=evaluations,
             updates=index,transitions=index*args.worlds*args.steps,completed_episodes=total_episodes,
@@ -118,7 +125,9 @@ def run(args):
         (args.output/'report.json').write_text(json.dumps(report,indent=2)+'\n')
         log.log({f'final/{k}':v for k,v in result.items()},step=index+1)
         print(json.dumps(report),flush=True)
-    except BaseException:
+    except BaseException as exc:
+        (args.output/'failure.json').write_text(json.dumps(dict(
+            error_type=type(exc).__name__,error=str(exc),config=config),indent=2)+'\n')
         log.finish(success=False)
         raise
     log.finish()
@@ -139,11 +148,13 @@ def main():
     p.add_argument('--stall-seconds',type=float,default=4.)
     p.add_argument('--max-episode-seconds',type=float,default=30.)
     p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--arm-speed-rad-s',type=float,default=.5)
     p.add_argument('--wandb-mode',choices=('disabled','online','offline'),default='online')
     a=p.parse_args()
     if not (1<=a.worlds<=4096 and 1<=a.eval_worlds<=256 and 2<=a.steps<=256 and
             1<=a.minibatch_worlds<=1024 and 1<=a.train_seconds<=7200 and
-            1<=a.stall_seconds<a.max_episode_seconds<=60 and a.eval_every_seconds>=1):
+            1<=a.stall_seconds<a.max_episode_seconds<=60 and a.eval_every_seconds>=1 and
+            0<a.arm_speed_rad_s<=2.5):
         p.error('Invalid training size or duration')
     import torch,warp as wp
     wp.init(); stream=torch.cuda.Stream()

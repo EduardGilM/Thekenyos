@@ -17,6 +17,22 @@ import warp as wp
 from .control_warp import WarpSpotControl, _set_gait_targets
 
 
+_OVERFLOW_BITS = {
+    'NEFC': 1 << 0,
+    'NJMAX_NNZ': 1 << 1,
+    'BROADPHASE': 1 << 2,
+    'NARROWPHASE': 1 << 3,
+    'CCD': 1 << 4,
+    'HFIELD': 1 << 5,
+    'CONTACT_MATCH': 1 << 6,
+    'NVMAX': 1 << 7,
+    'EPA_HORIZON': 1 << 8,
+    'ITERATIONS': 1 << 9,
+    'LS_ITERATIONS': 1 << 10,
+    'TACTILE': 1 << 11,
+}
+
+
 @wp.kernel
 def _action_increment(actions: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
                       lower: wp.array(dtype=float), upper: wp.array(dtype=float),
@@ -63,7 +79,9 @@ def _latch_state(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
     if index < qvel.shape[1] and not wp.isfinite(qvel[world, index]):
         wp.atomic_or(flags, world, 1)
     if index == 0 and overflow[world] != 0:
-        wp.atomic_or(flags, world, 2)
+        # Keep the generic failure bit and the backend's actual OverflowType
+        # mask. The latter survives a subsequent backend reset.
+        wp.atomic_or(flags, world, 2 | (overflow[world] << 3))
 
 
 @wp.kernel
@@ -120,13 +138,18 @@ class FastRuntime:
     """
 
     def __init__(self, directory, worlds=64, control_dt=.02, camera=None,
-                 resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0'):
+                 resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0',
+                 arm_speed_rad_s=2.5, solver_iterations=100):
         if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
             raise ValueError('worlds must be an integer in [1, 4096]')
         if not np.isfinite(control_dt) or control_dt <= 0:
             raise ValueError('control_dt must be finite and positive')
         if int(nconmax) < 1 or int(njmax) < 1:
             raise ValueError('nconmax and njmax must be positive')
+        if not np.isfinite(arm_speed_rad_s) or arm_speed_rad_s <= 0:
+            raise ValueError('arm_speed_rad_s must be finite and positive')
+        if int(solver_iterations) < 1 or int(solver_iterations) > 1000:
+            raise ValueError('solver_iterations must be an integer in [1, 1000]')
         from .fast_scene import load_fast_scene
         import mujoco
         import mujoco_warp as mw
@@ -141,6 +164,9 @@ class FastRuntime:
         if self.manifest.get('schema') != 'fast-training-scene/v1':
             raise ValueError('Invalid fast-training scene schema')
         self.worlds, self.control_dt = worlds, float(control_dt)
+        self.arm_speed_rad_s = float(arm_speed_rad_s)
+        self.solver_iterations = int(solver_iterations)
+        self.model.opt.iterations = self.solver_iterations
         self.dt = float(self.model.opt.timestep)
         self.substeps = round(self.control_dt / self.dt)
         if self.substeps not in (4, 10) or not math.isclose(self.substeps * self.dt, self.control_dt, abs_tol=1e-9):
@@ -198,7 +224,8 @@ class FastRuntime:
             with wp.ScopedCapture() as capture:
                 wp.launch(_action_increment, dim=(self.worlds, 7),
                           inputs=[self._actions, self.control.targets, self._action_lower,
-                                  self._action_upper, self._flags, 2.5 * self.control_dt], device=self.device)
+                                  self._action_upper, self._flags,
+                                  self.arm_speed_rad_s * self.control_dt], device=self.device)
                 for _ in range(self.substeps):
                     self.control.apply()
                     mw.step(self.gpu_model, self.data)
@@ -316,7 +343,64 @@ class FastRuntime:
         return self.observe()
 
     def check(self):
-        flags = self._flags.numpy()
-        if np.any(flags):
-            raise RuntimeError(f'GPU numerical failure flags={flags.tolist()}')
-        return {'flags': flags.tolist()}
+        flags = np.asarray(self._flags.numpy(), dtype=np.int64)
+        if not np.any(flags):
+            return {'flags': flags.tolist(), 'flagged_world_count': 0}
+        diagnostics = self._diagnostics(flags)
+        raise RuntimeError(
+            'GPU numerical failure: '
+            f"flagged_worlds={diagnostics['flagged_world_count']}; "
+            f"flag_bits={diagnostics['flag_bit_counts']}; "
+            f"overflow_bits={diagnostics['overflow_bit_counts']}; "
+            f"needed={diagnostics['needed']}"
+        )
+
+    def _diagnostics(self, flags):
+        """Return compact backend overflow and capacity diagnostics.
+
+        ``overflow`` is a bitmask from MJWarp, while ``nacon`` is a batched
+        count. The sparse Jacobian row arrays provide a lower bound for the
+        non-zero capacity required by the rows that were written.
+        """
+        # MJWarp may clear data.overflow during reset; use the latched copy
+        # first and merge the live value when it is still present.
+        overflow = np.asarray(self.data.overflow.numpy(), dtype=np.int64)
+        overflow |= flags >> 3
+        flag_bits = {
+            name: int(np.count_nonzero(flags & bit))
+            for name, bit in (("NONFINITE", 1), ("OVERFLOW", 2), ("INVALID_ACTION", 4))
+            if np.any(flags & bit)
+        }
+        overflow_bits = {
+            name: int(np.count_nonzero(overflow & bit))
+            for name, bit in _OVERFLOW_BITS.items()
+            if np.any(overflow & bit)
+        }
+        needed = {
+            'contacts_total': int(np.max(np.asarray(self.data.nacon.numpy(), dtype=np.int64))),
+            'contacts_capacity_total': int(self.data.naconmax),
+            'constraints_max': int(np.max(np.asarray(self.data.nefc.numpy(), dtype=np.int64))),
+            'constraints_capacity': int(self.data.njmax),
+            'constraint_nnz_capacity': int(self.data.njmax_nnz),
+        }
+        try:
+            row_adr = np.asarray(self.data.efc.J_rowadr.numpy(), dtype=np.int64)
+            row_nnz = np.asarray(self.data.efc.J_rownnz.numpy(), dtype=np.int64)
+            nefc = np.asarray(self.data.nefc.numpy(), dtype=np.int64).reshape(-1)
+            lower_bounds = [
+                int(np.max(row_adr[w, :max(0, min(int(n), row_adr.shape[1]))] +
+                          row_nnz[w, :max(0, min(int(n), row_nnz.shape[1]))]))
+                for w, n in enumerate(nefc)
+                if n > 0
+            ]
+            if lower_bounds:
+                needed['constraint_nnz_lower_bound'] = max(lower_bounds)
+        except (AttributeError, IndexError, ValueError):
+            pass
+        return {
+            'flags': flags.tolist(),
+            'flagged_world_count': int(np.count_nonzero(flags)),
+            'flag_bit_counts': flag_bits,
+            'overflow_bit_counts': overflow_bits,
+            'needed': needed,
+        }
