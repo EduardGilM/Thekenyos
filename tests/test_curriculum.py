@@ -148,8 +148,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['start_side_y_m'], 0.10)
         self.assertEqual(preset['start_y_span_m'], 0.04)
         self.assertEqual(preset['start_z_span_m'], 0.08)
-        self.assertEqual(preset['deposit_reward'], 10000.0)
-        self.assertEqual(preset['fail_reward'], -10000.0)
+        self.assertEqual(preset['deposit_reward'], 30.0)
+        self.assertEqual(preset['fail_reward'], -30.0)
         self.assertEqual(preset['ppo_clip'], 0.5)
         self.assertEqual(preset['ppo_lr'], 3e-3)
         self.assertEqual(preset['ppo_epochs'], 20)
@@ -275,6 +275,13 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('self._deposit_w', src)
         self.assertIn('self._fail_w', src)
         self.assertIn('timed_out[world] != 0 and success[world] == 0', src)
+        self.assertIn('def _prefer_hover_after_success', src)
+        self.assertIn('self._hover_start_index', src)
+        self.assertIn('self._easy_catalog_n', src)
+        self.assertLess(
+            src.index('self._prefer_hover_after_success(mask)'),
+            src.index('self.task.reset(mask_wp)'),
+        )
         self.assertIn('[1, 10000]', src)
         self.assertIn('[-10000, 0]', src)
         self.assertIn('[0, 50]', src)

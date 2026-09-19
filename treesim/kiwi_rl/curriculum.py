@@ -100,17 +100,16 @@ EASY_PRESET = {
     # around CENTER + [inset_x, 0], not this side Y.
     'start_side_y_m': 0.10,
     'start_z_span_m': 0.08,
-    # +20 lost to -25 ground; +500 still vanished after advantage
-    # normalization and the 0.2 PPO clip. ±10000 is an engineering
-    # jackpot / miss so a rare settled deposit or a *timeout* can move
-    # the student. Ground dumps keep W_LOSS only: paying −10000 on every
-    # spill made easy33 flee the crate. Not a measured value.
-    'deposit_reward': 10000.0,
-    'fail_reward': -10000.0,
+    # Actor advantages are whitened (scale-invariant). A 300–10000 jackpot
+    # only inflates critic MSE and the value bootstrap. +30 is encodable;
+    # the actor pull does not change. Timeout miss stays the same scale.
+    # Ground dumps keep W_LOSS only.
+    'deposit_reward': 30.0,
+    'fail_reward': -30.0,
     # Clip 0.5, low entropy, high LR and more epochs: push π toward
-    # the ±10000 terminals. Value coef stays small so critic MSE does
-    # not steal the actor step. Extra PPO epochs may continue up to KL 1.0
-    # so a 3e-3 learning rate is not stopped after the first pass.
+    # the ±30 terminals. Value coef stays small so residual critic MSE
+    # does not steal the actor step. Extra PPO epochs may continue up
+    # to KL 1.0 so a 3e-3 learning rate is not stopped after the first pass.
     'ppo_clip': 0.5,
     'ppo_lr': 3e-3,
     'ppo_epochs': 20,

@@ -700,6 +700,10 @@ class FastRuntime:
             drop_q, drop_err, start_qs, start_errs = self._solve_easy_poses(initial.qpos)
             from .reach_teacher import hold_close_fracs
             self._hover_q = wp.array(drop_q, dtype=float, device=self.device)
+            self._easy_catalog_n = int(start_qs.shape[0])
+            hover = np.asarray(drop_q, dtype=np.float32).reshape(1, 6)
+            start_qs = np.concatenate([start_qs, hover], axis=0)
+            self._hover_start_index = int(start_qs.shape[0] - 1)
             self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
             self._easy_start_index = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
@@ -981,7 +985,9 @@ class FastRuntime:
         frac = float(far_frac)
         if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
             raise ValueError('far_frac must be finite in [0, 1]')
-        n = int(self._easy_start_q.shape[0])
+        n = int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0]))
+        if n < 1:
+            raise ValueError('easy start catalog is empty')
         idx = np.asarray(rng.integers(0, n, size=self.worlds), dtype=np.int32)
         close = float(self._chosen_close_frac)
         jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
@@ -995,6 +1001,27 @@ class FastRuntime:
             'easy_hold_close_mean': close,
             'easy_hold_index_mean': close,
         }
+
+    def _prefer_hover_after_success(self, mask):
+        """A world that just deposited respawns at hover, not a far catalog draw.
+
+        Read ``task.success`` before ``task.reset`` clears it. Fruit stays free.
+        """
+        success = np.asarray(self.task.success.numpy(), dtype=np.uint8).reshape(-1)
+        if success.size != self.worlds or not success.any():
+            return
+        if mask is None:
+            hit = success != 0
+        else:
+            import torch
+            if not isinstance(mask, torch.Tensor):
+                return
+            hit = (success != 0) & (np.asarray(mask.detach().cpu().numpy(), dtype=np.uint8) != 0)
+        if not np.any(hit):
+            return
+        idx = np.asarray(self._easy_start_index.numpy(), dtype=np.int32).reshape(-1)
+        idx[hit] = int(self._hover_start_index)
+        self._easy_start_index.assign(idx)
 
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
@@ -1086,7 +1113,8 @@ class FastRuntime:
             'open_rim_z_m': self._open_rim_z_m,
             'hover_error_m': float(self.hover_error_m),
             'easy_start_error_m': float(self.easy_start_error_m),
-            'n_start_poses': int(self._easy_start_q.shape[0]),
+            'n_start_poses': int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0])),
+            'hover_start_index': int(getattr(self, '_hover_start_index', -1)),
             'n_hold_levels': int(self._hold_close_fracs.shape[0]),
             'hold_close_frac': float(self._chosen_close_frac),
             'hold_sweep_slip_m': None if self._hold_sweep is None else self._hold_sweep.get('chosen_slip_m'),
@@ -1210,6 +1238,8 @@ class FastRuntime:
                               self._reward, self._terminated, self._previous_potential,
                               self._previous_damage, self._previous_action, self._episode_time,
                               self._timed_out, self._shaping_ref], device=self.device)
+            if self._easy:
+                self._prefer_hover_after_success(mask)
             self.task.reset(mask_wp)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)

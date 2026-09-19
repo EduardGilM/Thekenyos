@@ -620,6 +620,8 @@ def run(args):
             config['hold_sweep_load_N'] = easy_info.get('hold_sweep_load_N')
             config['hold_sweep_rows'] = easy_info.get('hold_sweep_rows')
             config['grasp_local_m'] = easy_info.get('grasp_local_m')
+            config['hover_start_index'] = easy_info.get('hover_start_index')
+            config['n_start_poses'] = easy_info.get('n_start_poses')
             config['weld'] = False
             (args.output / 'config.json').write_text(
                 json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
