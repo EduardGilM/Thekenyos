@@ -218,6 +218,7 @@ class PhysicsParams:
     terrain_amplitude: float = 0.03    # max bump height [m] (orchard alley ~1-3 cm)
     terrain_wavelength: float = 1.8    # dominant bump size [m]
     terrain_extent: float = 14.0       # half-extent of the field [m]
+    terrain_seed: int | None = None
     # Soft velocity limiter (anti-blowup): bodies faster than this get a strong
     # braking force (inactive below the caps, so normal physics is untouched).
     # This is what stops a pick-clamp-scale yank on a 5 g twig (the viewer

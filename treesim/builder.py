@@ -120,7 +120,8 @@ class TreeModel:
 
 # --------------------------------------------------------------------------- #
 def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
-                 pitch: tuple | None = None, grid: tuple = (1, 1)):
+                 pitch: tuple | None = None, grid: tuple = (1, 1),
+                 kiwi: bool = False):
     """Gentle value-noise heightfield terrain (one global static shape, like
     the ground plane — all envs share it, so batching is unaffected).
 
@@ -131,6 +132,15 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
     every displayed env is then identical to the terrain the physics (and the
     base z-servo) samples at the origin, and every trunk sits on a flattened
     disc.  Amplitude is kept small enough to drive over."""
+    for name, inclusive in (("terrain_amplitude", True),
+                            ("terrain_wavelength", False),
+                            ("terrain_extent", False)):
+        value = float(getattr(ph, name))
+        if not np.isfinite(value) or (value < 0. if inclusive else value <= 0.):
+            raise ValueError(f"{name} must be finite and {'nonnegative' if inclusive else 'positive'}")
+    seed = ph.terrain_seed if ph.terrain_seed is not None else seed
+    if not isinstance(seed, (int, np.integer)) or seed < 0:
+        raise ValueError("terrain seed must be a nonnegative integer")
     rng = np.random.default_rng((int(seed) * 2654435761) & 0x7FFFFFFF)
     if pitch is None:
         ext = float(ph.terrain_extent)
@@ -144,12 +154,15 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
 
     # ONE periodic tile of value noise (wrapped lattice, bilinear upsample);
     # sample j sits at x = -px/2 + j*px/res so tile copies join seamlessly
-    res_x = int(np.clip(round(px / 0.16), 48, 160))
-    res_y = int(np.clip(round(py / 0.16), 48, 160))
+    spacing, max_resolution = (.08, 384) if kiwi else (.16, 160)
+    res_x = int(np.clip(round(px / spacing), 48, max_resolution))
+    res_y = int(np.clip(round(py / spacing), 48, max_resolution))
     tile = np.zeros((res_y, res_x))
-    for octave, w in enumerate([1.0, 0.5, 0.25]):
-        wl = ph.terrain_wavelength / (octave + 1)
-        cx, cy = max(int(round(px / wl)), 2), max(int(round(py / wl)), 2)
+    weights = (1., .35, .12) if kiwi else (1., .5, .25)
+    for octave, w in enumerate(weights):
+        wl = ph.terrain_wavelength / (2**octave if kiwi else octave + 1)
+        cx = max(int(round(px / max(wl, px / res_x))), 2)
+        cy = max(int(round(py / max(wl, py / res_y))), 2)
         g = rng.standard_normal((cy, cx))
         u = np.arange(res_x) * cx / res_x
         v = np.arange(res_y) * cy / res_y
@@ -157,6 +170,9 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
         i0 = v.astype(int) % cy
         j1, i1 = (j0 + 1) % cx, (i0 + 1) % cy
         fu, fv = u - u.astype(int), (v - v.astype(int))[:, None]
+        if kiwi:
+            fu = fu**3 * (fu * (fu*6. - 15.) + 10.)
+            fv = fv**3 * (fv * (fv*6. - 15.) + 10.)
         top = g[np.ix_(i0, j0)] * (1 - fu) + g[np.ix_(i0, j1)] * fu
         bot = g[np.ix_(i1, j0)] * (1 - fu) + g[np.ix_(i1, j1)] * fu
         tile += w * (top + (bot - top) * fv)
@@ -165,8 +181,11 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
     # flatten under the trunk (tile centre == env origin == trunk)
     xx = (np.arange(res_x) / res_x - 0.5) * px
     yy = (np.arange(res_y) / res_y - 0.5) * py
-    r = np.hypot(xx[None, :], yy[:, None])
-    tile *= np.clip((r - 0.9) / 1.4, 0.0, 1.0)
+    if not kiwi:
+        r = np.hypot(xx[None, :], yy[:, None])
+        tile *= np.clip((r - 0.9) / 1.4, 0.0, 1.0)
+    tile -= tile.min()
+    tile /= max(tile.max(), 1e-9)
 
     # tile the displayed grid (+ apron); duplicate the far row/col so the
     # heightfield's corner-inclusive sampling keeps the exact tile period
@@ -183,10 +202,17 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
                             nrow=fld.shape[0], ncol=fld.shape[1],
                             hx=hx, hy=hy,
                             min_z=lift, max_z=float(ph.terrain_amplitude) + lift)
+    contact = b.ShapeConfig(mu=0.9, restitution=0.0, collision_group=1)
+    attributes = {}
+    if kiwi:
+        if "mujoco:geom_priority" not in b.custom_attributes:
+            newton.solvers.SolverMuJoCo.register_custom_attributes(b)
+        contact.ke, contact.kd = 250000., 1000.
+        attributes["mujoco:geom_priority"] = 1
     b.add_shape_heightfield(
         heightfield=hf,
         xform=wp.transform(wp.vec3(centre[0], centre[1], 0.0), wp.quat_identity()),
-        cfg=b.ShapeConfig(mu=0.9, restitution=0.0, collision_group=1),
+        cfg=contact, custom_attributes=attributes,
         color=(0.30, 0.36, 0.22), label="terrain")
 
     amp = float(ph.terrain_amplitude)
@@ -198,7 +224,7 @@ def _add_terrain(b: "newton.ModelBuilder", ph, seed: int,
         v = (float(y) / _py + 0.5) * _ry
         if _w:
             u, v = u % _rx, v % _ry
-        elif not (0.0 <= u <= _rx - 1 and 0.0 <= v <= _ry - 1):
+        elif not (0.0 <= u <= _rx and 0.0 <= v <= _ry):
             return 0.0
         j0, i0 = int(u) % _rx, int(v) % _ry
         j1, i1 = (j0 + 1) % _rx, (i0 + 1) % _ry
@@ -680,10 +706,17 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         aabbs.append(env_aabb)      # DR headroom: union over the perturbed skeletons
     env_pitch, env_cols, env_rows = _env_grid(aabbs, num_envs)
     terrain_fn = None
+    kiwi_terrain = config.lsystem.kind == "pergola"
+    if config.physics.terrain and kiwi_terrain:
+        post_bases = [p[:2] for s in skeleton for p in (s.start, s.end) if abs(p[2]) < 1e-6]
+        if config.physics.terrain_extent < np.abs(post_bases).max() + .5:
+            raise ValueError("terrain_extent must cover the pergola posts with a 0.5 m margin")
+        if config.physics.terrain_amplitude + .004 >= config.lsystem.target_height - .25:
+            raise ValueError("terrain_amplitude must leave clearance below the kiwi canopy")
     if num_envs == 1:
         builder.add_ground_plane()
         if getattr(config.physics, "terrain", False):
-            terrain_fn = _add_terrain(builder, config.physics, config.seed)
+            terrain_fn = _add_terrain(builder, config.physics, config.seed, kiwi=kiwi_terrain)
         model = builder.finalize(device=config.device)
     else:
         main = newton.ModelBuilder()
@@ -695,7 +728,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         main.add_ground_plane()
         if getattr(config.physics, "terrain", False):
             terrain_fn = _add_terrain(main, config.physics, config.seed,
-                                      pitch=env_pitch, grid=(env_cols, env_rows))
+                                      pitch=env_pitch, grid=(env_cols, env_rows), kiwi=kiwi_terrain)
         model = main.finalize(device=config.device)
 
     # per-env body/joint counts (ground is global, adds neither), for offsetting

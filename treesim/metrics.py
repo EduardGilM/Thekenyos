@@ -138,6 +138,18 @@ class Metrics:
             counters=dict(self.counters),
         )
         if sim is not None:
+            cfg = sim.tree.config
+            ph = cfg.physics
+            out["scene_seed"] = cfg.seed
+            out["terrain"] = dict(enabled=ph.terrain,
+                seed=ph.terrain_seed if ph.terrain_seed is not None else cfg.seed,
+                amplitude_m=ph.terrain_amplitude, wavelength_m=ph.terrain_wavelength,
+                half_extent_m=ph.terrain_extent,
+                layout="continuous_noise" if cfg.lsystem.kind == "pergola" else "trunk_pad",
+                noise="quintic_value_fbm" if cfg.lsystem.kind == "pergola" else "bilinear_value",
+                octaves=3)
+            if sim.kiwi_damage is not None:
+                out["kiwi_contact_damage"] = sim.kiwi_damage.metrics()
             if sim.breaker is not None:
                 out["branches_snapped"] = int(sim.breaker.broken_count)
             if sim.apples is not None:
