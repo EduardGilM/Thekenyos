@@ -154,7 +154,16 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('far_frac_cap', run_src)
         self.assertIn('ppo_clip', run_src)
         self.assertIn('ppo_adv_std_cap', run_src)
+        self.assertIn('ppo_unclip_positive', run_src)
+        self.assertIn('ppo_success_repeat', run_src)
+        self.assertIn('ppo_imitation_coef', run_src)
+        self.assertIn('deposit_return_sum', inspect.getsource(train_fast))
+        self.assertIn('harvest_jackpot_sum', run_src)
+        self.assertIn('reward_transition_mean', inspect.getsource(train_fast))
+        self.assertIn('success_window_return_mean', inspect.getsource(train_fast))
         self.assertIn('normalize_advantages', inspect.getsource(train_fast))
+        self.assertIn('success_world_order', inspect.getsource(train_fast))
+        self.assertIn('ppo_actor_surrogate', inspect.getsource(train_fast))
         self.assertIn('adv_std_cap', inspect.getsource(train_fast.update))
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
@@ -167,7 +176,7 @@ class FastTrainerCLITest(unittest.TestCase):
     def test_advantage_std_cap_keeps_jackpot_large(self):
         import torch
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-        from train_fast import normalize_advantages
+        from train_fast import normalize_advantages, ppo_actor_surrogate, success_world_order
         adv = torch.zeros(1000)
         adv[0] = 10000.0
         full = normalize_advantages(adv)
@@ -175,6 +184,59 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertGreater(float(capped[0]), float(full[0]) * 5.0)
         with self.assertRaises(ValueError):
             normalize_advantages(adv, std_cap=0.0)
+        flag = torch.tensor([True, False, True])
+        order = success_world_order(flag, repeat=3)
+        self.assertEqual(int(order.numel()), 7)
+        self.assertEqual(int((order == 0).sum()), 3)
+        self.assertEqual(int((order == 2).sum()), 3)
+        self.assertEqual(int((order == 1).sum()), 1)
+        none = success_world_order(torch.zeros(4, dtype=torch.bool), repeat=24)
+        self.assertEqual(list(none.tolist()), [0, 1, 2, 3])
+        ratio = torch.tensor([2.0])
+        pos = torch.tensor([1.0])
+        clipped = float(ppo_actor_surrogate(ratio, pos, clip=0.2, unclip_positive=False))
+        pulled = float(ppo_actor_surrogate(ratio, pos, clip=0.2, unclip_positive=True))
+        self.assertAlmostEqual(clipped, -1.2, places=5)
+        self.assertAlmostEqual(pulled, -2.0, places=5)
+        neg = torch.tensor([-1.0])
+        self.assertAlmostEqual(
+            float(ppo_actor_surrogate(ratio, neg, clip=0.2, unclip_positive=True)),
+            float(ppo_actor_surrogate(ratio, neg, clip=0.2, unclip_positive=False)))
+        with self.assertRaises(ValueError):
+            success_world_order(flag, repeat=0)
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_reward_mean_is_per_world_window_return(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import build_policy, update
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        torch.manual_seed(0)
+        torch.set_num_threads(1)
+        policy = build_policy()
+        memory = torch.zeros(2, 64)
+        rows = []
+        jackpot = torch.tensor([10000.0, 1.0])
+        with torch.no_grad():
+            for t in range(4):
+                reset = torch.tensor([t == 0, t == 0])
+                memory *= (~reset)[:, None]
+                rgbd, r84 = torch.randn(2, 5, 16, 16), torch.randn(2, 84)
+                mean, logstd, value, memory = policy(rgbd, r84, memory)
+                raw = mean + 0.05 * torch.randn_like(mean)
+                reward = jackpot if t == 0 else torch.zeros(2)
+                success = torch.tensor([1, 0]) if t == 0 else torch.zeros(2, dtype=torch.int64)
+                rows.append(dict(
+                    rgbd=rgbd, r84=r84, raw=raw, logp=tanh_logprob(raw, mean, logstd),
+                    value=value, reward=reward, success=success,
+                    terminated=torch.tensor([t == 0, False]), reset=reset))
+        result = update(policy, torch.optim.Adam(policy.parameters(), lr=3e-4),
+                        rows, torch.zeros(2), minibatch_worlds=2)
+        self.assertAlmostEqual(result['reward_mean'], 5000.5, places=4)
+        self.assertAlmostEqual(result['reward_transition_mean'], 1250.125, places=4)
+        self.assertAlmostEqual(result['success_window_return_mean'], 10000.0, places=3)
+        self.assertAlmostEqual(result['deposit_return_sum'], 10000.0, places=3)
+        self.assertEqual(result['ppo_success_worlds'], 1)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):

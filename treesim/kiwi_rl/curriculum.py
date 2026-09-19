@@ -105,12 +105,19 @@ EASY_PRESET = {
     'deposit_reward': 10000.0,
     # Wide clip / high grad cap / capped adv std: a jackpot stays large
     # after whitening. Value coef stays small so critic MSE on +10000 does
-    # not steal the actor step. Extra PPO epochs may continue up to KL 0.15.
-    'ppo_clip': 0.5,
+    # not steal the actor step. Extra PPO epochs may continue up to KL 0.50.
+    'ppo_clip': 0.8,
     'ppo_grad_clip': 5.0,
     'ppo_adv_std_cap': 1.0,
     'ppo_value_coef': 0.05,
-    'ppo_target_kl': 0.15,
+    'ppo_target_kl': 0.50,
+    # Rare deposits still vanish in a 3072-world mean. Clone those worlds,
+    # leave A>0 unclipped, and add a self-imitation term on harvest
+    # trajectories. Not a privileged arm teacher.
+    'ppo_unclip_positive': True,
+    'ppo_success_repeat': 24,
+    'ppo_imitation_coef': 2.0,
+    'ppo_success_epochs': 4,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,

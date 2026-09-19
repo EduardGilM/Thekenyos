@@ -139,6 +139,11 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertIn('basket_distance_mean_m', html_easy)
             self.assertIn('ground_contact_worlds', html_easy)
             self.assertIn('harvest_successes', html_easy)
+        from treesim.kiwi_rl import training_monitor as mon
+        mon_src = inspect.getsource(mon)
+        self.assertIn('deposit_return_sum', mon_src)
+        self.assertIn('harvest_jackpot_sum', mon_src)
+        self.assertIn('success_window_return_mean', mon_src)
 
     def test_curriculum_preview_matches_stage_reset(self):
         deposit = curriculum_preview_from_checkpoint({

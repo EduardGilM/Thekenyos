@@ -226,9 +226,41 @@ def normalize_advantages(advantages, std_cap=None):
     return centered / (torch.clamp(std, max=cap) + 1e-8)
 
 
+def success_world_order(success_any, repeat=1):
+    """Keep every world, then append extra copies of worlds that harvested."""
+    import torch
+    if not isinstance(repeat, int) or isinstance(repeat, bool) or not 1 <= repeat <= 64:
+        raise ValueError('success_repeat must be an integer in [1, 64]')
+    flag = success_any.to(dtype=torch.bool).reshape(-1)
+    order = torch.arange(flag.numel(), device=flag.device)
+    if repeat == 1 or not bool(flag.any()):
+        return order
+    extra = flag.nonzero(as_tuple=False).reshape(-1)
+    return torch.cat([order, extra.repeat(repeat - 1)])
+
+
+def ppo_actor_surrogate(ratio, advantages, clip, unclip_positive=False):
+    """Clipped PPO surrogate. Positive advantages may skip the ratio cap.
+
+    Clipping both sides keeps a rare deposit from moving π. Leaving
+    A>0 unclipped is an engineering pull, not a proven harvest method.
+    """
+    import torch
+    if not np_finite(clip) or not 0.05 <= clip <= 2.0:
+        raise ValueError('clip must be finite in [0.05, 2]')
+    surr = ratio * advantages
+    clipped = ratio.clamp(1.0 - clip, 1.0 + clip) * advantages
+    if unclip_positive:
+        chosen = torch.where(advantages > 0, surr, torch.minimum(surr, clipped))
+    else:
+        chosen = torch.minimum(surr, clipped)
+    return -chosen.mean()
+
+
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coef=0.005,
            gamma=0.9996, epochs=1, dim_mask=None, clip=0.2, grad_clip=0.5,
-           adv_std_cap=None, value_coef=0.5, target_kl=0.03):
+           adv_std_cap=None, value_coef=0.5, target_kl=0.03, unclip_positive=False,
+           success_repeat=1, imitation_coef=0.0):
     import torch
     from treesim.kiwi_rl.ppo import (
         compute_gae_torch, gaussian_entropy, tanh_gaussian_entropy, tanh_logprob,
@@ -241,6 +273,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
         raise ValueError('value_coef must be finite in [0, 2]')
     if not np_finite(target_kl) or not 0.01 <= target_kl <= 1.0:
         raise ValueError('target_kl must be finite in [0.01, 1]')
+    if not np_finite(imitation_coef) or not 0.0 <= imitation_coef <= 20.0:
+        raise ValueError('imitation_coef must be finite in [0, 20]')
     rewards = torch.stack([r['reward'] for r in rows])
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
@@ -253,7 +287,13 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                                    ended, truncated, gamma, .95)
     returns = (advantages + values).detach()
     advantages = normalize_advantages(advantages, std_cap=adv_std_cap)
-    batch_size = min(minibatch_worlds, rewards.shape[1])
+    if 'success' in rows[0]:
+        success_any = torch.stack([r['success'] for r in rows]).any(dim=0)
+    else:
+        success_any = torch.zeros(rewards.shape[1], dtype=torch.bool, device=rewards.device)
+    order = success_world_order(success_any, success_repeat)
+    n_order = int(order.numel())
+    batch_size = min(minibatch_worlds, n_order)
     metrics = []
     if not isinstance(epochs, int) or not 1 <= epochs <= 8:
         raise ValueError('epochs must be an integer in [1, 8]')
@@ -268,20 +308,20 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     for epoch in range(epochs):
         optimizer.zero_grad(set_to_none=True)
         stop_extra = False
-        for start in range(0, rewards.shape[1], batch_size):
-            sl = slice(start, start + batch_size)
-            memory = memory_root[sl].clone()
+        for start in range(0, n_order, batch_size):
+            idx = order[start:start + batch_size]
+            memory = memory_root[idx].clone()
             logps, predictions, entropies, gaussians = [], [], [], []
             for row in rows:
-                memory = memory * (~row['reset'][sl])[:, None]
-                mean, logstd, value, memory = policy(row['rgbd'][sl], row['r84'][sl], memory)
-                new_logp = tanh_logprob(row['raw'][sl], mean, logstd, dim_mask=dim_mask)
+                memory = memory * (~row['reset'][idx])[:, None]
+                mean, logstd, value, memory = policy(row['rgbd'][idx], row['r84'][idx], memory)
+                new_logp = tanh_logprob(row['raw'][idx], mean, logstd, dim_mask=dim_mask)
                 logps.append(new_logp)
                 predictions.append(value)
                 draw = mean + logstd.exp() * torch.randn_like(mean)
                 entropies.append(tanh_gaussian_entropy(logstd, raw=draw, mu=mean, dim_mask=dim_mask))
                 gaussians.append(gaussian_entropy(logstd, dim_mask=dim_mask))
-            logratio = torch.stack(logps) - torch.stack([r['logp'][sl] for r in rows])
+            logratio = torch.stack(logps) - torch.stack([r['logp'][idx] for r in rows])
             ratio = logratio.exp()
             kl = ((ratio - 1.) - logratio).mean()
             if not torch.isfinite(kl):
@@ -293,13 +333,15 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 optimizer.zero_grad(set_to_none=True)
                 stop_extra = True
                 break
-            lo, hi = 1.0 - clip, 1.0 + clip
-            actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(lo, hi) * advantages[:, sl]).mean()
-            critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
+            actor = ppo_actor_surrogate(ratio, advantages[:, idx], clip, unclip_positive)
+            critic = .5 * (torch.stack(predictions) - returns[:, idx]).square().mean()
             entropy = torch.stack(entropies).mean()
             entropy_g = torch.stack(gaussians).mean()
-            loss = actor + value_coef * critic - entropy_coef * entropy
-            (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
+            sil = rewards.new_zeros(())
+            if imitation_coef > 0.0 and bool(success_any[idx].any()):
+                sil = -torch.stack(logps)[:, success_any[idx]].mean()
+            loss = actor + value_coef * critic - entropy_coef * entropy + imitation_coef * sil
+            (loss * (idx.numel() / float(n_order))).backward()
             if dim_mask is None:
                 action_dim = int(logstd.shape[-1])
             else:
@@ -316,18 +358,36 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     entropy = sum(m[2] for m in metrics) / len(metrics)
     entropy_g = sum(m[3] for m in metrics) / len(metrics)
     action_dim = max(m[4] for m in metrics)
+    window = rewards.sum(dim=0)
+    n_success = int(success_any.sum().item())
+    if 'success' in rows[0]:
+        success_steps = torch.stack([r['success'] for r in rows]).to(dtype=rewards.dtype)
+        deposit_mass = float((rewards * success_steps).sum())
+        success_window = float(window[success_any].mean()) if n_success else 0.0
+    else:
+        deposit_mass = 0.0
+        success_window = 0.0
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
                 entropy=entropy, entropy_gaussian=entropy_g,
                 entropy_per_dim=entropy / action_dim,
                 entropy_kind='tanh_gaussian_differential_nats',
                 logstd_mean=float(policy.logstd.detach().mean()),
                 grad_norm=float(grad), minibatches=len(metrics),
-                optimized_transitions=int(rewards.numel() * completed_epochs),
+                optimized_transitions=int(rewards.shape[0] * n_order * completed_epochs),
                 ppo_epochs_completed=completed_epochs,
                 ppo_clip=float(clip), ppo_grad_clip=float(grad_clip),
                 ppo_value_coef=float(value_coef), ppo_target_kl=float(target_kl),
                 ppo_adv_std_cap=None if adv_std_cap is None else float(adv_std_cap),
-                reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)))
+                ppo_unclip_positive=int(bool(unclip_positive)),
+                ppo_success_repeat=int(success_repeat),
+                ppo_imitation_coef=float(imitation_coef),
+                ppo_success_worlds=n_success,
+                reward_mean=float(window.mean()),
+                reward_transition_mean=float(rewards.mean()),
+                reward_std=float(window.std(unbiased=False)),
+                success_window_return_mean=success_window,
+                deposit_return_sum=deposit_mass,
+                deposit_return_mean=deposit_mass / float(rewards.shape[1]))
 
 
 def np_finite(value):
@@ -523,6 +583,10 @@ def run(args):
             config['ppo_adv_std_cap'] = float(EASY_PRESET['ppo_adv_std_cap'])
             config['ppo_value_coef'] = float(EASY_PRESET['ppo_value_coef'])
             config['ppo_target_kl'] = float(EASY_PRESET['ppo_target_kl'])
+            config['ppo_unclip_positive'] = bool(EASY_PRESET['ppo_unclip_positive'])
+            config['ppo_success_repeat'] = int(EASY_PRESET['ppo_success_repeat'])
+            config['ppo_imitation_coef'] = float(EASY_PRESET['ppo_imitation_coef'])
+            config['ppo_success_epochs'] = int(EASY_PRESET['ppo_success_epochs'])
             config['start_over_opening'] = EASY_PRESET['start_over_opening']
             config['start_open_radius_m'] = EASY_PRESET['start_open_radius_m']
             config['start_inset_x_m'] = EASY_PRESET['start_inset_x_m']
@@ -607,12 +671,21 @@ def run(args):
                 ppo_std_cap = float(EASY_PRESET['ppo_adv_std_cap'])
                 ppo_value = float(EASY_PRESET['ppo_value_coef'])
                 ppo_kl = float(EASY_PRESET['ppo_target_kl'])
+                ppo_unclip = bool(EASY_PRESET['ppo_unclip_positive'])
+                ppo_repeat = int(EASY_PRESET['ppo_success_repeat'])
+                ppo_sil = float(EASY_PRESET['ppo_imitation_coef'])
+                ppo_epochs = int(args.ppo_epochs)
+                if int(torch.stack([r['success'] for r in rows]).any(dim=0).sum()) > 0:
+                    ppo_epochs = max(ppo_epochs, int(EASY_PRESET['ppo_success_epochs']))
             else:
                 ppo_clip, ppo_grad, ppo_std_cap, ppo_value, ppo_kl = 0.2, 0.5, None, 0.5, 0.03
+                ppo_unclip, ppo_repeat, ppo_sil, ppo_epochs = False, 1, 0.0, int(args.ppo_epochs)
             metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
-                             entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=args.ppo_epochs,
+                             entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=ppo_epochs,
                              dim_mask=dim_mask, clip=ppo_clip, grad_clip=ppo_grad,
-                             adv_std_cap=ppo_std_cap, value_coef=ppo_value, target_kl=ppo_kl)
+                             adv_std_cap=ppo_std_cap, value_coef=ppo_value, target_kl=ppo_kl,
+                             unclip_positive=ppo_unclip, success_repeat=ppo_repeat,
+                             imitation_coef=ppo_sil)
             torch.cuda.synchronize()
             duration = time.monotonic() - began
             metrics.update(update=iteration+1, transitions=(iteration+1)*args.steps*args.worlds,
@@ -624,6 +697,8 @@ def run(args):
                 distance_mean_closest_m=float(torch.stack([r['distance'] for r in rows]).min(dim=0).values.mean()),
                 terminal_transitions=int(torch.stack([r['terminated'] for r in rows]).sum()),
                 harvest_successes=int(torch.stack([r['success'] for r in rows]).sum()),
+                harvest_jackpot_sum=float(int(metrics['ppo_success_worlds']) * (
+                    float(EASY_PRESET['deposit_reward']) if easy else 20.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
