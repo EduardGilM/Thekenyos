@@ -1011,19 +1011,26 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 rim_z = float(SIZE[2])
                 tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
                 release_center = bool(EASY_PRESET.get('release_at_center'))
+                release_opening = bool(EASY_PRESET.get('release_over_opening'))
+                inset = float(EASY_PRESET.get('release_opening_inset_m', 0.04))
+                open_xy = float(EASY_PRESET['open_xy_m'])
+                rotation = np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3)
                 desired = scripted_jaw_target(
-                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z,
-                    tcp_xy=tcp_xyz, release_at_center=release_center)
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=open_xy, rim_z_m=rim_z,
+                    tcp_xy=tcp_xyz, release_at_center=release_center,
+                    rotation=rotation, release_over_opening=release_opening, inset_m=inset)
                 slip = float(np.linalg.norm(tcp_xyz - data.xpos[fruit_body]))
                 over = fruit_in_release_zone(
-                    fruit_xyz, basket_xyz, open_xy_m=0.15, rim_z_m=rim_z,
-                    tcp_xyz=tcp_xyz, release_at_center=release_center)
+                    fruit_xyz, basket_xyz, open_xy_m=open_xy, rim_z_m=rim_z,
+                    tcp_xyz=tcp_xyz, release_at_center=release_center,
+                    rotation=rotation, release_over_opening=release_opening, inset_m=inset)
                 hold = adapt_scripted_hold_q(
                     hold, opened, closed, slip_m=slip, over_basket=over)
                 easy_hold_q = hold
                 desired = scripted_jaw_target(
-                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=0.15, rim_z_m=rim_z,
-                    tcp_xy=tcp_xyz, release_at_center=release_center)
+                    fruit_xyz, basket_xyz, hold, opened, open_xy_m=open_xy, rim_z_m=rim_z,
+                    tcp_xy=tcp_xyz, release_at_center=release_center,
+                    rotation=rotation, release_over_opening=release_opening, inset_m=inset)
                 arm = np.asarray(arm, dtype=np.float64).copy()
                 arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
             controller.update_gait(data, command)

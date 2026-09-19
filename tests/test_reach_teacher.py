@@ -3,11 +3,12 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     axial_mouth_local, damped_least_squares, bounded_damped_least_squares,
-    hover_tcp_local_m, hover_tcp_world_m, basket_chassis_aabb_m,
+    fruit_in_release_zone, hover_tcp_local_m, hover_tcp_world_m, basket_chassis_aabb_m,
     easy_over_opening_local_m, easy_start_local_m, grasp_local_near_tcp,
     hold_close_fracs, jaw_hold_q, jaw_open_closed_from_gaps,
-    level_wrist_local_m, offset_grasp_local, scripted_jaw_target,
-    select_hold_close, tcp_outside_basket, tcp_over_opening_above_rim,
+    level_wrist_local_m, offset_grasp_local, opening_half_xy_m, over_opening_xy,
+    scripted_jaw_target, select_hold_close, tcp_outside_basket,
+    tcp_over_opening_above_rim,
 )
 
 
@@ -198,6 +199,38 @@ class ReachTeacherMathTest(unittest.TestCase):
             tcp_xyz=[1.0, 0.0, 0.70], release_at_center=True))
         with self.assertRaises(ValueError):
             scripted_jaw_target([np.nan, 0.0], [0.0, 0.0], -1.2, 0.0, open_xy_m=0.15)
+
+    def test_release_over_opening_is_wider_than_center_disk(self):
+        hx, hy = opening_half_xy_m(inset_m=0.04)
+        self.assertGreater(hx, 0.20)
+        self.assertLess(hx, 0.27)
+        self.assertGreater(hy, 0.12)
+        self.assertLess(hy, 0.19)
+        basket = [0.0, 0.0, 0.145]
+        front = [0.20, 0.05, 0.70]
+        tcp = [0.18, 0.04, 0.70]
+        self.assertFalse(fruit_in_release_zone(
+            front, basket, open_xy_m=0.15, rim_z_m=0.28,
+            tcp_xyz=tcp, release_at_center=True))
+        self.assertTrue(over_opening_xy(front, tcp, basket, inset_m=0.04))
+        self.assertTrue(fruit_in_release_zone(
+            front, basket, open_xy_m=0.15, rim_z_m=0.28,
+            tcp_xyz=tcp, release_over_opening=True, inset_m=0.04))
+        self.assertAlmostEqual(
+            scripted_jaw_target(front, basket, -1.2, 0.0, open_xy_m=0.15, rim_z_m=0.28,
+                                tcp_xy=tcp, release_over_opening=True, inset_m=0.04),
+            0.0)
+        side = [0.0, 0.18, 0.70]
+        self.assertFalse(over_opening_xy(side, side, basket, inset_m=0.04))
+        yaw = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertFalse(over_opening_xy(front, tcp, basket, yaw, inset_m=0.04))
+        self.assertTrue(over_opening_xy([0.05, 0.20, 0.70], [0.05, 0.20, 0.70],
+                                       basket, yaw, inset_m=0.04))
+        with self.assertRaises(ValueError):
+            opening_half_xy_m(inset_m=0.20)
+        with self.assertRaises(ValueError):
+            fruit_in_release_zone(front, basket, open_xy_m=0.15, rim_z_m=0.28,
+                                 release_over_opening=True)
 
     def test_grasp_offset_stays_between_pads_not_at_tcp(self):
         tcp = np.array([0.0, 0.0, 0.10])

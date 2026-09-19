@@ -495,6 +495,8 @@ def run(args):
             config['start_side_y_m'] = EASY_PRESET['start_side_y_m']
             config['shape_hand_and_fruit'] = easy_info.get('shape_hand_and_fruit')
             config['release_at_center'] = easy_info.get('release_at_center')
+            config['release_over_opening'] = easy_info.get('release_over_opening')
+            config['release_opening_inset_m'] = easy_info.get('release_opening_inset_m')
             config['hover_clearance_m'] = easy_info.get('hover_clearance_m')
             config['shape_to_hover'] = easy_info.get('shape_to_hover')
             config['hold_sweep_slip_m'] = easy_info.get('hold_sweep_slip_m')

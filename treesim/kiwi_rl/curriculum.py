@@ -72,8 +72,9 @@ EASY_PRESET = {
     # Carry from the original outside-crate start. Reward fruit 3D and hand
     # XY toward the *open hover* (rim + 28 cm), not the liner floor: a
     # low swing over the hole puts the wrist through the crate. Force the
-    # jaw open once both XY sit over the hole. Over-opening starts stay
-    # available behind this flag.
+    # jaw open once both XY sit over the opening AABB (wall inset), not
+    # only a 15 cm centre disk: a front-rim carry stays outside that
+    # disk. Over-opening starts stay available behind this flag.
     # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
     # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
@@ -81,6 +82,8 @@ EASY_PRESET = {
     'start_over_opening': False,
     'shape_hand_and_fruit': True,
     'release_at_center': True,
+    'release_over_opening': True,
+    'release_opening_inset_m': 0.04,
     'start_open_radius_m': 0.06,
     'start_inset_x_m': 0.0,
     'start_margin_m': 0.32,

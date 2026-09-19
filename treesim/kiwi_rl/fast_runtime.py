@@ -371,8 +371,18 @@ def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dt
 
 @wp.func
 def _in_release_zone(fruit: wp.vec3, tcp: wp.vec3, basket: wp.vec3,
-                     open_xy_m: float, rim_z_m: float, release_at_center: int) -> int:
+                     rot: wp.mat33, open_half_xy: wp.vec2,
+                     open_xy_m: float, rim_z_m: float, release_at_center: int,
+                     release_over_opening: int) -> int:
     """1 if the scripted jaw should open. Not a weld."""
+    if release_over_opening != 0:
+        f_local = wp.transpose(rot) @ (fruit - basket)
+        t_local = wp.transpose(rot) @ (tcp - basket)
+        fruit_ok = wp.abs(f_local[0]) < open_half_xy[0] and wp.abs(f_local[1]) < open_half_xy[1]
+        tcp_ok = wp.abs(t_local[0]) < open_half_xy[0] and wp.abs(t_local[1]) < open_half_xy[1]
+        if fruit_ok and tcp_ok:
+            return 1
+        return 0
     fdx = fruit[0] - basket[0]
     fdy = fruit[1] - basket[1]
     fruit_xy = wp.sqrt(fdx * fdx + fdy * fdy) < open_xy_m
@@ -396,6 +406,8 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
                        targets: wp.array2d(dtype=float), jaw_hold: wp.array(dtype=float),
                        jaw_open: float, open_xy_m: float, rim_z_m: float, max_delta: float,
                        release_at_center: wp.array(dtype=int),
+                       release_over_opening: wp.array(dtype=int),
+                       open_half_xy: wp.vec2,
                        actions: wp.array2d(dtype=float)):
     """Overwrite only the jaw increment. The student still moves the arm."""
     world = wp.tid()
@@ -406,7 +418,9 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
     basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
     fruit_pos = xpos[world, fruit]
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
-                            open_xy_m, rim_z_m, release_at_center[0])
+                            xmat[world, chassis], open_half_xy,
+                            open_xy_m, rim_z_m, release_at_center[0],
+                            release_over_opening[0])
     desired = jaw_open if over == 1 else jaw_hold[world]
     current = targets[world, 18]
     delta = wp.clamp(desired - current, -max_delta, max_delta)
@@ -420,7 +434,9 @@ def _adapt_scripted_jaw(site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                         active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
                         jaw_hold: wp.array(dtype=float), jaw_open: float, jaw_closed: float,
                         open_xy_m: float, rim_z_m: float, slip_tighten_m: float,
-                        max_close_frac: float, release_at_center: wp.array(dtype=int)):
+                        max_close_frac: float, release_at_center: wp.array(dtype=int),
+                        release_over_opening: wp.array(dtype=int),
+                        open_half_xy: wp.vec2):
     """Tighten the hold if the free fruit is leaving the mouth. Not a weld."""
     world = wp.tid()
     idx = active_fruit[world]
@@ -430,7 +446,9 @@ def _adapt_scripted_jaw(site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
     basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
     fruit_pos = xpos[world, fruit]
     if _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
-                        open_xy_m, rim_z_m, release_at_center[0]) == 1:
+                        xmat[world, chassis], open_half_xy,
+                        open_xy_m, rim_z_m, release_at_center[0],
+                        release_over_opening[0]) == 1:
         return
     slip = wp.length(fruit_pos - site_xpos[world, tcp_site])
     if slip <= slip_tighten_m:
@@ -451,7 +469,9 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
                       targets: wp.array2d(dtype=float), jaw_qposadr: int, jaw_dofadr: int,
                       jaw_hold: wp.array(dtype=float), jaw_open: float, open_xy_m: float,
                       rim_z_m: float, site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
-                      release_at_center: wp.array(dtype=int)):
+                      release_at_center: wp.array(dtype=int),
+                      release_over_opening: wp.array(dtype=int),
+                      open_half_xy: wp.vec2):
     """Kinematic jaw hold/open. The 0.3 N·m PD alone lets the kiwi slip out."""
     if enabled[0] == 0:
         return
@@ -463,7 +483,9 @@ def _pin_scripted_jaw(enabled: wp.array(dtype=int),
     basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
     fruit_pos = xpos[world, fruit]
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
-                            open_xy_m, rim_z_m, release_at_center[0])
+                            xmat[world, chassis], open_half_xy,
+                            open_xy_m, rim_z_m, release_at_center[0],
+                            release_over_opening[0])
     desired = jaw_open if over == 1 else jaw_hold[world]
     qpos[world, jaw_qposadr] = desired
     qvel[world, jaw_dofadr] = 0.0
@@ -480,6 +502,8 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
                                rim_z_m: float, max_delta: float,
                                site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                                release_at_center: wp.array(dtype=int),
+                               release_over_opening: wp.array(dtype=int),
+                               open_half_xy: wp.vec2,
                                out_applied: wp.array2d(dtype=float)):
     world, joint = wp.tid()
     active = 1 if (goal[world] == 0 or detached[world] != 0) else 0
@@ -493,7 +517,9 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
     basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
     fruit_pos = xpos[world, fruit]
     over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
-                            open_xy_m, rim_z_m, release_at_center[0])
+                            xmat[world, chassis], open_half_xy,
+                            open_xy_m, rim_z_m, release_at_center[0],
+                            release_over_opening[0])
     if joint < 6:
         if over == 1:
             out_applied[world, joint] = 0.0
@@ -620,9 +646,13 @@ class FastRuntime:
             self._easy_pin = wp.zeros(1, dtype=int, device=self.device)
             self._shape_hand_fruit = wp.zeros(1, dtype=int, device=self.device)
             self._release_at_center = wp.zeros(1, dtype=int, device=self.device)
+            self._release_over_opening = wp.zeros(1, dtype=int, device=self.device)
             from treesim.basket import CENTER, SIZE
+            from .reach_teacher import opening_half_xy_m
             self._basket_center = wp.vec3(*CENTER)
             self._open_rim_z_m = float(SIZE[2])
+            hx, hy = opening_half_xy_m(inset_m=float(EASY_PRESET['release_opening_inset_m']))
+            self._open_half_xy = wp.vec2(float(hx), float(hy))
             # Floor-to-hover: SIZE.z + 28 cm. A 10 cm-over-hole TCP puts the
             # ~0.20 m wrist through the liner; this is the known-safe IK height.
             self._hover_offset = wp.vec3(
@@ -685,7 +715,8 @@ class FastRuntime:
                         int(self._jaw_qposadr), int(self._jaw_dofadr), self._easy_jaw_hold,
                         float(self._jaw_open), float(self._open_xy_m),
                         float(self._open_rim_z_m), self.data.site_xpos, int(self.tcp_site),
-                        self._release_at_center], device=self.device)
+                        self._release_at_center, self._release_over_opening,
+                        self._open_half_xy], device=self.device)
                     self.control.apply()
                     mw.step(self.gpu_model, self.data)
                     self._refresh(mw)
@@ -749,7 +780,8 @@ class FastRuntime:
                     self.chassis, self.task.fruit_body, self.task.active_fruit,
                     self._basket_center, self._easy_jaw_hold, float(self._jaw_open),
                     float(self._jaw_closed), float(self._open_xy_m),
-                    float(self._open_rim_z_m), 0.04, 0.70, self._release_at_center],
+                    float(self._open_rim_z_m), 0.04, 0.70, self._release_at_center,
+                    self._release_over_opening, self._open_half_xy],
                     device=self.device)
                 wp.launch(_scripted_jaw_hold, dim=self.worlds, inputs=[
                     self.data.xpos, self.data.xmat, self.data.site_xpos, int(self.tcp_site),
@@ -757,7 +789,8 @@ class FastRuntime:
                     self._basket_center, self.control.targets,
                     self._easy_jaw_hold, float(self._jaw_open), float(self._open_xy_m),
                     float(self._open_rim_z_m), float(2.5 * self.control_dt),
-                    self._release_at_center, self._actions], device=self.device)
+                    self._release_at_center, self._release_over_opening,
+                    self._open_half_xy, self._actions], device=self.device)
             wp.capture_launch(self.graph)
         return self.observe(), wp.to_torch(self._reward), wp.to_torch(self._terminated).bool(), {
             'distance_m': wp.to_torch(self._distance),
@@ -951,7 +984,7 @@ class FastRuntime:
         into the liner.         Starts stay outside the crate. Shaping pulls fruit 3D and hand
         XY toward the open hover (rim + 28 cm), not the liner floor, so
         the wrist is not paid to ram the crate. The script opens when
-        both XY sit over the hole. Eval still sets guidance_weight=0
+        both XY sit over the opening AABB. Eval still sets guidance_weight=0
         and must keep teacher_mix at 0. Jaw close fractions are a rigid
         contact sweep, not a calibrated tissue-safe force.
         """
@@ -959,8 +992,10 @@ class FastRuntime:
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
         shape_both = bool(self._easy and EASY_PRESET.get('shape_hand_and_fruit'))
         release_center = bool(self._easy and EASY_PRESET.get('release_at_center'))
+        release_opening = bool(self._easy and EASY_PRESET.get('release_over_opening'))
         self._shape_hand_fruit.assign(np.array([1 if shape_both else 0], dtype=np.int32))
         self._release_at_center.assign(np.array([1 if release_center else 0], dtype=np.int32))
+        self._release_over_opening.assign(np.array([1 if release_opening else 0], dtype=np.int32))
         if shaping_coef is None:
             coef = EASY_PRESET['shaping_coef'] if self._easy else EASY_PRESET['default_shaping_coef']
         else:
@@ -1041,6 +1076,8 @@ class FastRuntime:
             'grasp_local_m': None if not self._easy else [float(x) for x in self._grasp_local_host],
             'shape_hand_and_fruit': shape_both,
             'release_at_center': release_center,
+            'release_over_opening': release_opening,
+            'release_opening_inset_m': float(EASY_PRESET['release_opening_inset_m']),
             'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
             'shape_to_hover': shape_both,
             'weld': False,
@@ -1107,6 +1144,7 @@ class FastRuntime:
                 self._easy_jaw_hold, self._jaw_open, float(self._open_xy_m),
                 float(self._open_rim_z_m), float(max_delta),
                 self.data.site_xpos, int(self.tcp_site), self._release_at_center,
+                self._release_over_opening, self._open_half_xy,
                 self._teacher_applied],
                 device=self.device)
         applied = wp.to_torch(self._teacher_applied)

@@ -90,6 +90,59 @@ def basket_chassis_aabb_m():
     return lo, hi
 
 
+def opening_half_xy_m(*, inset_m=0.04):
+    """Half-extents of the open top, inset from the inner walls.
+
+    Relative to the basket centre. Not a measured liner clearance.
+    """
+    from treesim.basket import SIZE, WALL
+    inset = float(inset_m)
+    wall = float(WALL)
+    size = np.asarray(SIZE, dtype=np.float64).reshape(3)
+    if not np.isfinite(inset) or not np.isfinite(wall) or not np.isfinite(size[:2]).all():
+        raise ValueError('opening half-extents must be finite')
+    if inset < 0 or inset > 0.12:
+        raise ValueError('release_opening_inset_m must be in [0, 0.12] m')
+    hx = float(size[0]) / 2.0 - wall - inset
+    hy = float(size[1]) / 2.0 - wall - inset
+    if hx <= 0.05 or hy <= 0.05:
+        raise ValueError('opening inset leaves no usable XY hole')
+    return hx, hy
+
+
+def over_opening_xy(fruit_xyz, tcp_xyz, basket_xyz, rotation=None, *, inset_m=0.04):
+    """True when fruit and TCP XY sit over the open top, any height.
+
+    ``rotation`` is chassis-to-world. Identity means the basket axes already
+    match world XY. Fruit stays a free body; this is not a weld.
+    """
+    fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(-1)
+    tcp = np.asarray(tcp_xyz, dtype=np.float64).reshape(-1)
+    basket = np.asarray(basket_xyz, dtype=np.float64).reshape(-1)
+    if fruit.size < 2 or tcp.size < 2 or basket.size < 2:
+        raise ValueError('fruit, tcp and basket must include X and Y')
+    if not np.isfinite(fruit[:2]).all() or not np.isfinite(tcp[:2]).all() or not np.isfinite(basket[:2]).all():
+        raise ValueError('fruit, tcp and basket XY must be finite')
+    if rotation is None:
+        rot = np.eye(3, dtype=np.float64)
+    else:
+        rot = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+        if not np.isfinite(rot).all():
+            raise ValueError('basket rotation must be finite')
+    fruit3 = np.array([float(fruit[0]), float(fruit[1]),
+                       float(fruit[2]) if fruit.size >= 3 else 0.0], dtype=np.float64)
+    tcp3 = np.array([float(tcp[0]), float(tcp[1]),
+                     float(tcp[2]) if tcp.size >= 3 else 0.0], dtype=np.float64)
+    basket3 = np.array([float(basket[0]), float(basket[1]),
+                        float(basket[2]) if basket.size >= 3 else 0.0], dtype=np.float64)
+    hx, hy = opening_half_xy_m(inset_m=inset_m)
+    fruit_local = rot.T @ (fruit3 - basket3)
+    tcp_local = rot.T @ (tcp3 - basket3)
+    fruit_ok = abs(float(fruit_local[0])) < hx and abs(float(fruit_local[1])) < hy
+    tcp_ok = abs(float(tcp_local[0])) < hx and abs(float(tcp_local[1])) < hy
+    return bool(fruit_ok and tcp_ok)
+
+
 def tcp_outside_basket(local, *, margin_m=0.08, above_rim_m=0.0):
     """True if a chassis-frame TCP is beside the crate, not over the opening.
 
@@ -565,13 +618,20 @@ def at_basket_center(fruit_xyz, tcp_xyz, basket_xyz, *, open_xy_m):
 
 
 def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m,
-                         tcp_xyz=None, release_at_center=False):
+                         tcp_xyz=None, release_at_center=False,
+                         rotation=None, release_over_opening=False, inset_m=0.04):
     """True when the scripted jaw should open.
 
     Default: fruit COM over the opening and below the rim. With
-    ``release_at_center``, fruit and TCP XY over the centre, any height.
-    Not a weld.
+    ``release_over_opening``, fruit and TCP XY over the open top AABB
+    (wall inset), any height. ``release_at_center`` keeps the centre
+    disk. Not a weld.
     """
+    if release_over_opening:
+        if tcp_xyz is None:
+            raise ValueError('release_over_opening requires tcp_xyz')
+        return over_opening_xy(fruit_xyz, tcp_xyz, basket_floor_xyz,
+                               rotation, inset_m=inset_m)
     if release_at_center:
         if tcp_xyz is None:
             raise ValueError('release_at_center requires tcp_xyz')
@@ -593,12 +653,13 @@ def fruit_in_release_zone(fruit_xyz, basket_floor_xyz, *, open_xy_m, rim_z_m,
 
 
 def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m=None,
-                       tcp_xy=None, release_at_center=False):
+                       tcp_xy=None, release_at_center=False,
+                       rotation=None, release_over_opening=False, inset_m=0.04):
     """Hold while away from the opening; open once the release gate is met.
 
     Fruit stays a free body. ``open_xy_m`` is an XY radius around the basket
-    centre. Default rim-gated open still needs Z. ``release_at_center``
-    opens when fruit and hand XY are over the hole, including hover height.
+    centre. Default rim-gated open still needs Z. ``release_over_opening``
+    uses the open-top AABB. ``release_at_center`` keeps the centre disk.
     """
     fruit = np.asarray(fruit_xy, dtype=np.float64).reshape(-1)
     basket = np.asarray(basket_xy, dtype=np.float64).reshape(-1)
@@ -611,7 +672,11 @@ def scripted_jaw_target(fruit_xy, basket_xy, hold, opened, *, open_xy_m, rim_z_m
         raise ValueError('fruit and basket XY must be finite')
     if not np.isfinite([hold_q, open_q, radius]).all() or radius <= 0:
         raise ValueError('jaw targets and open_xy_m must be finite, radius > 0')
-    if release_at_center:
+    if release_over_opening:
+        if tcp_xy is None:
+            raise ValueError('release_over_opening requires tcp_xy')
+        over = over_opening_xy(fruit, tcp_xy, basket, rotation, inset_m=inset_m)
+    elif release_at_center:
         if tcp_xy is None:
             raise ValueError('release_at_center requires tcp_xy')
         over = at_basket_center(fruit, tcp_xy, basket, open_xy_m=radius)
