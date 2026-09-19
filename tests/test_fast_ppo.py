@@ -109,7 +109,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(filled.teacher_mix, 0.0)
         self.assertEqual(filled.shaping_coef, 25.0)
         self.assertEqual(filled.entropy_coef, 0.001)
-        self.assertEqual(filled.ppo_epochs, 8)
+        self.assertEqual(filled.ppo_epochs, 20)
         kept = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=0.0, shaping_coef=2.0))
         self.assertEqual(kept.teacher_mix, 0.0)

@@ -112,7 +112,7 @@ EASY_PRESET = {
     # so a 3e-3 learning rate is not stopped after the first pass.
     'ppo_clip': 0.5,
     'ppo_lr': 3e-3,
-    'ppo_epochs': 8,
+    'ppo_epochs': 20,
     'ppo_grad_clip': 5.0,
     'ppo_adv_std_cap': 1.0,
     'ppo_value_coef': 0.05,
@@ -123,7 +123,7 @@ EASY_PRESET = {
     'ppo_unclip_positive': True,
     'ppo_success_repeat': 24,
     'ppo_imitation_coef': 2.0,
-    'ppo_success_epochs': 8,
+    'ppo_success_epochs': 20,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,

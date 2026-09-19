@@ -297,8 +297,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     n_order = int(order.numel())
     batch_size = min(minibatch_worlds, n_order)
     metrics = []
-    if not isinstance(epochs, int) or not 1 <= epochs <= 16:
-        raise ValueError('epochs must be an integer in [1, 16]')
+    if not isinstance(epochs, int) or not 1 <= epochs <= 32:
+        raise ValueError('epochs must be an integer in [1, 32]')
     if not np_finite(entropy_coef) or entropy_coef < 0:
         raise ValueError('entropy_coef must be finite and >= 0')
     if 'memory0' in rows[0]:
@@ -894,7 +894,7 @@ def main():
         p.error('Invalid video-every or video-steps')
     if a.stage not in {s.name for s in __import__('treesim.kiwi_rl.curriculum', fromlist=['STAGES']).STAGES}:
         p.error(f'Unknown curriculum stage {a.stage}')
-    if not 0 <= a.entropy_coef <= 0.1 or not 0.9 <= a.gamma <= 1.0 or not 1 <= a.ppo_epochs <= 16:
+    if not 0 <= a.entropy_coef <= 0.1 or not 0.9 <= a.gamma <= 1.0 or not 1 <= a.ppo_epochs <= 32:
         p.error('Invalid PPO entropy, gamma or epochs')
     if not 0.0 <= a.teacher_mix <= 1.0:
         p.error('Invalid teacher-mix')
