@@ -246,6 +246,7 @@ class OrchardTerrainTest(unittest.TestCase):
             self.assertLess(eye[2], canopy - 0.25)
             self.assertGreater(eye[2], ground + 0.90)
             self.assertLess(lookat[2], canopy - 0.15)
+            self.assertLess(lookat[2], eye[2])
 
     def test_flat_generate_unchanged(self):
         skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0)

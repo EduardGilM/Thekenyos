@@ -110,7 +110,7 @@ def mjcf(floor, skeleton, fruit, leaf_assets=(), leaf_geoms=(),
     sun_pos = np.array([0.0, 0.0, float(floor.canopy_z(0.0, 0.0))]) - 28.0 * sun_dir
     soil_geoms = [
         f'    <geom name="earth_mass" type="box" size="{half + 0.8:.3f} {half + 0.8:.3f} {bulk:.3f}" '
-        f'pos="0 0 {min_z - bulk:.4f}" material="earth_cut" contype="0" conaffinity="0"/>',
+        f'pos="0 0 {min_z - bulk - 0.08:.4f}" material="orchard" contype="0" conaffinity="0"/>',
         f'    <geom name="earth_x_pos" type="box" size="{skirt:.3f} {half:.3f} {(elevation + bulk) * 0.5:.3f}" '
         f'pos="{half:.4f} 0 {min_z - bulk + 0.5 * (elevation + bulk):.4f}" material="earth_cut" '
         f'contype="0" conaffinity="0"/>',
@@ -224,7 +224,7 @@ def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0
     t = frame / max(n_frames - 1, 1)
     s = t * t * (3.0 - 2.0 * t)
     x = 0.0
-    y0 = -float(half_span_m) + 2.2
+    y0 = -float(half_span_m) + 8.5
     y1 = -0.35 * float(spacing)
     y = (1.0 - s) * y0 + s * y1
     look_ahead = 5.8 - 1.8 * s
@@ -232,8 +232,8 @@ def camera_pose(frame, n_frames, floor, half_span_m: float, spacing: float = 5.0
     eye = np.array([x, y, _aisle_eye_z(floor, x, y)])
     tgt_y = y + look_ahead
     canopy_t = float(floor.canopy_z(x_look, tgt_y))
-    target_z = min(canopy_t - 0.22, eye[2] + 0.22)
-    target_z = max(target_z, eye[2] - 0.04)
+    target_z = min(canopy_t - 0.22, eye[2] - 0.08)
+    target_z = max(target_z, eye[2] - 0.18)
     target = np.array([x_look, tgt_y, target_z])
     return mjv_from_eye_target(eye, target)
 
