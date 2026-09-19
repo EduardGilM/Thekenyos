@@ -3,8 +3,8 @@ import unittest
 import numpy as np
 
 from treesim.kiwi_rl.curriculum import (
-    STAGES, evaluate_skills, next_stage, promotion_ready, sample_world_skills,
-    stage_named,
+    STAGES, evaluate_skills, evaluation_horizon_s, next_stage, promotion_ready,
+    sample_world_skills, stage_named,
 )
 
 
@@ -21,6 +21,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertFalse(STAGES[0].allow_locomotion)
         self.assertTrue(STAGES[3].allow_locomotion)
         self.assertTrue(STAGES[4].continue_after_success)
+        self.assertEqual(STAGES[4].fruit_count, 5)
+        self.assertTrue(STAGES[5].randomize_layout)
+        self.assertFalse(STAGES[0].randomize_layout)
         self.assertEqual(next_stage(STAGES[0]).name, 'grasp_detach')
         self.assertIsNone(next_stage(STAGES[-1]))
 
@@ -41,12 +44,36 @@ class CurriculumTest(unittest.TestCase):
         self.assertTrue(np.all(skills['guidance_weight'] == 0.0))
         self.assertTrue(np.all(skills['primary_mask']))
         self.assertTrue(np.all(skills['continue_after_success'] == 0))
+        self.assertTrue(np.all(skills['required_harvests'] == 1))
+
+    def test_multi_harvest_eval_continues_and_caps_horizon(self):
+        skills = evaluate_skills(stage_named('multi_harvest'), 4)
+        self.assertTrue(np.all(skills['continue_after_success'] == 1))
+        self.assertTrue(np.all(skills['required_harvests'] == 5))
+        self.assertTrue(np.all(skills['guidance_weight'] == 0.0))
+        self.assertAlmostEqual(evaluation_horizon_s(stage_named('deposit_pixels')), 30.0)
+        self.assertAlmostEqual(evaluation_horizon_s(stage_named('stationary_harvest')), 45.0)
+        self.assertAlmostEqual(evaluation_horizon_s(stage_named('multi_harvest')), 90.0)
+        general = evaluate_skills(stage_named('generalise'), 8)
+        self.assertTrue(np.all(general['randomize_layout'] == 1))
+        self.assertTrue(np.any(np.abs(general['layout_dx_m']) > 0))
+
+    def test_mix_continue_only_on_harvest_goal(self):
+        rng = np.random.default_rng(1)
+        skills = sample_world_skills(stage_named('multi_harvest'), 4000, rng)
+        harvest = skills['goal_id'] == 2
+        self.assertTrue(np.all(skills['continue_after_success'][harvest] == 1))
+        self.assertTrue(np.all(skills['continue_after_success'][~harvest] == 0))
+        self.assertTrue(np.all(skills['required_harvests'][harvest] == 5))
+        self.assertTrue(np.all(skills['required_harvests'][~harvest] == 1))
 
     def test_promotion_needs_two_consecutive_gates(self):
         stage = stage_named('deposit_pixels')
         self.assertFalse(promotion_ready([0.91], stage))
         self.assertFalse(promotion_ready([0.91, 0.5], stage))
         self.assertTrue(promotion_ready([0.5, 0.91, 0.92], stage))
+        self.assertFalse(promotion_ready([0.91, 0.92], stage, episodes_seen=10))
+        self.assertTrue(promotion_ready([0.91, 0.92], stage, episodes_seen=200))
         with self.assertRaises(ValueError):
             promotion_ready([1.2, 1.0], stage)
 

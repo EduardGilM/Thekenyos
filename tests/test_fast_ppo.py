@@ -32,6 +32,9 @@ class FastPPOTest(unittest.TestCase):
         self.assertEqual(result['optimized_transitions'], 8)
         self.assertEqual(result['minibatches'], 2)
         self.assertFalse(torch.equal(before,policy.mean.weight))
+        self.assertIn('entropy_per_dim', result)
+        self.assertIn('entropy_gaussian', result)
+        self.assertEqual(result['entropy_kind'], 'tanh_gaussian_differential_nats')
 
     def test_evaluation_reports_mean_of_world_minima(self):
         import torch
@@ -56,6 +59,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(source.count('\ndef run('), 1)
         self.assertIn("default='deposit_pixels'", source)
         self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
+        self.assertIn('evaluate_mission', source)
+        self.assertIn('fruit-count', inspect.getsource(train_fast.run))
 
 
 if __name__ == '__main__':

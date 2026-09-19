@@ -23,12 +23,12 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA = 'training-monitor/v1'
 VIDEO_SCHEMA = 'progress-video/v1'
 PRIORITY_CHARTS = (
-    'loss', 'kl', 'entropy', 'logstd_mean', 'grad_norm', 'reward_mean', 'reward_std',
+    'loss', 'kl', 'entropy', 'entropy_per_dim', 'entropy_gaussian', 'logstd_mean', 'grad_norm', 'reward_mean', 'reward_std',
     'distance_mean_closest_m', 'distance_final_m', 'distance_closest_m',
     'evaluation/mean_closest_distance_m', 'evaluation/final_distance_m',
     'evaluation/closest_distance_m', 'evaluation/harvest_successes',
-    'evaluation/success_rate', 'evaluation/detach_rate', 'evaluation/grasp_rate',
-    'harvest_successes', 'grasp_events', 'detach_events',
+    'evaluation/success_rate', 'evaluation/harvest_fraction', 'evaluation/detach_rate', 'evaluation/grasp_rate',
+    'harvest_successes', 'grasp_events', 'detach_events', 'harvested_mean',
     'evaluation/terminal_transitions', 'terminal_transitions',
     'curriculum_index', 'guidance_weight',
     'training_transitions_per_second', 'rollout_transitions_per_second',
@@ -199,16 +199,16 @@ def _video_figure(video: Mapping[str, Any]) -> str:
 
 _DASHBOARD_SCRIPT = r'''
 <script>
-const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "reward_mean",
-  "evaluation/success_rate", "evaluation/mean_closest_distance_m",
+const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_dim", "reward_mean",
+  "evaluation/success_rate", "evaluation/harvest_fraction", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
   "torch_peak_allocated_gb"];
-const PRIORITY = ["loss", "kl", "entropy", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
+const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian", "logstd_mean", "grad_norm", "reward_mean", "reward_std",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
   "evaluation/mean_closest_distance_m", "evaluation/final_distance_m",
   "evaluation/closest_distance_m", "evaluation/harvest_successes",
-  "evaluation/success_rate", "evaluation/detach_rate", "evaluation/grasp_rate",
-  "harvest_successes", "grasp_events", "detach_events",
+  "evaluation/success_rate", "evaluation/harvest_fraction", "evaluation/detach_rate", "evaluation/grasp_rate",
+  "harvest_successes", "grasp_events", "detach_events", "harvested_mean",
   "evaluation/terminal_transitions", "terminal_transitions",
   "curriculum_index", "guidance_weight",
   "training_transitions_per_second", "rollout_transitions_per_second",
@@ -322,8 +322,9 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
         cards.append(
             f'<div class="card"><div class="k">curriculum_stage</div>'
             f'<div class="v">{stage}</div></div>')
-    for key in ('step', 'curriculum_index', 'loss', 'entropy', 'reward_mean',
-                'evaluation/success_rate', 'evaluation/mean_closest_distance_m',
+    for key in ('step', 'curriculum_index', 'loss', 'entropy', 'entropy_per_dim', 'reward_mean',
+                'evaluation/success_rate', 'evaluation/harvest_fraction',
+                'evaluation/mean_closest_distance_m',
                 'evaluation/harvest_successes', 'training_transitions_per_second',
                 'torch_peak_allocated_gb'):
         if key in latest and is_chartable(latest[key]):
@@ -365,7 +366,7 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
   <header>
     <h1>Monitor de entrenamiento</h1>
     <div class="sub" id="sub">{run} · etapa {stage} · {rows} filas · actualizado {generated}</div>
-    <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página.</div>
+    <div class="warn">Curriculum TK-RL-003 sobre fruta rígida: depositar → agarrar/desprender → cosecha estacionaria → aproximación → varios → generalizar. <code>training_ready</code> sigue en false. Un depósito simulado no es cosecha de campo. El recuadro amarillo es la RGB del gripper RELIC. Las gráficas se actualizan sin recargar la página. La entropía es diferencial (nats) de una tanh-Gaussiana; con logstd negativo puede ser &lt; 0 y no es un fallo numérico.</div>
     <div class="cards" id="cards">{''.join(cards) or '<div class="card">Esperando training.jsonl</div>'}</div>
   </header>
   <main>
@@ -603,6 +604,13 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
             closed = 0.0
         data.qpos[int(controller.qids[18])] = closed
         controller.targets[18] = closed
+    if reset_mode == 2:
+        jaw_joint = int(controller.joints[18])
+        opened = float(model.jnt_range[jaw_joint, 1])
+        if not np.isfinite(opened):
+            opened = 0.8
+        data.qpos[int(controller.qids[18])] = opened
+        controller.targets[18] = opened
     if reset_mode == 3:
         chassis_joint = int(model.body_jntadr[controller.chassis])
         data.qpos[int(model.jnt_qposadr[chassis_joint])] -= approach_offset_m

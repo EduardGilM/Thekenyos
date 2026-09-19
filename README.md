@@ -702,29 +702,33 @@ The approved fast hackathon profile uses rigid fruit with compliant contacts
 and a load-triggered point connection. It retains the robot, basket, cameras,
 collisions and gravity from a base scene, with static canopy supports. It omits
 volumetric fruit deformation; the 8 N stem threshold and 15 N force-based damage
-limit are explicit engineering assumptions. It currently supports one target
-fruit per independent world. Training pixels come from the nominal gripper
+limit are explicit engineering assumptions. Export `--fruit-count 5` so stages
+01–06 share independent free fruit bodies (deposited kiwis stay in the basket;
+they are not visual ballast). Training pixels come from the nominal gripper
 `hand_color_sensor`, not an invented body mast. On a 24 GB RTX 4090 start
-below the 5090 4096-world profile.
+below the 5090 4096-world profile; 2560 worlds fit, 3072 currently OOMs.
 
-`scripts/train_fast.py` now follows the [TK-RL-003 task curriculum](docs/rl-blueprint.html)
+`scripts/train_fast.py` follows the [TK-RL-003 task curriculum](docs/rl-blueprint.html)
 on that rigid runtime: **deposit from pixels → grasp/detach → stationary harvest
 → visual approach → multi-fruit mission → generalisation**. Reward/v3 terms
 (deposit +20, grasp +0.5, retained detach +2, loss −25, fall −100, time, smoothness
 and potential shaping) replace the old TCP Δdistance hover. Evaluation uses
-`guidance_weight=0`. Promotion needs two consecutive evals at the blueprint
-gate; this is not a field robot and `training_ready` stays false. The compact
-RGB-D actor is still 64×64 with a shared GRU, not V3 ResNet-18 at 240×320 or
-separate N3/M3 networks. Stage 01–03 keep base velocity at zero; stage 04
-unmasks the 3 locomotion commands. The live scene has one fruit body, so
-stage 05 cannot yet store a growing basket of independent kiwis.
+`guidance_weight=0` and the stage budget capped at 45 s (90 s when `fruit_count>1`)
+without stacking RGBD. Promotion needs two consecutive evals at the blueprint
+gate after 200 evaluated worlds; this is not a field robot and `training_ready`
+stays false. The compact RGB-D actor is still 64×64 with a shared GRU, not V3
+ResNet-18 at 240×320 or separate N3/M3 networks. Stage 01–03 keep base velocity
+at zero; stage 04 unmasks the 3 locomotion commands. Stages 05–06 require five
+free fruit bodies and `continue_after_success`. Reported `entropy` is differential
+entropy (nats) of the 10-D tanh-Gaussian; with `logstd≈-1.6` it is typically
+negative and is not a numerical failure.
 
 ```bash
 python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
-  --output /path/to/fast-scene --timestep .005
+  --output /path/to/fast-scene --timestep .005 --fruit-count 5
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/new-run \
-  --stage deposit_pixels --worlds 3072 --steps 64 --updates 2000 \
+  --stage deposit_pixels --worlds 2560 --steps 64 --updates 2000 \
   --minibatch-worlds 256 --eval-every 50 --entropy-coef 0.005 --ppo-epochs 2 \
   --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
 FAST_SCENE=/path/to/fast-scene python -B -m unittest \

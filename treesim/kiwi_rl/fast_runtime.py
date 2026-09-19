@@ -15,6 +15,7 @@ import numpy as np
 import warp as wp
 
 from .control_warp import WarpSpotControl, _set_gait_targets
+from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
     W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
     W_LOSS, W_SMOOTH, W_TIME_PER_S,
@@ -38,7 +39,8 @@ def _action_increment(actions: wp.array2d(dtype=float), targets: wp.array2d(dtyp
 @wp.kernel
 def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dtype=wp.vec3),
                      xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
-                     tcp_site: int, fruit: int, chassis: int,
+                     tcp_site: int, fruit_bodies: wp.array(dtype=int),
+                     active_fruit: wp.array(dtype=int), chassis: int,
                      previous_potential: wp.array(dtype=float), shaping_ref: wp.array(dtype=int),
                      previous_damage: wp.array(dtype=float), previous_action: wp.array2d(dtype=float),
                      actions: wp.array2d(dtype=float), episode_time: wp.array(dtype=float),
@@ -51,13 +53,18 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      retained_detach: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
                      damage_proxy: wp.array(dtype=float),
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
-                     deposit_paid: wp.array(dtype=wp.uint8), loss_paid: wp.array(dtype=wp.uint8),
+                     deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
+                     loss_paid: wp.array(dtype=wp.uint8),
                      basket_center: wp.vec3, dt: float, gamma_step: float,
                      w_deposit: float, w_grasp: float, w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float):
     world = wp.tid()
     if mask[world] == 0:
         return
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
     tcp = site_xpos[world, tcp_site]
     fruit_pos = xipos[world, fruit]
     d_tcp = wp.length(tcp - fruit_pos)
@@ -95,12 +102,16 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     fallen = (xipos[world, chassis][2] < 0.30) or (up < 0.6967067)
     if fallen:
         r = r + w_fall
-    if ground_contact[world] != 0 and loss_paid[world] == 0 and deposit_paid[world] == 0:
+    unpaid_deposit = int(0)
+    for fruit_index in range(MAX_FRUITS):
+        if deposited[world, fruit_index] != 0 and deposit_paid[world, fruit_index] == 0:
+            unpaid_deposit = unpaid_deposit + 1
+            deposit_paid[world, fruit_index] = wp.uint8(1)
+    if ground_contact[world] != 0 and loss_paid[world] == 0 and unpaid_deposit == 0:
         r = r + w_loss
         loss_paid[world] = wp.uint8(1)
-    if success[world] != 0 and goal[world] != 1 and deposit_paid[world] == 0:
-        r = r + w_deposit
-        deposit_paid[world] = wp.uint8(1)
+    if unpaid_deposit > 0 and goal[world] != 1:
+        r = r + w_deposit * float(unpaid_deposit)
     episode_time[world] = episode_time[world] + dt
     timed_out[world] = wp.uint8(episode_time[world] >= timeout_s[world])
     terminated[world] = wp.uint8(fallen or failed[world] != 0 or success[world] != 0 or timed_out[world] != 0)
@@ -184,9 +195,14 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
 
 @wp.kernel
 def _basket_distance(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
-                     chassis: int, fruit: int, basket_center: wp.vec3,
+                     chassis: int, fruit_bodies: wp.array(dtype=int),
+                     active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
                      distance: wp.array(dtype=float)):
     world = wp.tid()
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
     basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
     distance[world] = wp.length(xpos[world, fruit] - basket_world)
 
@@ -209,27 +225,32 @@ def _write_base_commands(src: wp.array2d(dtype=float), dst: wp.array2d(dtype=flo
 def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
                            qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
                            targets: wp.array2d(dtype=float), site_xpos: wp.array2d(dtype=wp.vec3),
-                           fruit_qposadr: int, fruit_dofadr: int, tcp_site: int,
-                           jaw_qposadr: int, jaw_closed: float, target_eq: int,
+                           fruit_qposadr: wp.array(dtype=int), fruit_dofadr: wp.array(dtype=int),
+                           tcp_site: int, jaw_qposadr: int, jaw_closed: float, jaw_open: float,
+                           equality_index: wp.array(dtype=int),
                            eq_active: wp.array2d(dtype=wp.bool), detached: wp.array(dtype=wp.uint8),
                            grasped: wp.array(dtype=wp.uint8), grasp_paid: wp.array(dtype=wp.uint8),
-                           chassis_qposadr: int,
-                           approach_offset_m: float):
+                           chassis_qposadr: int, approach_offset_m: float,
+                           randomize: wp.array(dtype=wp.uint8),
+                           layout_dx: wp.array(dtype=float), layout_dy: wp.array(dtype=float)):
     world = wp.tid()
     if mask[world] == 0:
         return
     mode = reset_mode[world]
+    fruit_qadr = fruit_qposadr[0]
+    fruit_dadr = fruit_dofadr[0]
+    target_eq = equality_index[0]
     if mode == 1:
         tcp = site_xpos[world, tcp_site]
-        qpos[world, fruit_qposadr + 0] = tcp[0]
-        qpos[world, fruit_qposadr + 1] = tcp[1]
-        qpos[world, fruit_qposadr + 2] = tcp[2]
-        qpos[world, fruit_qposadr + 3] = 1.0
-        qpos[world, fruit_qposadr + 4] = 0.0
-        qpos[world, fruit_qposadr + 5] = 0.0
-        qpos[world, fruit_qposadr + 6] = 0.0
+        qpos[world, fruit_qadr + 0] = tcp[0]
+        qpos[world, fruit_qadr + 1] = tcp[1]
+        qpos[world, fruit_qadr + 2] = tcp[2]
+        qpos[world, fruit_qadr + 3] = 1.0
+        qpos[world, fruit_qadr + 4] = 0.0
+        qpos[world, fruit_qadr + 5] = 0.0
+        qpos[world, fruit_qadr + 6] = 0.0
         for i in range(6):
-            qvel[world, fruit_dofadr + i] = 0.0
+            qvel[world, fruit_dadr + i] = 0.0
         if target_eq >= 0 and target_eq < eq_active.shape[1]:
             eq_active[world, target_eq] = False
         detached[world] = wp.uint8(1)
@@ -237,8 +258,14 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
         grasp_paid[world] = wp.uint8(1)
         qpos[world, jaw_qposadr] = jaw_closed
         targets[world, 18] = jaw_closed
+    if mode == 2:
+        qpos[world, jaw_qposadr] = jaw_open
+        targets[world, 18] = jaw_open
     if mode == 3:
         qpos[world, chassis_qposadr + 0] = qpos[world, chassis_qposadr + 0] - approach_offset_m
+    if randomize[world] != 0:
+        qpos[world, chassis_qposadr + 0] = qpos[world, chassis_qposadr + 0] + layout_dx[world]
+        qpos[world, chassis_qposadr + 1] = qpos[world, chassis_qposadr + 1] + layout_dy[world]
 
 
 class FastRuntime:
@@ -320,18 +347,31 @@ class FastRuntime:
             self._flags = wp.zeros(worlds, dtype=int, device=self.device)
             self._all_mask = wp.ones(worlds, dtype=wp.uint8, device=self.device)
             self._actions = wp.zeros((worlds, 7), dtype=float, device=self.device)
+            self._randomize_layout = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
+            self._layout_dx = wp.zeros(worlds, dtype=float, device=self.device)
+            self._layout_dy = wp.zeros(worlds, dtype=float, device=self.device)
             fruit = self.manifest.get('fruits', self.manifest.get('fruit', []))
             if not fruit:
                 raise ValueError('Fast scene must contain at least one fruit')
+            if len(fruit) > MAX_FRUITS:
+                raise ValueError(f'FastRuntime supports at most {MAX_FRUITS} independent fruit bodies')
+            qposadrs, dofadrs = [], []
+            for entry in fruit:
+                body = int(self.model.body(entry['body']).id)
+                joint = int(self.model.body_jntadr[body])
+                qposadrs.append(int(self.model.jnt_qposadr[joint]))
+                dofadrs.append(int(self.model.jnt_dofadr[joint]))
             self.fruit_body = int(self.model.body(fruit[0]['body']).id)
-            fruit_joint = int(self.model.body_jntadr[self.fruit_body])
-            self._fruit_qposadr = int(self.model.jnt_qposadr[fruit_joint])
-            self._fruit_dofadr = int(self.model.jnt_dofadr[fruit_joint])
+            self._fruit_qposadr = qposadrs[0]
+            self._fruit_dofadr = dofadrs[0]
+            self._fruit_qposadrs = wp.array(_pad_ids(qposadrs, fill=0), dtype=int, device=self.device)
+            self._fruit_dofadrs = wp.array(_pad_ids(dofadrs, fill=0), dtype=int, device=self.device)
             chassis_joint = int(self.model.body_jntadr[self.control.chassis])
             self._chassis_qposadr = int(self.model.jnt_qposadr[chassis_joint])
             self._jaw_qposadr = int(self.control.contract.qids[18])
             jaw_range = np.asarray(self.model.jnt_range[self.control.contract.joints[18]], dtype=np.float32)
             self._jaw_closed = float(jaw_range[0] if np.isfinite(jaw_range[0]) else 0.0)
+            self._jaw_open = float(jaw_range[1] if np.isfinite(jaw_range[1]) else 0.8)
             from treesim.basket import CENTER
             self._basket_center = wp.vec3(*CENTER)
             robot = self.manifest['robot']
@@ -387,16 +427,17 @@ class FastRuntime:
             mask = self._all_mask
         wp.launch(_reward_and_done, dim=self.worlds,
                   inputs=[self.data.xipos, self.data.site_xpos, self.data.xpos, self.data.xmat,
-                          self.tcp_site, self.fruit_body, self.chassis, self._previous_potential,
+                          self.tcp_site, self.task.fruit_body, self.task.active_fruit, self.chassis,
+                          self._previous_potential,
                           self._shaping_ref, self._previous_damage, self._previous_action, self._actions,
                           self._episode_time, self._timeout_s, self._guidance, self.task.goal,
                           self._reward, self._terminated, self._timed_out, self._distance, mask,
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
-                          self.task.loss_paid, self._basket_center, self.control_dt, self._gamma_step,
-                          W_DEPOSIT, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS, W_DAMAGE_PER_UNIT,
-                          W_FALL, W_TIME_PER_S, W_SMOOTH], device=self.device)
+                          self.task.deposited, self.task.loss_paid, self._basket_center, self.control_dt,
+                          self._gamma_step, W_DEPOSIT, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
+                          W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH], device=self.device)
 
     def _latch(self):
         wp.launch(_latch_state, dim=(self.worlds, max(self.data.qpos.shape[1], self.data.qvel.shape[1])),
@@ -462,7 +503,11 @@ class FastRuntime:
         if any(name not in skills for name in required):
             raise ValueError('configure_skills requires goal, reset, timeout, guidance and locomotion')
         worlds = self.worlds
-        def _arr(name, dtype):
+        def _arr(name, dtype, default=None):
+            if name not in skills:
+                if default is None:
+                    raise ValueError(f'{name} missing')
+                return np.full(worlds, default, dtype=dtype)
             value = np.asarray(skills[name])
             if value.shape != (worlds,):
                 raise ValueError(f'{name} must have shape ({worlds},)')
@@ -472,6 +517,12 @@ class FastRuntime:
         self._timeout_s.assign(_arr('timeout_s', np.float32))
         self._guidance.assign(_arr('guidance_weight', np.float32))
         self._allow_locomotion.assign(_arr('allow_locomotion', np.uint8))
+        self.task.continue_after_success.assign(_arr('continue_after_success', np.uint8, 0))
+        required_harvests = np.clip(_arr('required_harvests', np.int32, 1), 1, self.task.fruit_count)
+        self.task.required_harvests.assign(required_harvests)
+        self._randomize_layout.assign(_arr('randomize_layout', np.uint8, 0))
+        self._layout_dx.assign(_arr('layout_dx_m', np.float32, 0.0))
+        self._layout_dy.assign(_arr('layout_dy_m', np.float32, 0.0))
 
     def pixels(self):
         if self.rig is None or self.policy_camera is None:
@@ -505,15 +556,18 @@ class FastRuntime:
             self._refresh(mw)
             wp.launch(_configure_skill_reset, dim=self.worlds, inputs=[
                 mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
-                self.data.site_xpos, self._fruit_qposadr, self._fruit_dofadr, self.tcp_site,
-                self._jaw_qposadr, self._jaw_closed, self.task.equality_id, self.task.eq_active,
-                self.task.detached, self.task.grasped, self.task.grasp_paid, self._chassis_qposadr, 1.0], device=self.device)
+                self.data.site_xpos, self._fruit_qposadrs, self._fruit_dofadrs, self.tcp_site,
+                self._jaw_qposadr, self._jaw_closed, self._jaw_open, self.task.equality_index,
+                self.task.eq_active, self.task.detached, self.task.grasped, self.task.grasp_paid,
+                self._chassis_qposadr, 1.0, self._randomize_layout, self._layout_dx, self._layout_dy],
+                device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
             self._measure_reward(mask_wp)
             wp.launch(_basket_distance, dim=self.worlds,
-                      inputs=[self.data.xpos, self.data.xmat, self.chassis, self.fruit_body,
-                              self._basket_center, self._basket_distance], device=self.device)
+                      inputs=[self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
+                              self.task.active_fruit, self._basket_center, self._basket_distance],
+                      device=self.device)
             wp.launch(_masked_seed_distance, dim=self.worlds,
                       inputs=[mask_wp, self._distance, self._previous_potential, self._reward,
                               self.task.goal, self.task.detached, self._shaping_ref,

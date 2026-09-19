@@ -35,6 +35,7 @@ class TrainingMonitorTests(unittest.TestCase):
             self.assertEqual(payload['training_ready'], False)
             self.assertIn('Monitor de entrenamiento', html)
             self.assertIn('Curriculum TK-RL-003', html)
+            self.assertIn('entropía es diferencial', html)
             self.assertIn('training_ready', html)
             self.assertIn('evaluation/mean_closest_distance_m', html)
             self.assertNotIn('http-equiv="refresh"', html)
@@ -116,6 +117,10 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertEqual(deposit['stage'], 'deposit_pixels')
         self.assertEqual(deposit['reset_mode'], 1)
         self.assertFalse(deposit['allow_locomotion'])
+        detach = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'grasp_detach'}, 'config': {},
+        })
+        self.assertEqual(detach['reset_mode'], 2)
         approach = curriculum_preview_from_checkpoint({
             'meta': {}, 'config': {'stage': 'visual_approach'},
         })

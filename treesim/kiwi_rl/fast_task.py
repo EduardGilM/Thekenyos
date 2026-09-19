@@ -13,11 +13,19 @@ DETACH_FORCE_N = 8.0  # Engineering approximation; not a calibrated stem thresho
 SETTLE_SPEED_M_S = .05
 SETTLE_TIME_S = .5
 JAW_FORCE_LIMIT_N = 15.0
+MAX_FRUITS = 5
 FORCE_CHECKS = {
     'source': 'MJWarp efc.force normal constraint rows',
     'detachment_threshold_N': DETACH_FORCE_N,
     'threshold_status': 'engineering approximation; not calibrated',
 }
+
+
+def _pad_ids(values, fill=-1):
+    padded = [fill] * MAX_FRUITS
+    for index, value in enumerate(values):
+        padded[index] = int(value)
+    return padded
 
 
 @wp.kernel
@@ -34,7 +42,8 @@ def _clear_contacts(hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=
 def _contact_pass(
     nacon: wp.array(dtype=int), geom: wp.array(dtype=wp.vec2i), worldid: wp.array(dtype=int),
     dim: wp.array(dtype=int), address: wp.array2d(dtype=int), efc_force: wp.array2d(dtype=float),
-    nefc: wp.array(dtype=int), fruit_geom: wp.array(dtype=int), kind: wp.array(dtype=int),
+    nefc: wp.array(dtype=int), fruit_count: int, fruit_geom: wp.array(dtype=int),
+    active_fruit: wp.array(dtype=int), deposited: wp.array2d(dtype=wp.uint8), kind: wp.array(dtype=int),
     hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=int), ground_hits: wp.array(dtype=int),
     hand_load: wp.array(dtype=float), rows_per_contact: int,
 ):
@@ -42,12 +51,19 @@ def _contact_pass(
     if contact >= nacon[0]:
         return
     pair = geom[contact]
-    fruit = fruit_geom[0]
-    if pair[0] != fruit and pair[1] != fruit:
+    fruit_index = -1
+    for index in range(MAX_FRUITS):
+        if index < fruit_count:
+            geom_id = fruit_geom[index]
+            if geom_id >= 0 and (pair[0] == geom_id or pair[1] == geom_id):
+                fruit_index = index
+                break
+    if fruit_index < 0:
         return
     world = worldid[contact]
     if world < 0 or world >= hand_hits.shape[0]:
         return
+    fruit = fruit_geom[fruit_index]
     other = pair[1] if pair[0] == fruit else pair[0]
     group = kind[other] if other >= 0 and other < kind.shape[0] else -1
     load = float(0.)
@@ -60,12 +76,13 @@ def _contact_pass(
         row = address[contact, row_index]
         if row >= 0 and row < nefc[world]:
             load += wp.abs(efc_force[world, row])
-    if group == 1:
+    is_active = fruit_index == active_fruit[world]
+    if group == 1 and is_active:
         wp.atomic_add(hand_hits, world, 1)
         wp.atomic_add(hand_load, world, load)
-    elif group == 2:
+    elif group == 2 and is_active:
         wp.atomic_add(basket_hits, world, 1)
-    elif group == 3:
+    elif group == 3 and deposited[world, fruit_index] == 0:
         wp.atomic_add(ground_hits, world, 1)
 
 
@@ -74,19 +91,30 @@ def _record(
     nefc: wp.array(dtype=int), efc_force: wp.array2d(dtype=float), efc_type: wp.array2d(dtype=int), efc_id: wp.array2d(dtype=int),
     xpos: wp.array2d(dtype=wp.vec3), xipos: wp.array2d(dtype=wp.vec3),
     subtree_com: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33), cvel: wp.array2d(dtype=wp.spatial_vector),
-    eq_active: wp.array2d(dtype=wp.bool), fruit_body: wp.array(dtype=int), equality_index: wp.array(dtype=int),
+    eq_active: wp.array2d(dtype=wp.bool), fruit_count: int, fruit_body: wp.array(dtype=int),
+    fruit_roots: wp.array(dtype=int), equality_index: wp.array(dtype=int),
+    active_fruit: wp.array(dtype=int), deposited: wp.array2d(dtype=wp.uint8),
+    harvested: wp.array(dtype=int), required_harvests: wp.array(dtype=int),
+    continue_after_success: wp.array(dtype=wp.uint8),
     hand_hits: wp.array(dtype=int), basket_hits: wp.array(dtype=int), ground_hits: wp.array(dtype=int),
     hand_load: wp.array(dtype=float), dt: float, detached: wp.array(dtype=wp.uint8),
     hand_contact: wp.array(dtype=wp.uint8), basket_contact: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
     stem_force: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
     success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), chassis: int, fruit_radius: wp.vec3,
-    basket_center: wp.vec3, basket_size: wp.vec3, wall: float, fruit_root: int, chassis_root: int,
+    basket_center: wp.vec3, basket_size: wp.vec3, wall: float, chassis_root: int,
+    grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
+    retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
+    grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
         return
-    fruit_body_id = fruit_body[0]
-    target_eq = equality_index[0]
+    idx = active_fruit[world]
+    if idx < 0 or idx >= fruit_count:
+        idx = 0
+    fruit_body_id = fruit_body[idx]
+    target_eq = equality_index[idx]
+    fruit_root = fruit_roots[idx]
     jaws = hand_load[world]
     hand_contact[world] = wp.uint8(hand_hits[world] > 0)
     basket_contact[world] = wp.uint8(basket_hits[world] > 0)
@@ -95,7 +123,6 @@ def _record(
         damage_proxy[world] = wp.max(damage_proxy[world], (jaws - JAW_FORCE_LIMIT_N) / JAW_FORCE_LIMIT_N)
 
     stem_squared = float(0.)
-    target_eq = equality_index[0]
     for row in range(efc_type.shape[1]):
         if row >= nefc[world]:
             continue
@@ -139,7 +166,29 @@ def _record(
     if ground_contact[world] != 0 or fallen or jaws > JAW_FORCE_LIMIT_N or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
     elif settle_time[world] >= SETTLE_TIME_S and detached[world] != 0 and hand_contact[world] == 0:
-        success[world] = wp.uint8(1)
+        if deposited[world, idx] == 0:
+            deposited[world, idx] = wp.uint8(1)
+            harvested[world] = harvested[world] + 1
+        if continue_after_success[world] != 0 and harvested[world] < required_harvests[world]:
+            next_i = -1
+            for candidate in range(MAX_FRUITS):
+                if candidate < fruit_count and deposited[world, candidate] == 0:
+                    next_i = candidate
+                    break
+            if next_i >= 0:
+                active_fruit[world] = next_i
+                settle_time[world] = 0.
+                grasped[world] = wp.uint8(0)
+                grasp_time[world] = 0.
+                retain_time[world] = 0.
+                retained_detach[world] = wp.uint8(0)
+                grasp_paid[world] = wp.uint8(0)
+                detach_paid[world] = wp.uint8(0)
+                detached[world] = wp.uint8(0)
+            else:
+                success[world] = wp.uint8(1)
+        else:
+            success[world] = wp.uint8(1)
 
 
 @wp.kernel
@@ -172,10 +221,12 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
            basket_contact: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8), stem_force: wp.array(dtype=float),
            hand_load: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
            success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), eq_active: wp.array2d(dtype=wp.bool),
-           target_eq: int, grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
+           fruit_count: int, equality_index: wp.array(dtype=int), active_fruit: wp.array(dtype=int),
+           deposited: wp.array2d(dtype=wp.uint8), harvested: wp.array(dtype=int),
+           deposit_paid: wp.array2d(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
            retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
            grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
-           deposit_paid: wp.array(dtype=wp.uint8), loss_paid: wp.array(dtype=wp.uint8)):
+           loss_paid: wp.array(dtype=wp.uint8)):
     world = wp.tid()
     if mask[world] != 0:
         detached[world] = wp.uint8(0)
@@ -194,32 +245,44 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
         retained_detach[world] = wp.uint8(0)
         grasp_paid[world] = wp.uint8(0)
         detach_paid[world] = wp.uint8(0)
-        deposit_paid[world] = wp.uint8(0)
         loss_paid[world] = wp.uint8(0)
-        if target_eq >= 0 and target_eq < eq_active.shape[1]:
-            eq_active[world, target_eq] = True
+        active_fruit[world] = 0
+        harvested[world] = 0
+        for index in range(MAX_FRUITS):
+            deposited[world, index] = wp.uint8(0)
+            deposit_paid[world, index] = wp.uint8(0)
+            if index < fruit_count:
+                target_eq = equality_index[index]
+                if target_eq >= 0 and target_eq < eq_active.shape[1]:
+                    eq_active[world, target_eq] = True
 
 
 class FastHarvestTask:
     """Per-world evaluator; it never supplies actions or actor observations."""
 
     FORCE_CHECKS = FORCE_CHECKS
+    MAX_FRUITS = MAX_FRUITS
 
     def __init__(self, model, data, manifest):
         fruits = manifest.get('fruits', [])
         if not fruits:
             raise ValueError('Fast scene manifest must contain fruits')
+        if len(fruits) > MAX_FRUITS:
+            raise ValueError(f'FastHarvestTask supports at most {MAX_FRUITS} independent fruit bodies')
         self.model, self.data, self.manifest = model, data, manifest
         self.worlds = int(data.qpos.shape[0])
         self.device = data.qpos.device
-        if len(fruits) != 1:
-            raise ValueError('FastHarvestTask currently supports exactly one target fruit')
+        self.fruit_count = len(fruits)
         self.chassis = int(model.body(manifest['robot']['chassis']).id)
-        fruit = fruits[0]
-        self.fruit_geom = wp.array([int(model.geom(fruit['geom']).id)], dtype=int, device=self.device)
-        self.fruit_body = wp.array([int(model.body(fruit['body']).id)], dtype=int, device=self.device)
-        self.equality_id = int(model.equality(fruit['equality']).id)
-        self.equality_index = wp.array([self.equality_id], dtype=int, device=self.device)
+        geom_ids = [int(model.geom(fruit['geom']).id) for fruit in fruits]
+        body_ids = [int(model.body(fruit['body']).id) for fruit in fruits]
+        eq_ids = [int(model.equality(fruit['equality']).id) for fruit in fruits]
+        root_ids = [int(model.body_rootid[body]) for body in body_ids]
+        self.fruit_geom = wp.array(_pad_ids(geom_ids), dtype=int, device=self.device)
+        self.fruit_body = wp.array(_pad_ids(body_ids), dtype=int, device=self.device)
+        self.fruit_roots = wp.array(_pad_ids(root_ids, fill=0), dtype=int, device=self.device)
+        self.equality_id = eq_ids[0]
+        self.equality_index = wp.array(_pad_ids(eq_ids), dtype=int, device=self.device)
         groups = np.full(model.ngeom, -1, dtype=np.int32)
         for geom_id in range(model.ngeom):
             name = model.geom(geom_id).name or ''
@@ -250,8 +313,13 @@ class FastHarvestTask:
         self.retained_detach = wp.zeros_like(self.detached)
         self.grasp_paid = wp.zeros_like(self.detached)
         self.detach_paid = wp.zeros_like(self.detached)
-        self.deposit_paid = wp.zeros_like(self.detached)
+        self.deposit_paid = wp.zeros((self.worlds, MAX_FRUITS), dtype=wp.uint8, device=self.device)
         self.loss_paid = wp.zeros_like(self.detached)
+        self.deposited = wp.zeros((self.worlds, MAX_FRUITS), dtype=wp.uint8, device=self.device)
+        self.active_fruit = wp.zeros(self.worlds, dtype=int, device=self.device)
+        self.harvested = wp.zeros(self.worlds, dtype=int, device=self.device)
+        self.required_harvests = wp.ones(self.worlds, dtype=int, device=self.device)
+        self.continue_after_success = wp.zeros(self.worlds, dtype=wp.uint8, device=self.device)
         self.goal = wp.zeros(self.worlds, dtype=int, device=self.device)
         self.eq_active = getattr(data, 'eq_active', None)
         if self.eq_active is None or not hasattr(data, 'efc') or not hasattr(data.efc, 'type') or not hasattr(data.efc, 'id'):
@@ -270,18 +338,23 @@ class FastHarvestTask:
                   inputs=[self._hand_hits, self._basket_hits, self._ground_hits, self.hand_load], device=self.device)
         wp.launch(_contact_pass, dim=self.data.contact.geom.shape[0], inputs=[
             self.data.nacon, self.data.contact.geom, self.data.contact.worldid, self.data.contact.dim,
-            self.data.contact.efc_address, self.data.efc.force, self.data.nefc, self.fruit_geom, self.kind,
+            self.data.contact.efc_address, self.data.efc.force, self.data.nefc, self.fruit_count,
+            self.fruit_geom, self.active_fruit, self.deposited, self.kind,
             self._hand_hits, self._basket_hits, self._ground_hits, self.hand_load, self.rows_per_contact], device=self.device)
         wp.launch(_record, dim=self.worlds, inputs=[
             self.data.nefc, self.data.efc.force, self._efc_type, self._efc_id, self.data.xpos, self.data.xipos,
             self.data.subtree_com, self.data.xmat, self.data.cvel, self.eq_active,
-            self.fruit_body, self.equality_index, self._hand_hits, self._basket_hits, self._ground_hits,
+            self.fruit_count, self.fruit_body, self.fruit_roots, self.equality_index,
+            self.active_fruit, self.deposited, self.harvested, self.required_harvests,
+            self.continue_after_success,
+            self._hand_hits, self._basket_hits, self._ground_hits,
             self.hand_load, float(self.model.opt.timestep), self.detached, self.hand_contact,
             self.basket_contact, self.ground_contact, self.stem_force, self.damage_proxy, self.settle_time,
             self.success, self.failed, self.chassis, wp.vec3(*RADII_M), wp.vec3(*CENTER),
             wp.vec3(*SIZE), float(WALL),
-            int(self.model.body_rootid[self.model.body(self.manifest['fruits'][0]['body']).id]),
-            int(self.model.body_rootid[self.chassis])], device=self.device)
+            int(self.model.body_rootid[self.chassis]),
+            self.grasped, self.grasp_time, self.retain_time, self.retained_detach,
+            self.grasp_paid, self.detach_paid], device=self.device)
         wp.launch(_apply_goal, dim=self.worlds, inputs=[
             self.goal, float(self.model.opt.timestep), self.detached, self.hand_contact, self.grasped,
             self.grasp_time, self.retain_time, self.retained_detach, self.success, self.failed],
@@ -301,12 +374,14 @@ class FastHarvestTask:
                 raise ValueError('mask must be a Warp array or CUDA Torch tensor')
         wp.launch(_reset, dim=self.worlds, inputs=[mask, self.detached, self.hand_contact, self.basket_contact,
                    self.ground_contact, self.stem_force, self.hand_load, self.damage_proxy, self.settle_time,
-                   self.success, self.failed, self.eq_active, self.equality_id, self.grasped, self.grasp_time,
+                   self.success, self.failed, self.eq_active, self.fruit_count, self.equality_index,
+                   self.active_fruit, self.deposited, self.harvested, self.deposit_paid, self.grasped, self.grasp_time,
                    self.retain_time, self.retained_detach, self.grasp_paid, self.detach_paid,
-                   self.deposit_paid, self.loss_paid], device=self.device)
+                   self.loss_paid], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,
                 'damage_proxy': self.damage_proxy, 'grasped': self.grasped,
                 'retained_detach': self.retained_detach, 'hand_contact': self.hand_contact,
-                'ground_contact': self.ground_contact}
+                'ground_contact': self.ground_contact, 'harvested': self.harvested,
+                'required_harvests': self.required_harvests, 'active_fruit': self.active_fruit}

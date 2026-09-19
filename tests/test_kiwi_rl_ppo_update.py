@@ -62,6 +62,19 @@ class RecurrentPPOTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ppo.recurrent_actor_step(model, torch.optim.Adam(model.parameters()), batch)
 
+    def test_peaked_gaussian_entropy_is_negative(self):
+        torch.manual_seed(0)
+        logstd = torch.full((4, 10), -1.6)
+        entropy = ppo.gaussian_entropy(logstd)
+        expected = 10 * (0.5 * (1.0 + float(np.log(2.0 * np.pi))) - 1.6)
+        self.assertTrue(bool((entropy < 0).all()))
+        np.testing.assert_allclose(entropy.numpy(), expected, rtol=1e-5, atol=1e-5)
+        mu = torch.zeros(4, 10)
+        raw = mu + logstd.exp() * torch.randn_like(mu)
+        tanh_h = ppo.tanh_gaussian_entropy(logstd, raw=raw, mu=mu)
+        self.assertTrue(bool(torch.isfinite(tanh_h).all()))
+        self.assertLess(float(tanh_h.mean()), 0.0)
+
     def test_kl_guard_stops_before_optimizer_step(self):
         model, batch = self.make_batch()
         batch['m']['log_prob'] += 10.

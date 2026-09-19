@@ -10,8 +10,8 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    evaluate_skills, next_stage, promotion_ready, sample_world_skills,
-    stage_named, summarise_stage,
+    STAGES, evaluate_skills, evaluation_horizon_steps, next_stage, promotion_ready,
+    sample_world_skills, stage_named, summarise_stage,
 )
 
 
@@ -58,7 +58,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 reward=reward.clone(), terminated=physical.clone(), truncated=timeout.clone(),
                 reset=reset.clone(), distance=info['distance_m'].clone(),
                 success=info['success'].clone(), detached=info['detached'].clone(),
-                grasped=info['grasped'].clone(), retained_detach=info['retained_detach'].clone()))
+                grasped=info['grasped'].clone(), retained_detach=info['retained_detach'].clone(),
+                harvested=info['harvested'].clone() if 'harvested' in info else info['success'].clone()))
             if index == 0:
                 rows[0]['memory0'] = memory0
             reset = done.clone()
@@ -75,7 +76,9 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coef=0.005,
            gamma=0.9996, epochs=1):
     import torch
-    from treesim.kiwi_rl.ppo import compute_gae_torch, tanh_logprob
+    from treesim.kiwi_rl.ppo import (
+        compute_gae_torch, gaussian_entropy, tanh_gaussian_entropy, tanh_logprob,
+    )
     rewards = torch.stack([r['reward'] for r in rows])
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
@@ -106,14 +109,16 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
         for start in range(0, rewards.shape[1], batch_size):
             sl = slice(start, start + batch_size)
             memory = memory_root[sl].clone()
-            logps, predictions, entropies = [], [], []
+            logps, predictions, entropies, gaussians = [], [], [], []
             for row in rows:
                 memory = memory * (~row['reset'][sl])[:, None]
                 mean, logstd, value, memory = policy(row['rgbd'][sl], row['r84'][sl], memory)
                 new_logp = tanh_logprob(row['raw'][sl], mean, logstd)
                 logps.append(new_logp)
                 predictions.append(value)
-                entropies.append(-new_logp)
+                draw = mean + logstd.exp() * torch.randn_like(mean)
+                entropies.append(tanh_gaussian_entropy(logstd, raw=draw, mu=mean))
+                gaussians.append(gaussian_entropy(logstd))
             logratio = torch.stack(logps) - torch.stack([r['logp'][sl] for r in rows])
             ratio = logratio.exp()
             kl = ((ratio - 1.) - logratio).mean()
@@ -129,9 +134,12 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
             actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
             critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
             entropy = torch.stack(entropies).mean()
+            entropy_g = torch.stack(gaussians).mean()
             loss = actor + .5 * critic - entropy_coef * entropy
             (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
-            metrics.append((float(loss.detach()), float(kl.detach()), float(entropy.detach())))
+            action_dim = int(logstd.shape[-1])
+            metrics.append((float(loss.detach()), float(kl.detach()), float(entropy.detach()),
+                            float(entropy_g.detach()), action_dim))
         if stop_extra:
             break
         grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
@@ -139,8 +147,13 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
         completed_epochs += 1
     if not metrics:
         raise RuntimeError('PPO produced no minibatches')
+    entropy = sum(m[2] for m in metrics) / len(metrics)
+    entropy_g = sum(m[3] for m in metrics) / len(metrics)
+    action_dim = max(m[4] for m in metrics)
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
-                entropy=sum(m[2] for m in metrics)/len(metrics),
+                entropy=entropy, entropy_gaussian=entropy_g,
+                entropy_per_dim=entropy / action_dim,
+                entropy_kind='tanh_gaussian_differential_nats',
                 logstd_mean=float(policy.logstd.detach().mean()),
                 grad_norm=float(grad), minibatches=len(metrics),
                 optimized_transitions=int(rewards.numel() * completed_epochs),
@@ -151,6 +164,70 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
 def np_finite(value):
     import math
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0.02):
+    """Deterministic eval over the stage horizon without stacking RGBD history."""
+    import torch
+    runtime.configure_skills(evaluate_skills(stage, runtime.worlds))
+    horizon = evaluation_horizon_steps(stage, control_dt)
+    runtime.reset()
+    worlds = runtime.worlds
+    memory = torch.zeros(worlds, 64, device='cuda:0')
+    reset = torch.ones(worlds, device='cuda:0', dtype=torch.bool)
+    rgbd = runtime.pixels().clone()
+    closest = torch.full((worlds,), float('inf'), device='cuda:0')
+    final_distance = torch.zeros(worlds, device='cuda:0')
+    success_any = torch.zeros(worlds, dtype=torch.bool, device='cuda:0')
+    grasp_any = torch.zeros_like(success_any)
+    detach_any = torch.zeros_like(success_any)
+    harvested_peak = torch.zeros(worlds, device='cuda:0')
+    required = torch.ones(worlds, device='cuda:0')
+    terminals = 0
+    for index in range(horizon):
+        r84 = runtime.observe()
+        if index % camera_every == 0:
+            rgbd = runtime.pixels().clone()
+        with torch.no_grad():
+            memory = memory * (~reset)[:, None]
+            mean, logstd, value, memory = policy(rgbd, r84, memory)
+            base, arm = _split_action(mean)
+            runtime.set_base_commands(base.contiguous())
+            runtime.set_gait_actions(gait(r84))
+            _, reward, done, info = runtime.step(arm.contiguous())
+            dist = info['distance_m']
+            closest = torch.minimum(closest, dist)
+            final_distance = dist.clone()
+            success_any |= info['success'].bool()
+            grasp_any |= info['grasped'].bool()
+            detach_any |= info['detached'].bool()
+            if 'harvested' in info:
+                harvested_peak = torch.maximum(harvested_peak, info['harvested'].float())
+                required = info['required_harvests'].float().clamp(min=1.0)
+            physical = info['success'].bool() | info['failed'].bool() | info['fallen']
+            timeout = info['timed_out']
+            terminals += int((physical | timeout).sum())
+            reset = done.clone()
+            if bool(reset.any()):
+                runtime.reset(reset)
+                rgbd = runtime.pixels().clone()
+    runtime.check()
+    harvest_fraction = harvested_peak / required
+    return {
+        'evaluation/horizon_s': float(horizon * control_dt),
+        'evaluation/horizon_steps': int(horizon),
+        'evaluation/final_distance_m': float(final_distance.mean()),
+        'evaluation/closest_distance_m': float(closest.min()),
+        'evaluation/mean_closest_distance_m': float(closest.mean()),
+        'evaluation/terminal_transitions': terminals,
+        'evaluation/harvest_successes': int(success_any.sum()),
+        'evaluation/success_rate': float(success_any.float().mean()),
+        'evaluation/detach_rate': float(detach_any.float().mean()),
+        'evaluation/grasp_rate': float(grasp_any.float().mean()),
+        'evaluation/harvest_fraction': float(harvest_fraction.mean()),
+        'evaluation/mean_harvested': float(harvested_peak.mean()),
+        'evaluation/worlds': worlds,
+    }
 
 
 def evaluate(runtime, policy, gait, steps, camera_every, *, stage=None):
@@ -198,10 +275,17 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=False)
     stage = stage_named(args.stage)
     manifest = json.loads((args.scene / 'manifest.json').read_text())
+    n_fruits = len(manifest.get('fruits') or [])
+    needed = max(item.fruit_count for item in STAGES[stage.index - 1:])
+    if n_fruits < needed:
+        raise ValueError(
+            f'fast scene has {n_fruits} fruit bodies; remaining curriculum through stage 6 needs {needed}. '
+            f'Re-export with --fruit-count {needed}.')
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
                   curriculum=summarise_stage(stage),
                   training_ready=False,
+                  entropy_kind='tanh_gaussian_differential_nats',
                   rates={'physics_hz': manifest['numerical_profile']['frequency_hz'],
                          'policy_hz':50, 'camera_hz':50/args.camera_every})
     config = {k: str(v) if isinstance(v, Path) else v for k,v in config.items()}
@@ -230,7 +314,8 @@ def run(args):
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0,
                  curriculum_stage=stage.name))
         apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
-        baseline = evaluate(runtime, policy, gait, args.steps, args.camera_every, stage=stage)
+        baseline = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
+                                    control_dt=runtime.control_dt)
         baseline.update(curriculum_stage=stage.name, curriculum_index=stage.index)
         log.log(baseline, step=0)
         dashboard.refresh()
@@ -239,6 +324,7 @@ def run(args):
                                  steps=args.video_steps, camera_every=args.camera_every)
         evaluations = [dict(update=0, **baseline)]
         eval_success_rates = []
+        eval_episodes = 0
         best_distance = baseline['evaluation/mean_closest_distance_m']
         best_checkpoint = str(initial_checkpoint)
         carry = {}
@@ -264,6 +350,7 @@ def run(args):
                 harvest_successes=int(torch.stack([r['success'] for r in rows]).sum()),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
+                harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
                 curriculum_stage=stage.name, curriculum_index=stage.index,
                 guidance_weight=stage.guidance_weight,
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
@@ -276,20 +363,26 @@ def run(args):
             del rows, bootstrap
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
                 apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
-                eval_metrics = evaluate(runtime, policy, gait, args.steps, args.camera_every, stage=stage)
+                eval_metrics = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
+                                                control_dt=runtime.control_dt)
                 evaluations.append(dict(update=iteration+1, **eval_metrics))
                 metrics.update(eval_metrics)
                 eval_success_rates.append(eval_metrics['evaluation/success_rate'])
+                eval_episodes += int(eval_metrics['evaluation/worlds'])
                 distance = eval_metrics['evaluation/mean_closest_distance_m']
                 if distance < best_distance:
                     best_distance, best_checkpoint = distance, str(checkpoint)
-                if promotion_ready(eval_success_rates, stage):
+                if promotion_ready(eval_success_rates, stage, episodes_seen=eval_episodes):
                     nxt = next_stage(stage)
                     metrics['curriculum_promoted'] = True
                     if nxt is not None:
                         stage = nxt
                         config['curriculum'] = summarise_stage(stage)
+                        config['stage'] = stage.name
+                        (args.output / 'config.json').write_text(
+                            json.dumps(config, indent=2, default=str) + '\n')
                         eval_success_rates = []
+                        eval_episodes = 0
                         carry = {}
                         apply_stage(runtime, stage, numpy_rng)
                         metrics['curriculum_stage'] = stage.name

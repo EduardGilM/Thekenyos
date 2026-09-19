@@ -34,6 +34,12 @@ RESET_FOR_GOAL = {
 
 # Blueprint §8.2 engineering gates: two consecutive evals, 200 episodes/skill.
 PROMOTE_STREAK = 2
+POLICY_DT_S = 0.02
+# Full stage budgets are 30–900 s. A 2560-world eval cannot store RGBD for that
+# long; cap wall-clock so promotion can still observe a deposit (0.5 s settle)
+# without OOM. Multi-fruit needs a longer cap than one-fruit stages.
+EVAL_CAP_S = 45.0
+MULTI_EVAL_CAP_S = 90.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class Stage:
     gate_success_rate: float
     gate_episodes: int
     guidance_weight: float
+    randomize_layout: bool
     description: str
 
     def __post_init__(self):
@@ -76,35 +83,35 @@ class Stage:
 STAGES = (
     Stage(
         1, 'deposit_pixels', 'DEPOSIT_ONLY', 30.0, ('V3', 'M3', 'G1'),
-        {'DEPOSIT_ONLY': 1.0}, RESET_DEPOSIT, False, 1, False, 0.90, 200, 1.0,
+        {'DEPOSIT_ONLY': 1.0}, RESET_DEPOSIT, False, 1, False, 0.90, 200, 1.0, False,
         'Fruto ya suelto en la pinza; acercar, soltar y asentar en la cesta.',
     ),
     Stage(
         2, 'grasp_detach', 'DETACH_ONLY', 60.0, ('V3', 'M3', 'G1'),
-        {'DETACH_ONLY': 0.75, 'DEPOSIT_ONLY': 0.25}, RESET_PREGRASP, False, 1, False, 0.85, 200, 1.0,
+        {'DETACH_ONLY': 0.75, 'DEPOSIT_ONLY': 0.25}, RESET_PREGRASP, False, 1, False, 0.85, 200, 1.0, False,
         'Kiwi visible, pinza abierta; agarrar, inclinar y separar el pedúnculo.',
     ),
     Stage(
         3, 'stationary_harvest', 'HARVEST', 180.0, ('V3', 'M3', 'G1'),
         {'HARVEST': 0.75, 'DETACH_ONLY': 0.125, 'DEPOSIT_ONLY': 0.125},
-        RESET_HANGING, False, 1, False, 0.80, 200, 1.0,
+        RESET_HANGING, False, 1, False, 0.80, 200, 1.0, False,
         'Base quieta: de fruto colgante a cesta (ciclo completo).',
     ),
     Stage(
         4, 'visual_approach', 'HARVEST', 240.0, ('V3', 'N3', 'M3', 'G1'),
         {'HARVEST': 0.75, 'DETACH_ONLY': 0.125, 'DEPOSIT_ONLY': 0.125},
-        RESET_APPROACH, True, 1, False, 0.75, 200, 1.0,
+        RESET_APPROACH, True, 1, False, 0.75, 200, 1.0, False,
         'N3 explora y se coloca; M3 cosecha. Sin waypoint verdadero de kiwi.',
     ),
     Stage(
         5, 'multi_harvest', 'HARVEST', 900.0, ('V3', 'N3', 'M3', 'G1'),
         {'HARVEST': 0.75, 'DETACH_ONLY': 0.125, 'DEPOSIT_ONLY': 0.125},
-        RESET_APPROACH, True, 5, True, 0.75, 200, 1.0,
+        RESET_APPROACH, True, 5, True, 0.75, 200, 1.0, False,
         'Explorar, almacenar y repetir. Un cuerpo de fruta no es un censo de 40.',
     ),
     Stage(
         6, 'generalise', 'HARVEST', 900.0, ('V3', 'N3', 'M3', 'G1'),
-        {'HARVEST': 1.0}, RESET_APPROACH, True, 5, True, 0.70, 200, 0.5,
+        {'HARVEST': 1.0}, RESET_APPROACH, True, 5, True, 0.70, 200, 0.5, True,
         'Layouts y apariencia no vistos; shaping reducido. No es despliegue.',
     ),
 )
@@ -149,13 +156,28 @@ def sample_world_skills(stage: Stage, worlds: int, rng: np.random.Generator) -> 
         for i in choices
     ], dtype=np.float32)
     primary = np.array([names[i] == stage.goal for i in choices], dtype=np.bool_)
+    continue_after = np.array(
+        [np.uint8(stage.continue_after_success and names[i] == 'HARVEST') for i in choices],
+        dtype=np.uint8)
+    required = np.where(continue_after != 0, stage.fruit_count, 1).astype(np.int32)
+    if stage.randomize_layout:
+        layout_dx = rng.uniform(-0.25, 0.25, worlds).astype(np.float32)
+        layout_dy = rng.uniform(-0.25, 0.25, worlds).astype(np.float32)
+    else:
+        layout_dx = np.zeros(worlds, dtype=np.float32)
+        layout_dy = np.zeros(worlds, dtype=np.float32)
     return {
         'goal_id': goals,
         'reset_mode': resets,
         'timeout_s': timeouts,
         'guidance_weight': np.full(worlds, stage.guidance_weight, dtype=np.float32),
         'allow_locomotion': np.full(worlds, np.uint8(stage.allow_locomotion)),
-        'continue_after_success': np.full(worlds, np.uint8(stage.continue_after_success)),
+        'continue_after_success': continue_after,
+        'required_harvests': required,
+        'fruit_count': np.full(worlds, stage.fruit_count, dtype=np.int32),
+        'randomize_layout': np.full(worlds, np.uint8(stage.randomize_layout)),
+        'layout_dx_m': layout_dx,
+        'layout_dy_m': layout_dy,
         'primary_mask': primary,
     }
 
@@ -164,19 +186,54 @@ def evaluate_skills(stage: Stage, worlds: int) -> dict[str, np.ndarray]:
     """Deterministic evaluation uses only the current stage goal."""
     if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
         raise ValueError('worlds must be an integer in [1, 4096]')
+    continue_after = np.full(worlds, np.uint8(stage.continue_after_success))
+    required = np.full(worlds, stage.fruit_count if stage.continue_after_success else 1, dtype=np.int32)
+    # Held-out deterministic xy jitter from world index; not the training draws.
+    if stage.randomize_layout:
+        index = np.arange(worlds, dtype=np.float32)
+        layout_dx = ((index * 0.6180339887) % 1.0 - 0.5) * 0.5
+        layout_dy = ((index * 0.3819660113) % 1.0 - 0.5) * 0.5
+    else:
+        layout_dx = np.zeros(worlds, dtype=np.float32)
+        layout_dy = np.zeros(worlds, dtype=np.float32)
     return {
         'goal_id': np.full(worlds, GOAL_ID[stage.goal], dtype=np.int32),
         'reset_mode': np.full(worlds, reset_mode_for_goal(stage.goal, stage), dtype=np.int32),
         'timeout_s': np.full(worlds, stage.budget_s, dtype=np.float32),
         'guidance_weight': np.zeros(worlds, dtype=np.float32),  # eval with guidance off
         'allow_locomotion': np.full(worlds, np.uint8(stage.allow_locomotion)),
-        'continue_after_success': np.zeros(worlds, dtype=np.uint8),
+        'continue_after_success': continue_after,
+        'required_harvests': required,
+        'fruit_count': np.full(worlds, stage.fruit_count, dtype=np.int32),
+        'randomize_layout': np.full(worlds, np.uint8(stage.randomize_layout)),
+        'layout_dx_m': layout_dx.astype(np.float32),
+        'layout_dy_m': layout_dy.astype(np.float32),
         'primary_mask': np.ones(worlds, dtype=np.bool_),
     }
 
 
-def promotion_ready(success_rates: list[float], stage: Stage) -> bool:
+def evaluation_horizon_s(stage: Stage) -> float:
+    """Eval wall budget: stage timeout, capped so RGBD is not stacked."""
+    cap = MULTI_EVAL_CAP_S if stage.fruit_count > 1 else EVAL_CAP_S
+    return float(min(stage.budget_s, cap))
+
+
+def evaluation_horizon_steps(stage: Stage, control_dt: float = POLICY_DT_S) -> int:
+    if not np.isfinite(control_dt) or control_dt <= 0:
+        raise ValueError('control_dt must be finite and positive')
+    steps = int(round(evaluation_horizon_s(stage) / float(control_dt)))
+    if steps < 1:
+        raise ValueError('evaluation horizon must cover at least one control step')
+    return steps
+
+
+def promotion_ready(success_rates: list[float], stage: Stage, *, episodes_seen: int | None = None) -> bool:
     """Two consecutive evals at or above the stage gate. Not harvest proof."""
+    if episodes_seen is not None:
+        if not isinstance(episodes_seen, int) or isinstance(episodes_seen, bool) or episodes_seen < 0:
+            raise ValueError('episodes_seen must be a non-negative integer')
+        if episodes_seen < stage.gate_episodes:
+            return False
     if len(success_rates) < PROMOTE_STREAK:
         return False
     window = success_rates[-PROMOTE_STREAK:]
@@ -195,6 +252,8 @@ def summarise_stage(stage: Stage) -> dict[str, object]:
         'allow_locomotion': stage.allow_locomotion,
         'fruit_count': stage.fruit_count,
         'continue_after_success': stage.continue_after_success,
+        'randomize_layout': stage.randomize_layout,
+        'evaluation_horizon_s': evaluation_horizon_s(stage),
         'gate_success_rate': stage.gate_success_rate,
         'guidance_weight': stage.guidance_weight,
         'trains': list(stage.trains),

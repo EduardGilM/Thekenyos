@@ -118,6 +118,81 @@ class FastTaskGpuTest(unittest.TestCase):
             np.testing.assert_array_equal(task.failed.numpy()[1], 1)
             np.testing.assert_array_equal(task.basket_contact.numpy()[0], 1)
 
+    def test_second_fruit_stays_free_after_first_deposit(self):
+        from treesim.basket import CENTER, SIZE, WALL
+        from treesim.native_kiwi import RADII_M
+        from treesim.kiwi_rl.fast_task import FastHarvestTask, MAX_FRUITS
+
+        z_in = 0.5 + CENTER[2] + WALL / 2 + RADII_M[2]
+        xml = f'''<mujoco><option timestep=".005" gravity="0 0 -9.81"/><worldbody>
+          <geom name="floor" type="plane" size="2 2 .1"/>
+          <body name="robot" pos="0 0 .5">
+            <geom name="chassis" type="box" size=".1 .1 .1" mass="1"/>
+            <geom name="basket_floor" pos="{CENTER[0]} {CENTER[1]} {CENTER[2]}" type="box"
+                  size="{SIZE[0]/2} {SIZE[1]/2} {WALL/2}"/>
+          </body>
+          <body name="canopy" pos="0 0 1.2"><site name="anchor0"/><site name="anchor1" pos=".2 0 0"/></body>
+          <body name="fruit_0" pos="{CENTER[0]} {CENTER[1]} {z_in}">
+            <freejoint/><geom name="fruit_0_geom" type="ellipsoid" size="{RADII_M[0]} {RADII_M[1]} {RADII_M[2]}" mass=".1"/>
+            <site name="fruit_0_site"/>
+          </body>
+          <body name="fruit_1" pos="0.2 0 1.0">
+            <freejoint/><geom name="fruit_1_geom" type="ellipsoid" size="{RADII_M[0]} {RADII_M[1]} {RADII_M[2]}" mass=".1"/>
+            <site name="fruit_1_site"/>
+          </body>
+        </worldbody><equality>
+          <connect name="fruit_0_connect" site1="fruit_0_site" site2="anchor0"/>
+          <connect name="fruit_1_connect" site1="fruit_1_site" site2="anchor1"/>
+        </equality></mujoco>'''
+        model = self.mujoco.MjModel.from_xml_string(xml)
+        native = self.mujoco.MjData(model)
+        self.mujoco.mj_forward(model, native)
+        fruit0 = int(model.body('fruit_0').id)
+        fruit1 = int(model.body('fruit_1').id)
+        hanging = native.xpos[fruit1].copy()
+        manifest = {'robot': {'chassis': 'robot'},
+                    'fruits': [
+                        {'body': 'fruit_0', 'geom': 'fruit_0_geom', 'equality': 'fruit_0_connect'},
+                        {'body': 'fruit_1', 'geom': 'fruit_1_geom', 'equality': 'fruit_1_connect'},
+                    ]}
+        with self.wp.ScopedDevice('cuda:0'):
+            gpu_model = self.mw.put_model(model)
+            data = self.mw.put_data(model, native, nworld=1, nconmax=64, njmax=256)
+            qpos = data.qpos.numpy()
+            qadr0 = int(model.jnt_qposadr[model.body_jntadr[fruit0]])
+            qpos[0, qadr0:qadr0 + 3] = [CENTER[0], CENTER[1], z_in]
+            data.qpos.assign(qpos)
+            self.mw.forward(gpu_model, data)
+            task = FastHarvestTask(model, data, manifest)
+            self.assertEqual(task.fruit_count, 2)
+            self.assertEqual(MAX_FRUITS, 5)
+            task.continue_after_success.assign(np.array([1], np.uint8))
+            task.required_harvests.assign(np.array([2], np.int32))
+            data.nacon.assign(np.array([0], np.int32))
+            data.nefc.assign(np.array([1], np.int32))
+            data.efc.type.assign(np.zeros((1, 256), np.int32))
+            data.efc.id.assign(np.zeros((1, 256), np.int32))
+            force = np.zeros((1, 256), np.float32)
+            force[:, 0] = 9.
+            data.efc.force.assign(force)
+            task.record()
+            self.wp.synchronize()
+            np.testing.assert_array_equal(task.detached.numpy(), [1])
+            for _ in range(130):
+                self.mw.step(gpu_model, data)
+                task.record()
+            self.wp.synchronize()
+            np.testing.assert_array_equal(task.success.numpy(), [0])
+            np.testing.assert_array_equal(task.harvested.numpy(), [1])
+            np.testing.assert_array_equal(task.active_fruit.numpy(), [1])
+            np.testing.assert_array_equal(task.deposited.numpy()[0, :2], [1, 0])
+            eq = data.eq_active.numpy()[0]
+            self.assertFalse(bool(eq[task.equality_id]))
+            self.assertTrue(bool(eq[int(model.equality('fruit_1_connect').id)]))
+            xpos = data.xpos.numpy()[0]
+            np.testing.assert_allclose(xpos[fruit1], hanging, atol=0.08)
+            self.assertGreater(float(xpos[fruit0, 2]), 0.35)
+
 
 if __name__ == '__main__':
     unittest.main()
