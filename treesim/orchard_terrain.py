@@ -18,7 +18,8 @@ tighter than a typical commercial pergola (often ~4–5 m) and is an assumed
 layout, not a measured Hayward-block survey. Sampled per seed, assumed
 domain-randomization ranges:
 
-* ``slope_deg`` U(-4, +4)
+* ``slope_deg`` U(-4, +4) by default; hillside previews may pin up to ±12°
+  as an assumed farm tilt, not a surveyed block.
 * ``ground_noise_m`` U(0, 0.04)
 * ``rut_depth_m`` U(0, 0.08)
 * ``rut_width_m`` U(0.20, 0.60)
@@ -396,10 +397,10 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     depth_span = _as_range(rut_depth_m, getattr(ph, "orchard_rut_depth_m", (0.0, 0.08)), "rut_depth_m")
     width_span = _as_range(rut_width_m, getattr(ph, "orchard_rut_width_m", (0.20, 0.60)), "rut_width_m")
     mu_span = _as_range(friction, getattr(ph, "orchard_friction", (0.6, 1.3)), "friction")
-    az_span = _as_range(slope_azimuth_deg, (0.0, 360.0), "slope_azimuth_deg")
+    az_span = _as_range(slope_azimuth_deg, getattr(ph, "orchard_slope_azimuth_deg", (0.0, 360.0)), "slope_azimuth_deg")
 
-    if slope_span[0] < -4.0 - 1e-9 or slope_span[1] > 4.0 + 1e-9:
-        raise ValueError("slope_deg must stay inside [-4, +4]")
+    if slope_span[0] < -12.0 - 1e-9 or slope_span[1] > 12.0 + 1e-9:
+        raise ValueError("slope_deg must stay inside [-12, +12]")
     if noise_span[0] < 0.0 or noise_span[1] > 0.04 + 1e-9:
         raise ValueError("noise_m must stay inside [0, 0.04] m")
     if depth_span[0] < 0.0 or depth_span[1] > 0.08 + 1e-9:

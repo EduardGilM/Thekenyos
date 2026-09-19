@@ -30,6 +30,9 @@ class OrchardTerrainTest(unittest.TestCase):
         m = a.metrics()
         self.assertEqual(m["kind"], "kiwi_orchard_floor")
         self.assertTrue(-4 <= m["slope_deg"] <= 4)
+        hill = sample_orchard_floor(0, slope_deg=10.0, noise_m=0.0, rut_depth_m=0.0,
+                                    rut_width_m=0.40, friction=1.0, slope_azimuth_deg=0.0)
+        self.assertAlmostEqual(hill.slope_deg, 10.0)
         self.assertTrue(0 <= m["ground_noise_m"] <= 0.04)
         self.assertTrue(0 <= m["rut_depth_m"] <= 0.08)
         self.assertTrue(0.20 <= m["rut_width_m"] <= 0.60)
@@ -72,7 +75,7 @@ class OrchardTerrainTest(unittest.TestCase):
 
     def test_invalid_inputs(self):
         with self.assertRaises(ValueError):
-            sample_orchard_floor(0, slope_deg=9.0)
+            sample_orchard_floor(0, slope_deg=20.0)
         with self.assertRaises(ValueError):
             sample_orchard_floor(0, noise_m=0.1)
         with self.assertRaises(ValueError):
@@ -101,9 +104,11 @@ class OrchardTerrainTest(unittest.TestCase):
                                    places=5)
             self.assertGreater(top[2] - foot[2], 1.4)
         for seg in skel:
-            if seg.order > 0:
+            if seg.order == 1 or (seg.order == 2 and seg.supported):
                 self.assertAlmostEqual(seg.start[2], floor.canopy_z(*seg.start[:2]), places=9)
                 self.assertAlmostEqual(seg.end[2], floor.canopy_z(*seg.end[:2]), places=9)
+            if seg.order == 2 and not seg.supported:
+                self.assertLess(seg.end[2], floor.canopy_z(*seg.end[:2]) - 0.05)
             if seg.parent >= 0:
                 np.testing.assert_array_equal(seg.start, skel[seg.parent].end)
 

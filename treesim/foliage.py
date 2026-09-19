@@ -43,21 +43,26 @@ def _rodrigues(v, axis, ang):
 # triangles per leaf mesh; leaves stay massless & non-colliding, so physics
 # cost is still zero.
 # --------------------------------------------------------------------------- #
-def leaf_mesh(length: float, width: float, fold: float = 0.55,
-              curl: float = 0.30, droop: float = 0.35, nseg: int = 5):
-    """Return a :class:`newton.Mesh` leaf blade.
+def leaf_blade_arrays(length: float, width: float, fold: float = 0.55,
+                     curl: float = 0.30, droop: float = 0.35, nseg: int = 5,
+                     shape: str = "elliptic"):
+    """Folded blade vertices/faces. ``shape`` is elliptic (apple) or cordate (kiwi).
 
-    Local frame matches the old cards: +Z along the blade from the petiole,
-    +X across the blade.  The blade folds up along the midrib (``fold``),
-    lifts/curls toward the tip (``curl``) and droops down overall (``droop``),
-    so it catches light like a real leaf instead of a flat card.
+    Cordate outline is an artistic Actinidia-style proxy, not a scanned cultivar.
     """
-    import newton
+    if shape not in ("elliptic", "cordate"):
+        raise ValueError("leaf shape must be elliptic or cordate")
     ts = np.linspace(0.0, 1.0, nseg + 1)
     verts: list[tuple] = []
-    rows: list[tuple] = []       # (left, mid, right) vertex ids per row
+    rows: list[tuple] = []
     for t in ts:
-        w = 0.5 * width * (np.sin(np.pi * min(t, 0.995) ** 0.8) ** 0.85 + 0.03)
+        tt = min(float(t), 0.995)
+        if shape == "cordate":
+            envelope = (np.sin(np.pi * tt ** 0.58) ** 0.70
+                        + 0.28 * np.sin(np.pi * min(tt * 1.45, 1.0)) * (1.0 - tt))
+            w = 0.5 * width * (envelope + 0.05)
+        else:
+            w = 0.5 * width * (np.sin(np.pi * tt ** 0.8) ** 0.85 + 0.03)
         z = length * t
         y_rib = curl * length * t * t - droop * length * t * t * t
         y_edge = y_rib + fold * w
@@ -70,15 +75,28 @@ def leaf_mesh(length: float, width: float, fold: float = 0.55,
     for r in range(nseg):
         l0, m0, r0 = rows[r]
         l1, m1, r1 = rows[r + 1]
-        idx += [l0, m0, l1, m0, m1, l1,      # left strip
-                m0, r0, m1, r0, r1, m1]      # right strip
-    # double-sided: same triangles with flipped winding
+        idx += [l0, m0, l1, m0, m1, l1,
+                m0, r0, m1, r0, r1, m1]
     back = []
     for k in range(0, len(idx), 3):
         back += [idx[k], idx[k + 2], idx[k + 1]]
-    return newton.Mesh(np.asarray(verts, dtype=np.float32),
-                       np.asarray(idx + back, dtype=np.int32),
-                       compute_inertia=False, is_solid=False)
+    return (np.asarray(verts, dtype=np.float32),
+            np.asarray(idx + back, dtype=np.int32))
+
+
+def leaf_mesh(length: float, width: float, fold: float = 0.55,
+              curl: float = 0.30, droop: float = 0.35, nseg: int = 5,
+              shape: str = "elliptic"):
+    """Return a :class:`newton.Mesh` leaf blade.
+
+    Local frame matches the old cards: +Z along the blade from the petiole,
+    +X across the blade.  The blade folds up along the midrib (``fold``),
+    lifts/curls toward the tip (``curl``) and droops down overall (``droop``),
+    so it catches light like a real leaf instead of a flat card.
+    """
+    import newton
+    verts, faces = leaf_blade_arrays(length, width, fold, curl, droop, nseg, shape)
+    return newton.Mesh(verts, faces, compute_inertia=False, is_solid=False)
 
 
 # size classes: a few DISCRETE sizes -> a few instance batches (a continuous
@@ -88,7 +106,8 @@ LEAF_SIZE_CLASSES = (0.72, 1.0, 1.35)
 
 def leaf_meshes(fp: FoliageParams):
     """One shared blade mesh per size class for this config's leaf size."""
-    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s)
+    shape = getattr(fp, "leaf_shape", "elliptic")
+    return [leaf_mesh(fp.leaf_length * s, fp.leaf_width * s, shape=shape)
             for s in LEAF_SIZE_CLASSES]
 
 

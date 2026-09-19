@@ -137,12 +137,17 @@ def generate(height: float = 1.6, seed: int = 0, rows: int = 45,
                         ex = xs[xi] + side * length
                         radius = rng.uniform(0.006, 0.009)
                         # Ideal rigid ties secure the main cane to the wire.
-                        # Only the final 0.35 m horizontal span is compliant.
+                        # Only the final span is a hanging fruiting lateral.
                         # Tie/wire compliance is an engineering simplification.
+                        # Lateral droop/meander is an artistic Hayward proxy,
+                        # not a measured cane survey.
                         tx = ex - side * .35
                         tied = add(wire, [tx, wire_y, canopy(tx, wire_y)],
                                    radius, 2, supported=True)
-                        add(tied, [ex, wire_y, canopy(ex, wire_y)], radius, 2)
+                        hang = rng.uniform(0.12, 0.28)
+                        sway = rng.uniform(-0.12, 0.12)
+                        add(tied, [ex, wire_y + sway, canopy(ex, wire_y) - hang],
+                            radius * 0.85, 2)
         previous_end = beam
         direction *= -1
     return TreeSkeleton(segments)

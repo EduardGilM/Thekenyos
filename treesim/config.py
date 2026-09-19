@@ -236,6 +236,7 @@ class PhysicsParams:
     orchard_row_pitch_m: float = 2.0   # vine-row / surco spacing; aisle stays on bay centre
     orchard_cell_m: float = 0.05
     orchard_slope_deg: tuple = (-4.0, 4.0)
+    orchard_slope_azimuth_deg: tuple = (0.0, 360.0)
     orchard_noise_m: tuple = (0.0, 0.04)
     orchard_rut_depth_m: tuple = (0.0, 0.08)
     orchard_rut_width_m: tuple = (0.20, 0.60)
@@ -364,6 +365,7 @@ class FoliageParams:
     leaf_length: float = 0.085         # m
     leaf_width: float = 0.050          # m  (L:W ~ 1.7, elliptic-ovate)
     leaf_color: tuple = (0.18, 0.42, 0.12)  # per-env foliage colour (DR varies it)
+    leaf_shape: str = "elliptic"       # elliptic apple; cordate kiwi proxy
     leaf_mass: float = 0.002           # kg (only used by the --foliage-physics path)
     physics: bool = False              # give each leaf a compliant petiole joint
     petiole_stiffness: float = 0.02

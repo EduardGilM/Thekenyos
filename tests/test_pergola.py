@@ -34,14 +34,16 @@ class PergolaTest(unittest.TestCase):
             if seg.parent >= 0:
                 self.assertLess(seg.parent, seg.index)
                 np.testing.assert_array_equal(seg.start, a[seg.parent].end)
-            if seg.order > 0:
+            if seg.order == 1 or (seg.order == 2 and seg.supported):
                 self.assertAlmostEqual(seg.start[2], 1.6)
                 self.assertAlmostEqual(seg.end[2], 1.6)
 
         tips = [s for s in a if s.order == 2 and not s.supported]
         self.assertTrue(tips)
         for tip in tips:
-            self.assertAlmostEqual(tip.length, .35)
+            self.assertAlmostEqual(abs(tip.end[0] - tip.start[0]), .35, places=5)
+            self.assertLess(tip.end[2], 1.48)
+            self.assertGreater(tip.end[2], 1.30)
             self.assertTrue(a[tip.parent].supported)
         fp = FruitParams(max_count=96, radius=(0.024, 0.028), stem_length=0.055,
                          colors=((0.39, 0.27, 0.12),))
@@ -387,6 +389,27 @@ class PergolaTest(unittest.TestCase):
             with self.subTest(extra=extra), patch('sys.argv', command + extra), \
                     patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
                 parse_args()
+
+    def test_cli_hillside_pins_orchard_tilt(self):
+        import io
+        from unittest.mock import patch
+        from scripts.grow_tree import make_config, parse_args
+        with patch('sys.argv', ['grow_tree.py', '--preset', 'pergola', '--hillside']):
+            cfg = make_config(parse_args())
+        self.assertTrue(cfg.physics.terrain)
+        self.assertEqual(cfg.physics.terrain_kind, 'orchard')
+        self.assertEqual(cfg.physics.orchard_slope_deg, (10.0, 10.0))
+        self.assertEqual(cfg.physics.orchard_slope_azimuth_deg, (38.0, 38.0))
+        self.assertEqual(cfg.foliage.leaf_shape, 'cordate')
+        with patch('sys.argv', ['grow_tree.py', '--preset', 'apple', '--hillside']), \
+                patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+            parse_args()
+
+    def test_cordate_leaf_is_broader_near_base_than_elliptic(self):
+        from treesim.foliage import leaf_blade_arrays
+        cord, _ = leaf_blade_arrays(.22, .17, shape='cordate')
+        ellip, _ = leaf_blade_arrays(.22, .17, shape='elliptic')
+        self.assertGreater(abs(float(cord[3, 0])), abs(float(ellip[3, 0])))
 
     def test_height_and_existing_presets(self):
         params = preset("pergola")
