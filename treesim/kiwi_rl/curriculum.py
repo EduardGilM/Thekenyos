@@ -64,15 +64,21 @@ SPEEDRUN_PRESET = {
 # the liner, change promotion gates, or turn the oracle into an action teacher.
 # Eval still uses guidance_weight=0 and teacher_mix=0.
 EASY_PRESET = {
-    'teacher_mix': 0.4,
+    'teacher_mix': 1.0,
     'teacher_horizon_updates': 60,
     'shaping_coef': 5.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    'airdrop_above_rim_m': 0.06,
     'start_margin_m': 0.40,
     'start_clearance_m': 0.28,
-    'n_start_poses': 8,
+    'n_start_poses': 24,
+    'start_x_span_m': 0.32,
+    'start_y_span_m': 0.10,
+    'start_z_span_m': 0.08,
+    'ik_accept_err_m': 0.025,
+    'n_hold_levels': 8,
+    'hold_close_min': 0.40,
+    'hold_close_max': 1.00,
     'far_horizon_updates': 200,
     'default_shaping_coef': 2.0,
 }

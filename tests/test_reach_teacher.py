@@ -3,8 +3,8 @@ import numpy as np
 
 from treesim.kiwi_rl.reach_teacher import (
     damped_least_squares, bounded_damped_least_squares, hover_tcp_world_m,
-    basket_chassis_aabb_m, easy_airdrop_world_m, easy_start_local_m,
-    tcp_outside_basket,
+    basket_chassis_aabb_m, easy_start_local_m,
+    hold_close_fracs, jaw_hold_q, select_hold_close, tcp_outside_basket,
 )
 
 
@@ -64,21 +64,23 @@ class ReachTeacherMathTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             easy_start_local_m(1.1)
 
-    def test_easy_airdrop_is_over_opening_not_tcp(self):
-        from treesim.basket import CENTER, SIZE
-        from treesim.kiwi_rl.curriculum import EASY_PRESET
-        xpos = np.array([1.0, 2.0, 3.0])
-        xmat = np.eye(3)
-        pos = easy_airdrop_world_m(xpos, xmat)
-        above = float(EASY_PRESET['airdrop_above_rim_m'])
-        self.assertAlmostEqual(float(pos[0]), 1.0 + float(CENTER[0]))
-        self.assertAlmostEqual(float(pos[1]), 2.0 + float(CENTER[1]))
-        self.assertAlmostEqual(float(pos[2]), 3.0 + float(CENTER[2] + SIZE[2] + above))
-        self.assertGreater(float(pos[2] - xpos[2]), float(CENTER[2] + SIZE[2]))
-        with self.assertRaises(ValueError):
-            easy_airdrop_world_m(xpos, xmat, above_rim_m=0.0)
-        with self.assertRaises(ValueError):
-            easy_airdrop_world_m(xpos, xmat, above_rim_m=0.4)
+    def test_hold_sweep_picks_lightest_retaining_close(self):
+        fracs = hold_close_fracs()
+        self.assertEqual(len(fracs), 8)
+        self.assertAlmostEqual(jaw_hold_q(0.0, 0.2, -0.4), 0.2)
+        rows = [
+            {'close_frac': 0.4, 'slip_m': 0.20, 'max_load_N': 2.0, 'retained': False},
+            {'close_frac': 0.6, 'slip_m': 0.03, 'max_load_N': 8.0, 'retained': True},
+            {'close_frac': 0.8, 'slip_m': 0.01, 'max_load_N': 12.0, 'retained': True},
+            {'close_frac': 1.0, 'slip_m': 0.01, 'max_load_N': 40.0, 'retained': True},
+        ]
+        chosen = select_hold_close(rows, slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(chosen['close_frac'], 0.6)
+        crushed = select_hold_close([
+            {'close_frac': 0.5, 'slip_m': 0.30, 'max_load_N': 4.0, 'retained': False},
+            {'close_frac': 1.0, 'slip_m': 0.02, 'max_load_N': 22.0, 'retained': True},
+        ], slip_ok_m=0.04, load_limit_n=15.0)
+        self.assertAlmostEqual(crushed['close_frac'], 0.5)
 
     def test_saturated_joint_can_move_inward(self):
         step = bounded_damped_least_squares(

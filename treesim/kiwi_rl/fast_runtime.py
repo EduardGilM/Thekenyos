@@ -296,7 +296,9 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
 def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
                       qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
                       qids: wp.array(dtype=int), start_q: wp.array2d(dtype=float),
-                      start_index: wp.array(dtype=int), jaw_qposadr: int, jaw_closed: float):
+                      start_index: wp.array(dtype=int), jaw_qposadr: int,
+                      jaw_hold_next: wp.array(dtype=float),
+                      jaw_hold: wp.array(dtype=float)):
     world = wp.tid()
     if mask[world] == 0 or reset_mode[world] != 1:
         return
@@ -308,34 +310,22 @@ def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
         value = start_q[idx, joint]
         qpos[world, qid] = value
         targets[world, joint + 12] = value
-    qpos[world, jaw_qposadr] = jaw_closed
-    targets[world, 18] = jaw_closed
+    hold = jaw_hold_next[world]
+    jaw_hold[world] = hold
+    qpos[world, jaw_qposadr] = hold
+    targets[world, 18] = hold
 
 
 @wp.kernel
-def _easy_airdrop(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
-                  qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
-                  targets: wp.array2d(dtype=float), fruit_qposadr: wp.array(dtype=int),
-                  fruit_dofadr: wp.array(dtype=int), jaw_qposadr: int, jaw_open: float,
-                  xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
-                  chassis: int, spawn_local: wp.vec3):
-    """Open the jaw and place a free fruit over the basket opening, above the rim.
-
-    The arm stays on the 40 cm outside-crate start. Not a liner teleport.
-    """
+def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                         qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
+                         jaw_qposadr: int, jaw_hold: wp.array(dtype=float)):
     world = wp.tid()
     if mask[world] == 0 or reset_mode[world] != 1:
         return
-    qadr = fruit_qposadr[0]
-    dadr = fruit_dofadr[0]
-    spawn = xpos[world, chassis] + xmat[world, chassis] @ spawn_local
-    qpos[world, qadr + 0] = spawn[0]
-    qpos[world, qadr + 1] = spawn[1]
-    qpos[world, qadr + 2] = spawn[2]
-    for i in range(6):
-        qvel[world, dadr + i] = 0.0
-    qpos[world, jaw_qposadr] = jaw_open
-    targets[world, 18] = jaw_open
+    hold = jaw_hold[world]
+    qpos[world, jaw_qposadr] = hold
+    targets[world, 18] = hold
 
 
 @wp.kernel
@@ -344,7 +334,7 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
                                active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
                                goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
                                targets: wp.array2d(dtype=float), hover_q: wp.array(dtype=float),
-                               jaw_closed: float, jaw_open: float, open_xy_m: float,
+                               jaw_hold: wp.array(dtype=float), jaw_open: float, open_xy_m: float,
                                max_delta: float, out_applied: wp.array2d(dtype=float)):
     world, joint = wp.tid()
     active = 1 if (goal[world] == 0 or detached[world] != 0) else 0
@@ -367,7 +357,7 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
         desired = hover_q[joint]
         current = targets[world, joint + 12]
     else:
-        desired = jaw_open if over else jaw_closed
+        desired = jaw_open if over else jaw_hold[world]
         current = targets[world, 18]
     delta = wp.clamp(desired - current, -max_delta, max_delta)
     out_applied[world, joint] = delta / max_delta
@@ -480,14 +470,8 @@ class FastRuntime:
             jaw_range = np.asarray(self.model.jnt_range[self.control.contract.joints[18]], dtype=np.float32)
             self._jaw_closed = float(jaw_range[0] if np.isfinite(jaw_range[0]) else 0.0)
             self._jaw_open = float(jaw_range[1] if np.isfinite(jaw_range[1]) else 0.8)
-            from treesim.basket import CENTER, SIZE
+            from treesim.basket import CENTER
             self._basket_center = wp.vec3(*CENTER)
-            above = float(EASY_PRESET['airdrop_above_rim_m'])
-            if not np.isfinite(above) or not 0 < above <= 0.3:
-                raise ValueError('airdrop_above_rim_m must be finite in (0, 0.3] m')
-            spawn_local = np.asarray(CENTER, dtype=np.float64) + np.array(
-                [0.0, 0.0, float(SIZE[2]) + above], dtype=np.float64)
-            self._airdrop_local = wp.vec3(*spawn_local)
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -510,9 +494,18 @@ class FastRuntime:
             self._open_xy_m = float(EASY_PRESET['open_xy_m'])
             self._easy_far_frac = 0.0
             drop_q, drop_err, start_qs, start_errs = self._solve_easy_poses(initial.qpos)
+            from .reach_teacher import hold_close_fracs
             self._hover_q = wp.array(drop_q, dtype=float, device=self.device)
             self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
             self._easy_start_index = wp.zeros(worlds, dtype=int, device=self.device)
+            self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
+            self._easy_jaw_hold_next = wp.zeros(worlds, dtype=float, device=self.device)
+            closed_holds = np.full(worlds, self._jaw_closed, dtype=np.float32)
+            self._easy_jaw_hold.assign(closed_holds)
+            self._easy_jaw_hold_next.assign(closed_holds)
+            self._hold_close_fracs = np.asarray(hold_close_fracs(), dtype=np.float64)
+            self._chosen_close_frac = float(self._hold_close_fracs[len(self._hold_close_fracs) // 2])
+            self._hold_sweep = None
             self.hover_error_m = float(drop_err) if np.isfinite(drop_err) else 1.0
             self.easy_start_error_m = float(np.max(start_errs)) if np.isfinite(start_errs).all() else 1.0
             self._teacher_applied = wp.zeros((worlds, 7), dtype=float, device=self.device)
@@ -653,9 +646,10 @@ class FastRuntime:
         self._layout_dy.assign(_arr('layout_dy_m', np.float32, 0.0))
 
     def _solve_easy_poses(self, initial_qpos):
-        """CPU IK: high drop pose for the teacher, outside-crate start ladder."""
+        """CPU IK: high drop pose for the teacher, random outside-crate starts."""
         from .reach_teacher import (
-            easy_start_local_m, hover_tcp_world_m, solve_tcp_hover, tcp_outside_basket,
+            easy_start_local_m, hover_tcp_world_m, random_easy_start_local_m,
+            solve_tcp_hover, tcp_outside_basket,
         )
         contract = self.control.contract
         qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
@@ -680,53 +674,74 @@ class FastRuntime:
         if not np.isfinite(drop_q).all() or not np.isfinite(drop_err):
             drop_q, drop_err = q_home.astype(np.float32), 1.0
         n = int(EASY_PRESET['n_start_poses'])
-        start_qs = np.zeros((n, 6), dtype=np.float32)
-        start_errs = np.zeros(n, dtype=np.float64)
+        accept = float(EASY_PRESET['ik_accept_err_m'])
+        start_qs = []
+        start_errs = []
         q_init = q_home.copy()
-        for i in range(n - 1, -1, -1):
-            frac = 0.0 if n == 1 else i / float(n - 1)
-            local = easy_start_local_m(
-                frac, home_local,
-                margin_m=EASY_PRESET['start_margin_m'],
-                clearance_m=EASY_PRESET['start_clearance_m'])
+        near = easy_start_local_m(
+            0.0, home_local,
+            margin_m=EASY_PRESET['start_margin_m'],
+            clearance_m=EASY_PRESET['start_clearance_m'])
+        rng = np.random.default_rng(7)
+        attempts = 0
+        max_attempts = n * 8
+        while len(start_qs) < n and attempts < max_attempts:
+            attempts += 1
+            if not start_qs:
+                local = near
+            else:
+                local = random_easy_start_local_m(
+                    rng, home_local,
+                    margin_m=EASY_PRESET['start_margin_m'],
+                    clearance_m=EASY_PRESET['start_clearance_m'])
             if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
-                raise ValueError('easy start pose intersects the crate')
+                continue
             target = chassis_p + chassis_R @ local
             arm_q, err = solve_tcp_hover(
                 self.model, qpos, self.tcp_site, target, qids, dofs, q_init, ranges)
-            if not np.isfinite(arm_q).all() or not np.isfinite(err):
-                arm_q, err = q_init.astype(np.float32), 1.0
-            start_qs[i] = arm_q
-            start_errs[i] = err
+            if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+                continue
+            start_qs.append(arm_q.astype(np.float32))
+            start_errs.append(float(err))
             q_init = arm_q.astype(np.float64)
-        return drop_q.astype(np.float32), float(drop_err), start_qs, start_errs
+        if not start_qs:
+            raise ValueError('easy start IK found no physics-safe outside-crate pose')
+        while len(start_qs) < n:
+            start_qs.append(start_qs[0])
+            start_errs.append(start_errs[0])
+        return drop_q.astype(np.float32), float(drop_err), np.stack(start_qs), np.asarray(start_errs)
 
     def set_easy_progress(self, far_frac, rng):
-        """Sample per-world start indices from nearest-outside up to ``far_frac``.
+        """Sample a random outside-crate start and a jaw hold close-fraction.
 
-        ``far_frac`` 0 keeps every deposit world just outside the crate; 1
-        includes the farthest home-side carry. Fruit stays a free body.
+        ``far_frac`` is kept for logs/clips; starts are drawn from the whole
+        IK catalog so the student sees many carry distances. Fruit stays free.
         """
         frac = float(far_frac)
         if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
             raise ValueError('far_frac must be finite in [0, 1]')
         n = int(self._easy_start_q.shape[0])
-        max_index = int(round(frac * (n - 1)))
-        idx = np.asarray(rng.integers(0, max_index + 1, size=self.worlds), dtype=np.int32)
+        idx = np.asarray(rng.integers(0, n, size=self.worlds), dtype=np.int32)
+        close = float(self._chosen_close_frac)
+        jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
         self._easy_start_index.assign(idx)
+        self._easy_jaw_hold.assign(np.full(self.worlds, jaw_hold, dtype=np.float32))
         self._easy_far_frac = frac
         return {
             'easy_far_frac': frac,
-            'easy_start_index_max': max_index,
+            'easy_start_index_max': int(n - 1),
             'easy_start_index_mean': float(idx.mean()),
+            'easy_hold_close_mean': close,
+            'easy_hold_index_mean': close,
         }
 
     def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
-        """Train-only facilitation: outside-crate arm + airdrop + stronger shaping.
+        """Train-only facilitation: random outside-crate carry + jaw hold sweep.
 
         Does not weld fruit, spawn the arm inside the crate, or write fruit
         into the liner. Eval still sets guidance_weight=0; the caller must
-        keep teacher_mix at 0 there.
+        keep teacher_mix at 0 there. Jaw close fractions are a rigid contact
+        sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
         if shaping_coef is None:
@@ -742,6 +757,11 @@ class FastRuntime:
         if not np.isfinite(self._open_xy_m) or not 0 < self._open_xy_m <= 0.5:
             raise ValueError('open_xy_m must be finite in (0, 0.5] m')
         self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
+        if self._easy and self._hold_sweep is None:
+            self._hold_sweep = self._run_hold_sweep()
+            self._chosen_close_frac = float(self._hold_sweep['chosen_close_frac'])
+            hold = self._jaw_open + self._chosen_close_frac * (self._jaw_closed - self._jaw_open)
+            self._easy_jaw_hold.assign(np.full(self.worlds, hold, dtype=np.float32))
         return {
             'easy': self._easy,
             'shaping_coef': coef,
@@ -749,10 +769,41 @@ class FastRuntime:
             'hover_error_m': float(self.hover_error_m),
             'easy_start_error_m': float(self.easy_start_error_m),
             'n_start_poses': int(self._easy_start_q.shape[0]),
+            'n_hold_levels': int(self._hold_close_fracs.shape[0]),
+            'hold_close_frac': float(self._chosen_close_frac),
+            'hold_sweep_slip_m': None if self._hold_sweep is None else self._hold_sweep.get('chosen_slip_m'),
+            'hold_sweep_load_N': None if self._hold_sweep is None else self._hold_sweep.get('chosen_load_N'),
             'weld': False,
             'scope': ('experimental privileged deposit facilitation; fruit stays free; '
-                      'arm starts outside the crate; fruit airdrops over the opening'),
+                      'random outside-crate arm starts; jaw-close sweep holds then deposits'),
         }
+
+    def _run_hold_sweep(self):
+        """One CPU sweep of jaw close-fractions. Not a tissue calibration."""
+        from .fast_task import JAW_FORCE_LIMIT_N
+        from .reach_teacher import sweep_jaw_hold
+        qpos = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+        if qpos.ndim > 1:
+            qpos = qpos.reshape(-1)
+        start_q = np.asarray(self._easy_start_q.numpy()[0], dtype=np.float64)
+        try:
+            return sweep_jaw_hold(
+                self.model, qpos, tcp_site=self.tcp_site,
+                fruit_qposadr=int(self._fruit_qposadr), fruit_dofadr=int(self._fruit_dofadr),
+                jaw_qposadr=int(self._jaw_qposadr),
+                arm_qids=self.control.contract.qids[12:18], start_q=start_q,
+                jaw_open=self._jaw_open, jaw_closed=self._jaw_closed,
+                load_limit_n=float(JAW_FORCE_LIMIT_N))
+        except (ValueError, RuntimeError, TypeError):
+            mid = float(self._hold_close_fracs[len(self._hold_close_fracs) // 2])
+            return {
+                'rows': [],
+                'chosen_close_frac': mid,
+                'chosen_slip_m': None,
+                'chosen_load_N': None,
+                'weld': False,
+                'scope': 'hold sweep fallback; mid close-frac',
+            }
 
     def privileged_deposit_action(self):
         """Joint increments toward hover, but hold still when fruit XY is over the basket.
@@ -769,7 +820,7 @@ class FastRuntime:
                 self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
                 self.task.active_fruit, self._basket_center, self.task.goal,
                 self.task.detached, self.control.targets, self._hover_q,
-                self._jaw_closed, self._jaw_open, float(self._open_xy_m),
+                self._easy_jaw_hold, self._jaw_open, float(self._open_xy_m),
                 float(max_delta), self._teacher_applied], device=self.device)
         applied = wp.to_torch(self._teacher_applied)
         if tuple(applied.shape) != (self.worlds, 7):
@@ -810,7 +861,7 @@ class FastRuntime:
                 wp.launch(_apply_easy_start, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self.control.qids, self._easy_start_q, self._easy_start_index,
-                    self._jaw_qposadr, self._jaw_closed],
+                    self._jaw_qposadr, self._easy_jaw_hold_next, self._easy_jaw_hold],
                     device=self.device)
                 mw.forward(self.gpu_model, self.data)
                 self._refresh(mw)
@@ -821,16 +872,13 @@ class FastRuntime:
                 self.task.eq_active, self.task.detached, self.task.grasped, self.task.grasp_paid,
                 self._chassis_qposadr, 1.0, self._randomize_layout, self._layout_dx, self._layout_dy],
                 device=self.device)
+            if self._easy:
+                wp.launch(_apply_easy_jaw_hold, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
+                    self._jaw_qposadr, self._easy_jaw_hold],
+                    device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
-            if self._easy:
-                wp.launch(_easy_airdrop, dim=self.worlds, inputs=[
-                    mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
-                    self._fruit_qposadrs, self._fruit_dofadrs, self._jaw_qposadr, self._jaw_open,
-                    self.data.xpos, self.data.xmat, self.chassis, self._airdrop_local],
-                    device=self.device)
-                mw.forward(self.gpu_model, self.data)
-                self._refresh(mw)
             self._measure_reward(mask_wp)
             wp.launch(_basket_distance, dim=self.worlds,
                       inputs=[self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,

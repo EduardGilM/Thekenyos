@@ -36,7 +36,7 @@ PRIORITY_CHARTS = (
     'recovered_worlds', 'overflow_worlds', 'evaluation/recovered_worlds', 'evaluation/overflow_worlds',
     'evaluation/terminal_transitions', 'terminal_transitions',
     'curriculum_index', 'guidance_weight', 'teacher_mix', 'shaping_coef',
-    'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max',
+    'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max', 'easy_hold_close_mean',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
 )
@@ -221,6 +221,7 @@ const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian"
   "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
   "easy_far_frac", "easy_start_index_mean", "easy_start_index_max", "teacher_mix",
+  "easy_hold_close_mean", "hand_load_mean_N", "hand_load_max_N",
   "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
   "ground_contact_worlds", "fallen_worlds", "failed_worlds", "hand_load_max_N",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
@@ -638,11 +639,13 @@ def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
 
 def apply_native_easy_start(model, data, controller, tcp_site: int, *,
                             far_frac: float = 0.0) -> float:
-    """Move the native arm to an outside-crate carry start. Fruit is not written."""
+    """Move the native arm to a random outside-crate carry start. Fruit is not written."""
     import mujoco
     import numpy as np
     from treesim.kiwi_rl.curriculum import EASY_PRESET
-    from treesim.kiwi_rl.reach_teacher import easy_start_local_m, solve_tcp_hover, tcp_outside_basket
+    from treesim.kiwi_rl.reach_teacher import (
+        random_easy_start_local_m, solve_tcp_hover, tcp_outside_basket,
+    )
     frac = float(far_frac)
     if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
         raise ValueError('far_frac must be finite in [0, 1]')
@@ -657,8 +660,9 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
     chassis_R = np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3)
     home_tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
     home_local = chassis_R.T @ (home_tcp - chassis_p)
-    local = easy_start_local_m(
-        frac, home_local,
+    rng = np.random.default_rng(7 + int(round(frac * 10_000)))
+    local = random_easy_start_local_m(
+        rng, home_local,
         margin_m=EASY_PRESET['start_margin_m'],
         clearance_m=EASY_PRESET['start_clearance_m'])
     if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
@@ -698,24 +702,19 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     if easy and reset_mode == 1:
         apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
-        if easy:
-            from treesim.kiwi_rl.reach_teacher import easy_airdrop_world_m
-            spawn = easy_airdrop_world_m(
-                data.xpos[controller.chassis], data.xmat[controller.chassis])
-            data.qpos[qposadr:qposadr + 3] = spawn
-            opened = float(model.jnt_range[int(controller.joints[18]), 1])
-            if not np.isfinite(opened):
-                opened = 0.8
-            data.qpos[int(controller.qids[18])] = opened
-            controller.targets[18] = opened
-        else:
-            tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
-            data.qpos[qposadr:qposadr + 3] = tcp
-            closed = float(model.jnt_range[int(controller.joints[18]), 0])
-            if not np.isfinite(closed):
-                closed = 0.0
-            data.qpos[int(controller.qids[18])] = closed
-            controller.targets[18] = closed
+        tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+        data.qpos[qposadr:qposadr + 3] = tcp
+        from treesim.kiwi_rl.reach_teacher import jaw_hold_q
+        jaw_joint = int(controller.joints[18])
+        opened = float(model.jnt_range[jaw_joint, 1])
+        closed = float(model.jnt_range[jaw_joint, 0])
+        if not np.isfinite(opened):
+            opened = 0.8
+        if not np.isfinite(closed):
+            closed = 0.0
+        hold = jaw_hold_q(0.75 if easy else 1.0, opened, closed)
+        data.qpos[int(controller.qids[18])] = hold
+        controller.targets[18] = hold
         data.qpos[qposadr + 3:qposadr + 7] = (1.0, 0.0, 0.0, 0.0)
         data.qvel[dofadr:dofadr + 6] = 0.0
         equality = fruit.get('equality')

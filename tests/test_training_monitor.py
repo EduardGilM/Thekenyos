@@ -152,10 +152,11 @@ class TrainingMonitorTests(unittest.TestCase):
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
         self.assertIn('hover_tcp_world_m', inspect.getsource(apply_native_easy_hover))
-        self.assertIn('easy_start_local_m', inspect.getsource(apply_native_easy_start))
+        self.assertIn('random_easy_start_local_m', inspect.getsource(apply_native_easy_start))
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
-        self.assertIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))
+        self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
         html_easy_video = render_dashboard_html(dict(
             schema='training-monitor/v1', training_ready=False, run='x', rows=1,
             latest=dict(step=1), series={}, generated_at='now',

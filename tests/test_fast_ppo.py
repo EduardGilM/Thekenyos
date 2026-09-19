@@ -106,7 +106,7 @@ class FastTrainerCLITest(unittest.TestCase):
         from train_fast import apply_easy_cli
         filled = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=None, shaping_coef=None))
-        self.assertEqual(filled.teacher_mix, 0.4)
+        self.assertEqual(filled.teacher_mix, 1.0)
         self.assertEqual(filled.shaping_coef, 5.0)
         kept = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=0.0, shaping_coef=2.0))
@@ -128,6 +128,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('basket_distance_mean_m', run_src)
         self.assertIn('easy_far_frac', run_src)
         self.assertIn('easy_teacher_mix', run_src)
+        self.assertIn('easy_hold_close_mean', run_src)
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
         self.assertIn('latest.pt', run_src)

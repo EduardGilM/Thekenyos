@@ -42,7 +42,7 @@ def easy_airdrop_world_m(chassis_xpos, chassis_xmat, *, above_rim_m=None):
     from treesim.kiwi_rl.curriculum import EASY_PRESET
     xpos = np.asarray(chassis_xpos, dtype=np.float64).reshape(3)
     xmat = np.asarray(chassis_xmat, dtype=np.float64).reshape(3, 3)
-    above = float(EASY_PRESET['airdrop_above_rim_m'] if above_rim_m is None else above_rim_m)
+    above = float(above_rim_m if above_rim_m is not None else EASY_PRESET.get('airdrop_above_rim_m', 0.06))
     if not np.isfinite(above) or not 0 < above <= 0.3:
         raise ValueError('airdrop_above_rim_m must be finite in (0, 0.3] m')
     if not np.isfinite(xpos).all() or not np.isfinite(xmat).all():
@@ -110,6 +110,201 @@ def push_tcp_outside_basket(local, *, margin_m=0.12):
     if point[2] < hi[2]:
         point[2] = hi[2]
     return point
+
+
+def hold_close_fracs(n_levels=None, close_min=None, close_max=None):
+    """Jaw close fractions for the rigid hold sweep. 0=open, 1=fully closed.
+
+    Contact force is a result of this position command, not a measured tissue
+    load. The 15 N jaw-limit in the evaluator is an engineering gate.
+    """
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    n = int(EASY_PRESET['n_hold_levels'] if n_levels is None else n_levels)
+    lo = float(EASY_PRESET['hold_close_min'] if close_min is None else close_min)
+    hi = float(EASY_PRESET['hold_close_max'] if close_max is None else close_max)
+    if n < 2 or n > 32:
+        raise ValueError('n_hold_levels must be an integer in [2, 32]')
+    if not np.isfinite(lo) or not np.isfinite(hi) or not 0.0 <= lo <= hi <= 1.0:
+        raise ValueError('hold close range must be finite in [0, 1] with min<=max')
+    return np.linspace(lo, hi, n, dtype=np.float64)
+
+
+def jaw_hold_q(close_frac, jaw_open, jaw_closed):
+    """Interpolate the jaw target. Fruit stays a free body; this is not a weld."""
+    frac = float(close_frac)
+    opened = float(jaw_open)
+    closed = float(jaw_closed)
+    if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
+        raise ValueError('close_frac must be finite in [0, 1]')
+    if not np.isfinite(opened) or not np.isfinite(closed):
+        raise ValueError('jaw limits must be finite')
+    return float(opened + frac * (closed - opened))
+
+
+def select_hold_close(rows, *, slip_ok_m=0.04, load_limit_n=15.0):
+    """Pick the lightest close-fraction that retains without exceeding the load gate.
+
+    ``max_load_N`` is a rigid-sim contact result, not a tissue-safe force.
+    """
+    if not isinstance(rows, (list, tuple)) or not rows:
+        raise ValueError('hold sweep rows must be a non-empty sequence')
+    slip_ok = float(slip_ok_m)
+    load_limit = float(load_limit_n)
+    if not np.isfinite(slip_ok) or slip_ok <= 0 or not np.isfinite(load_limit) or load_limit <= 0:
+        raise ValueError('slip_ok_m and load_limit_n must be finite and positive')
+    cleaned = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError('each hold sweep row must be a dict')
+        try:
+            close = float(row['close_frac'])
+            slip = float(row['slip_m'])
+            load = float(row['max_load_N'])
+            retained = bool(row['retained'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError('hold sweep row must have close_frac, slip_m, max_load_N, retained') from exc
+        if not np.isfinite([close, slip, load]).all() or not 0.0 <= close <= 1.0 or slip < 0 or load < 0:
+            raise ValueError('hold sweep row values must be finite and physically ranged')
+        cleaned.append({'close_frac': close, 'slip_m': slip, 'max_load_N': load, 'retained': retained})
+    viable = [row for row in cleaned if row['retained'] and row['slip_m'] <= slip_ok
+              and row['max_load_N'] <= load_limit]
+    if viable:
+        return min(viable, key=lambda row: row['close_frac'])
+    under = [row for row in cleaned if row['max_load_N'] <= load_limit]
+    if under:
+        return min(under, key=lambda row: (row['slip_m'], row['close_frac']))
+    return min(cleaned, key=lambda row: (row['slip_m'], row['max_load_N'], row['close_frac']))
+
+
+def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qposadr,
+                   arm_qids, start_q, jaw_open, jaw_closed, close_fracs=None,
+                   hold_s=0.4, slip_ok_m=0.04, load_limit_n=15.0):
+    """CPU hold sweep: close-fraction vs slip and hand contact load.
+
+    Fruit stays a free body. The chosen close command is not a weld and not a
+    calibrated kiwi-safe force.
+    """
+    import mujoco
+    from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
+    q0 = np.asarray(qpos, dtype=np.float64).reshape(-1)
+    start = np.asarray(start_q, dtype=np.float64).reshape(6)
+    arm_qids = np.asarray(arm_qids, dtype=int).reshape(6)
+    fracs = np.asarray(hold_close_fracs() if close_fracs is None else close_fracs, dtype=np.float64)
+    hold_time = float(hold_s)
+    slip_ok = float(slip_ok_m)
+    load_limit = float(load_limit_n if load_limit_n is not None else JAW_FORCE_LIMIT_N)
+    if not np.isfinite(hold_time) or not 0.05 <= hold_time <= 2.0:
+        raise ValueError('hold_s must be finite in [0.05, 2] s')
+    if not np.isfinite(q0).all() or not np.isfinite(start).all() or not np.isfinite(fracs).all():
+        raise ValueError('sweep inputs must be finite')
+    dt = float(model.opt.timestep)
+    steps = max(1, int(round(hold_time / dt)))
+    hand_geoms = _hand_geom_ids(model)
+    data = mujoco.MjData(model)
+    rows = []
+    for frac in fracs:
+        hold = jaw_hold_q(frac, jaw_open, jaw_closed)
+        data.qpos[:] = q0
+        data.qvel[:] = 0.0
+        data.qpos[arm_qids] = start
+        data.qpos[int(jaw_qposadr)] = hold
+        mujoco.mj_forward(model, data)
+        tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+        data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3] = tcp
+        data.qpos[int(fruit_qposadr) + 3:int(fruit_qposadr) + 7] = (1.0, 0.0, 0.0, 0.0)
+        data.qvel[int(fruit_dofadr):int(fruit_dofadr) + 6] = 0.0
+        data.qpos[int(jaw_qposadr)] = hold
+        max_load = 0.0
+        for _ in range(steps):
+            data.qpos[arm_qids] = start
+            data.qpos[int(jaw_qposadr)] = hold
+            mujoco.mj_step(model, data)
+            max_load = max(max_load, _hand_contact_load_n(model, data, hand_geoms))
+        mujoco.mj_forward(model, data)
+        fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
+        tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+        slip = float(np.linalg.norm(fruit - tcp))
+        if not np.isfinite(slip) or not np.isfinite(max_load):
+            slip, max_load = float('inf'), float('inf')
+        rows.append({
+            'close_frac': float(frac),
+            'slip_m': slip if np.isfinite(slip) else 1.0,
+            'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
+            'retained': bool(np.isfinite(slip) and slip <= slip_ok),
+        })
+    chosen = select_hold_close(rows, slip_ok_m=slip_ok, load_limit_n=load_limit)
+    return {
+        'rows': rows,
+        'chosen_close_frac': float(chosen['close_frac']),
+        'chosen_slip_m': float(chosen['slip_m']),
+        'chosen_load_N': float(chosen['max_load_N']),
+        'load_limit_N': load_limit,
+        'slip_ok_m': slip_ok,
+        'weld': False,
+        'scope': 'rigid jaw-close sweep; not a tissue-safe force',
+    }
+
+
+def _hand_geom_ids(model):
+    tokens = ('jaw', 'fngr', 'finger', 'hand', 'pad', 'grip')
+    ids = []
+    for index in range(int(model.ngeom)):
+        name = (model.geom(index).name or '').lower()
+        if any(token in name for token in tokens):
+            ids.append(int(index))
+    return tuple(ids)
+
+
+def _hand_contact_load_n(model, data, hand_geoms):
+    import mujoco
+    if not hand_geoms:
+        return 0.0
+    hand = set(int(g) for g in hand_geoms)
+    load = 0.0
+    force = np.zeros(6, dtype=np.float64)
+    for index in range(int(data.ncon)):
+        contact = data.contact[index]
+        if int(contact.geom1) not in hand and int(contact.geom2) not in hand:
+            continue
+        mujoco.mj_contactForce(model, data, index, force)
+        if np.isfinite(force[0]):
+            load += abs(float(force[0]))
+    return load
+
+
+def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_m=None):
+    """Random chassis-frame TCP outside the crate in a bounded IK box.
+
+    Rejects poses over the opening. Does not sample inside the liner. ``rng``
+    must be a NumPy Generator.
+    """
+    from treesim.kiwi_rl.curriculum import EASY_PRESET
+    if rng is None or not hasattr(rng, 'uniform'):
+        raise TypeError('rng must be a NumPy Generator')
+    margin = float(EASY_PRESET['start_margin_m'] if margin_m is None else margin_m)
+    clearance = float(EASY_PRESET['start_clearance_m'] if clearance_m is None else clearance_m)
+    x_span = float(EASY_PRESET['start_x_span_m'])
+    y_span = float(EASY_PRESET['start_y_span_m'])
+    z_span = float(EASY_PRESET['start_z_span_m'])
+    if not np.isfinite([margin, clearance, x_span, y_span, z_span]).all():
+        raise ValueError('random start spans must be finite')
+    if not 0.05 <= margin <= 0.5 or not 0.05 <= clearance <= 0.5:
+        raise ValueError('start margin/clearance must be in [0.05, 0.5] m')
+    if not 0.05 <= x_span <= 0.6 or not 0.0 <= y_span <= 0.2 or not 0.0 <= z_span <= 0.2:
+        raise ValueError('random start spans are outside the physics-safe box')
+    lo, hi = basket_chassis_aabb_m()
+    x = float(rng.uniform(hi[0] + margin, hi[0] + margin + x_span))
+    y = float(rng.uniform(-y_span, y_span))
+    z = float(rng.uniform(hi[2] + clearance, hi[2] + clearance + z_span))
+    local = push_tcp_outside_basket(np.array([x, y, z], dtype=np.float64), margin_m=margin)
+    local[2] = max(float(local[2]), float(hi[2] + clearance))
+    if home_local is not None:
+        home = np.asarray(home_local, dtype=np.float64).reshape(3)
+        if not np.isfinite(home).all():
+            raise ValueError('home_local must be finite')
+    if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+        raise ValueError('random easy start TCP still intersects the crate volume')
+    return local
 
 
 def easy_start_local_m(frac=0.0, home_local=None, *, margin_m=0.40, clearance_m=0.28):

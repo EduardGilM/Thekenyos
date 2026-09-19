@@ -116,25 +116,29 @@ class CurriculumTest(unittest.TestCase):
             EASY_PRESET, apply_easy_preset, easy_start_far_frac, easy_teacher_mix,
         )
         from treesim.kiwi_rl.reach_teacher import (
-            basket_chassis_aabb_m, easy_start_local_m, hover_tcp_local_m, tcp_outside_basket,
+            basket_chassis_aabb_m, easy_start_local_m, hold_close_fracs, hover_tcp_local_m,
+            jaw_hold_q, random_easy_start_local_m, select_hold_close, tcp_outside_basket,
         )
         from treesim.basket import CENTER, SIZE
         deposit = stage_named('deposit_pixels')
         preset = apply_easy_preset({'gate_success_rate': deposit.gate_success_rate,
                                     'gate_episodes': deposit.gate_episodes})
-        self.assertEqual(preset['teacher_mix'], 0.4)
+        self.assertEqual(preset['teacher_mix'], 1.0)
         self.assertEqual(preset['teacher_horizon_updates'], 60)
         self.assertEqual(preset['shaping_coef'], 5.0)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertEqual(preset['start_margin_m'], 0.40)
         self.assertEqual(preset['start_clearance_m'], 0.28)
-        self.assertEqual(preset['n_start_poses'], 8)
+        self.assertEqual(preset['n_start_poses'], 24)
+        self.assertEqual(preset['n_hold_levels'], 8)
+        self.assertEqual(preset['hold_close_min'], 0.40)
+        self.assertEqual(preset['hold_close_max'], 1.00)
         self.assertEqual(preset['far_horizon_updates'], 200)
         self.assertEqual(preset['gate_success_rate'], 0.90)
         self.assertEqual(preset['gate_episodes'], 200)
         self.assertNotIn('weld', EASY_PRESET)
         self.assertNotIn('drop_offset_m', EASY_PRESET)
-        self.assertEqual(preset['airdrop_above_rim_m'], 0.06)
+        self.assertNotIn('airdrop_above_rim_m', EASY_PRESET)
         self.assertEqual(deposit.gate_success_rate, 0.90)
         hover = hover_tcp_local_m(0.12)
         np.testing.assert_allclose(hover, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
@@ -154,16 +158,37 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(easy_start_far_frac(100), 0.5)
         self.assertEqual(easy_start_far_frac(200), 1.0)
         self.assertEqual(easy_start_far_frac(800), 1.0)
-        self.assertAlmostEqual(easy_teacher_mix(0), 0.4)
-        self.assertAlmostEqual(easy_teacher_mix(30), 0.2)
+        self.assertAlmostEqual(easy_teacher_mix(0), 1.0)
+        self.assertAlmostEqual(easy_teacher_mix(30), 0.5)
         self.assertAlmostEqual(easy_teacher_mix(60), 0.0)
         self.assertAlmostEqual(easy_teacher_mix(90), 0.0)
         self.assertAlmostEqual(easy_teacher_mix(0, start_mix=0.0), 0.0)
+        fracs = hold_close_fracs()
+        self.assertEqual(len(fracs), 8)
+        self.assertAlmostEqual(float(fracs[0]), 0.40)
+        self.assertAlmostEqual(float(fracs[-1]), 1.00)
+        self.assertAlmostEqual(jaw_hold_q(0.0, 0.0, -1.5), 0.0)
+        self.assertAlmostEqual(jaw_hold_q(1.0, 0.0, -1.5), -1.5)
+        picked = select_hold_close([
+            {'close_frac': 0.4, 'slip_m': 0.2, 'max_load_N': 1.0, 'retained': False},
+            {'close_frac': 0.7, 'slip_m': 0.02, 'max_load_N': 9.0, 'retained': True},
+        ])
+        self.assertAlmostEqual(picked['close_frac'], 0.7)
+        rng = np.random.default_rng(0)
+        sampled = [random_easy_start_local_m(rng) for _ in range(8)]
+        lo, hi = basket_chassis_aabb_m()
+        xs = [float(p[0]) for p in sampled]
+        self.assertGreater(max(xs) - min(xs), 0.02)
+        for pose in sampled:
+            self.assertTrue(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
+            self.assertGreaterEqual(float(pose[0]), float(hi[0] + 0.40) - 1e-9)
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
+        self.assertIn('def _apply_easy_jaw_hold', src)
+        self.assertIn('def _run_hold_sweep', src)
         self.assertIn('set_easy_progress', src)
-        self.assertIn('def _easy_airdrop', src)
+        self.assertNotIn('def _easy_airdrop', src)
         self.assertIn('if over:', src)
         self.assertIn('out_applied[world, joint] = 0.0', src)
         scene_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_scene.py').read_text(encoding='utf-8')

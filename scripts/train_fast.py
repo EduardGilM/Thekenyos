@@ -472,6 +472,10 @@ def run(args):
             config['easy_start_error_m'] = easy_info['easy_start_error_m']
             config['easy_far_frac'] = 0.0
             config['easy_scope'] = easy_info['scope']
+            config['hold_close_frac'] = easy_info.get('hold_close_frac')
+            config['hold_sweep_slip_m'] = easy_info.get('hold_sweep_slip_m')
+            config['hold_sweep_load_N'] = easy_info.get('hold_sweep_load_N')
+            config['weld'] = False
             (args.output / 'config.json').write_text(
                 json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
                            indent=2, default=str) + '\n')
@@ -558,6 +562,8 @@ def run(args):
                 easy_far_frac=float(start_info.get('easy_far_frac', 0.0)),
                 easy_start_index_mean=float(start_info.get('easy_start_index_mean', 0.0)),
                 easy_start_index_max=int(start_info.get('easy_start_index_max', 0)),
+                easy_hold_close_mean=float(start_info.get('easy_hold_close_mean', 0.0)),
+                easy_hold_index_mean=float(start_info.get('easy_hold_index_mean', 0.0)),
                 torch_peak_allocated_gb=torch.cuda.max_memory_allocated()/1e9)
             if 'basket_distance' in rows[0]:
                 basket = torch.stack([r['basket_distance'] for r in rows])
@@ -686,7 +692,7 @@ def main():
     p.add_argument('--speedrun', action='store_true',
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
     p.add_argument('--easy', action='store_true',
-                   help='Outside-crate arm start plus free-fruit airdrop over the rim, privileged deposit mix, stronger shaping; not a weld')
+                   help='Random outside-crate starts, jaw-close sweep, privileged carry/deposit; not a weld')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
