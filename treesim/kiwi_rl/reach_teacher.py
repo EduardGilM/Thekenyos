@@ -259,6 +259,22 @@ def jaw_open_closed_from_gaps(lower, upper, gap_at_lower, gap_at_upper):
     return hi, lo
 
 
+def _freejoint_addrs(model, skip_qposadr=None):
+    """qpos/dof addresses of free joints, optionally skipping the tested fruit."""
+    import mujoco
+    skip = None if skip_qposadr is None else int(skip_qposadr)
+    addrs = []
+    free = int(mujoco.mjtJoint.mjJNT_FREE)
+    for index in range(int(model.njnt)):
+        if int(model.jnt_type[index]) != free:
+            continue
+        qadr = int(model.jnt_qposadr[index])
+        if skip is not None and qadr == skip:
+            continue
+        addrs.append((qadr, int(model.jnt_dofadr[index])))
+    return tuple(addrs)
+
+
 def jaw_open_closed_q(model, jaw_qposadr, data=None):
     """Measure ``(open_q, closed_q)`` by closing the side with the smaller pad gap."""
     import mujoco
@@ -502,9 +518,11 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
     """CPU hold sweep: close-fraction vs slip and hand contact load.
 
     Fruit stays a free body. Each close-fraction sets the jaw first, then
-    places the kiwi in that mouth. The chosen command is not a weld and not a
-    calibrated kiwi-safe force. Uses a 5 ms CPU timestep so a 0.4 s hold does
-    not expand into tens of thousands of native substeps.
+    places the kiwi in that mouth. Slip is the hand-frame COM motion so a
+    knocked floating base is not counted as a drop. Other free joints are
+    pinned. The chosen command is not a weld and not a calibrated kiwi-safe
+    force. Uses a 5 ms CPU timestep so a 0.4 s hold does not expand into tens
+    of thousands of native substeps.
     """
     import mujoco
     from treesim.kiwi_rl.fast_task import JAW_FORCE_LIMIT_N
@@ -533,6 +551,7 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
         kd = float(jaw_kd)
         cap = float(jaw_cap_nm)
         data = mujoco.MjData(model)
+        pinned = _freejoint_addrs(model, skip_qposadr=fruit_qposadr)
         eq = None if fruit_equality is None else int(fruit_equality)
         data.qpos[:] = q0
         data.qvel[:] = 0.0
@@ -572,6 +591,9 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
             for step in range(steps):
                 data.qpos[arm_qids] = start
                 data.qpos[int(jaw_qposadr)] = hold  # kinematic hold; actuator tracks
+                for qadr, dadr in pinned:
+                    data.qpos[qadr:qadr + 7] = q0[qadr:qadr + 7]
+                    data.qvel[dadr:dadr + 6] = 0.0
                 _apply_jaw_close_ctrl(model, data, jaw_act, jaw_qposadr, hold,
                                       cap_nm=cap, kp=kp, kd=kd)
                 if eq is not None and 0 <= eq < int(data.eq_active.shape[0]):
@@ -582,12 +604,16 @@ def sweep_jaw_hold(model, qpos, *, tcp_site, fruit_qposadr, fruit_dofadr, jaw_qp
                         model, data, hand_geoms, fruit_geoms))
             mujoco.mj_forward(model, data)
             fruit = np.asarray(data.qpos[int(fruit_qposadr):int(fruit_qposadr) + 3], dtype=np.float64)
-            slip = float(np.linalg.norm(fruit - pocket0))
+            origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+            rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+            slip = float(np.linalg.norm((rot.T @ (fruit - origin)) - local))
+            world_slip = float(np.linalg.norm(fruit - pocket0))
             if not np.isfinite(slip) or not np.isfinite(max_load):
-                slip, max_load = float('inf'), float('inf')
+                slip, max_load, world_slip = float('inf'), float('inf'), float('inf')
             rows.append({
                 'close_frac': float(frac),
                 'slip_m': slip if np.isfinite(slip) else 1.0,
+                'world_slip_m': world_slip if np.isfinite(world_slip) else 1.0,
                 'max_load_N': max_load if np.isfinite(max_load) else 1.0e6,
                 'jaw_q': float(data.qpos[int(jaw_qposadr)]),
                 'retained': bool(np.isfinite(slip) and slip <= slip_ok),

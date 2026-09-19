@@ -219,6 +219,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('warmup', teacher_src)
         self.assertIn('kinematic hold; actuator tracks', teacher_src)
         self.assertIn('jaw_open', teacher_src)
+        self.assertIn('def _freejoint_addrs', teacher_src)
+        self.assertIn('hand-frame', teacher_src)
         self.assertIn('jaw_open_closed_q', src)
         self.assertNotIn('self._jaw_closed = float(jaw_range[0]', src)
         self.assertIn('model.opt.timestep', teacher_src)
