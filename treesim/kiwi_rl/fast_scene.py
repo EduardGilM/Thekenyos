@@ -75,7 +75,7 @@ def _fruit_inertia(mass: float) -> tuple[float, float, float]:
 
 def assemble_fast_scene(directory, *, fruit_count: int | None = None,
                         timestep_s: float = DEFAULT_TIMESTEP_S,
-                        visual_stalk: bool = True, camera_start: bool = False):
+                        visual_stalk: bool = True, camera_start: bool = False, camera_distance_m: float = .25):
     """Return ``(scene_xml, manifest)`` for a bounded rigid-fruit training scene."""
     import mujoco
     from treesim.native_kiwi import RADII_M
@@ -187,7 +187,7 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     robot = dict(base_manifest['robot'])
     if camera_start:
         from .fast_start_pose import set_camera_start_pose
-        start_pose = set_camera_start_pose(model, data, robot, fruits[0]['body'])
+        start_pose = set_camera_start_pose(model, data, robot, fruits[0]['body'], camera_distance_m=camera_distance_m)
         robot['initial_position_rad'] = dict(robot['initial_position_rad'])
         for name in robot['arm'][:6]:
             joint = model.joint(robot['prefix'] + name).id

@@ -196,6 +196,14 @@ assumptions, not biological measurements. Do not claim successful harvesting or
 policy improvement from throughput or lower optimizer loss. Evaluate the actor
 without privileged inputs and report physical outcomes separately.
 
+Use `train_harvest_fast.py` for sustained harvesting experiments. Its collector
+preserves physics and GRU memory across optimizer buffers; `train_fast.py` remains
+a short reaching benchmark. Keep best-so-far stall detection separate from the
+optimizer horizon and bootstrap hard timeouts from the final pre-reset state.
+Grasp metrics require sustained loaded contact on both actual finger/jaw bodies.
+Run `tests.test_harvest_training`, `tests.test_fast_ppo`, and `tests.test_fast_task`
+in the JP GPU environment with FAST_SCENE and GAIT_CHECKPOINT set after changes.
+
 ## Continuous visual leaf roof
 
 The reproducible local capture and generation details are in README.md under

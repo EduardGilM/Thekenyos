@@ -740,6 +740,41 @@ Training reports also include optimizer time and optimized sample count. A
 transition is one policy action in one world, not a complete harvesting episode.
 W&B losses, rewards and throughput are not proof of improved harvesting.
 
+For harvesting, use the persistent-episode launcher below. The older
+`train_fast.py` is a short reaching benchmark and resets at buffer boundaries.
+The harvesting launcher carries physics and GRU state across 64-step optimizer
+buffers. An episode ends on success, physical failure, or four simulated seconds
+without new progress. New best approach/carry distance (5 mm), a first sustained
+bilateral grasp, increasing stem load while still touching (0.5 N), or detachment
+reset the stall timer. Repeated motion does not. A 30-second fallback cap is a
+truncation with a value bootstrap from the final observation.
+
+```bash
+python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
+  --output /path/to/near-scene --camera-distance .15
+python scripts/train_harvest_fast.py --scene /path/to/near-scene \
+  --eval-scene /path/to/fast-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --initialize-from /path/to/student.pt --output /path/to/new-harvest-run \
+  --worlds 4096 --minibatch-worlds 512 --steps 64 --train-seconds 3600 \
+  --stall-seconds 4 --max-episode-seconds 30 --wandb-mode online
+FAST_SCENE=/path/to/near-scene GAIT_CHECKPOINT=/path/to/verified-gait.pt \
+  python -m unittest tests.test_harvest_training tests.test_fast_ppo \
+  tests.test_fast_task tests.test_fast_start_pose
+```
+
+The closer pose changes only the six arm joints and their initial motor targets.
+Guidance rewards approach, first bilateral contact sustained for 0.1 seconds,
+retained detachment, and movement toward the basket. Bilateral contact requires
+more than 0.2 N on both actual finger/jaw bodies. This is a contact proxy, not
+proof of secure retention. Physical success still requires detached fruit settled
+inside the basket without hand contact. Evaluations complete one unguided episode
+per world from the separate, farther scene; identical starts do not establish
+generalization. Up to three PPO epochs reuse each buffer, with a KL stop and
+discount 0.999 at 50 Hz. W&B and local JSONL report complete-episode outcomes.
+The wall-time training budget excludes startup compilation and initial evaluation;
+the final evaluation can add a few seconds. No successful harvest is claimed by
+the launcher itself.
+
 On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
 about 157,000 policy transitions/s including PPO updates (three-update screen,
 64 steps per rollout, 200 Hz physics, 25 Hz 64x64 RGBD). All collected samples

@@ -21,13 +21,14 @@ def main(argv=None):
     parser.add_argument('--no-visual-stalk', action='store_true')
     parser.add_argument('--keep-base-arm-pose', action='store_true',
                         help='Diagnostic export without the default fruit-facing starting arm pose')
+    parser.add_argument('--camera-distance', type=float, default=.25, help='Starting camera-to-fruit distance in metres')
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error('Preserve existing scene export directories')
     xml, manifest = assemble_fast_scene(args.base_scene, fruit_count=args.fruit_count,
                                         timestep_s=args.timestep,
                                         visual_stalk=not args.no_visual_stalk,
-                                        camera_start=not args.keep_base_arm_pose)
+                                        camera_start=not args.keep_base_arm_pose, camera_distance_m=args.camera_distance)
     args.output.mkdir(parents=True)
     (args.output / 'scene.xml').write_text(xml)
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2, allow_nan=False) + '\n')

@@ -44,15 +44,18 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False):
     return rows, bootstrap
 
 
-def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512):
+def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.99, check_replay=True):
     import torch
     from treesim.kiwi_rl.ppo import compute_gae_torch, tanh_logprob
     rewards = torch.stack([r['reward'] for r in rows])
     values = torch.stack([r['value'] for r in rows])
     ended = torch.stack([r['terminated'] for r in rows])
-    truncated = torch.zeros_like(ended)
-    truncated[-1] = True
-    advantages = compute_gae_torch(rewards, values, torch.cat((values[1:], bootstrap[None])), ended, truncated, .99, .95)
+    truncated = torch.stack([r.get('truncated', torch.zeros_like(r['terminated'])) for r in rows])
+    next_values = torch.cat((values[1:], bootstrap[None]))
+    for t, row in enumerate(rows):
+        if 'timeout_value' in row:
+            next_values[t] = torch.where(truncated[t], row['timeout_value'], next_values[t])
+    advantages = compute_gae_torch(rewards, values, next_values, ended, truncated, gamma, .95)
     returns = (advantages + values).detach()
     advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
     # Sequence minibatches bound camera activation memory as worlds scale.
@@ -61,7 +64,7 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512):
     optimizer.zero_grad(set_to_none=True)
     for start in range(0, rewards.shape[1], batch_size):
         sl = slice(start, start + batch_size)
-        memory = torch.zeros_like(rows[0]['r84'][sl, :64])
+        memory = rows[0].get('initial_memory', torch.zeros_like(rows[0]['r84'][:, :64]))[sl].detach()
         logps, predictions = [], []
         for row in rows:
             memory = memory * (~row['reset'][sl])[:, None]
@@ -74,7 +77,10 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512):
         if not torch.isfinite(kl):
             raise RuntimeError('Nonfinite PPO divergence')
         if float(kl.detach()) > .03:
-            raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
+            if check_replay:
+                raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
+            optimizer.zero_grad(set_to_none=True)
+            return dict(kl=float(kl.detach()), early_stop=1)
         actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
         critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
         loss = actor + .5 * critic

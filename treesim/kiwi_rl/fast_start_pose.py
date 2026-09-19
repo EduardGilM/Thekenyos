@@ -2,11 +2,13 @@
 import numpy as np
 
 
-def set_camera_start_pose(model, data, robot, fruit_body):
+def set_camera_start_pose(model, data, robot, fruit_body, *, camera_distance_m=.25):
     """Move only six arm joints; reject collisions or an unusable camera view."""
     import mujoco
     from scipy.optimize import least_squares
 
+    if not np.isfinite(camera_distance_m) or not .15 <= camera_distance_m <= .4:
+        raise ValueError('Camera starting distance must be in [.15, .4] metres')
     names = robot['arm'][:6]
     joints = [model.joint(robot['prefix'] + name).id for name in names]
     qids = model.jnt_qposadr[joints]
@@ -30,7 +32,7 @@ def set_camera_start_pose(model, data, robot, fruit_body):
         forward = -scratch.cam_xmat[camera].reshape(3, 3)[:, 2]
         tcp_distance = np.linalg.norm(scratch.xpos[fruit] - scratch.site_xpos[tcp])
         return np.r_[2 * (forward - delta / max(distance, 1e-9)),
-                     4 * (distance - .25), 4 * (tcp_distance - .20), .02 * (q - home)]
+                     4 * (distance - camera_distance_m), 4 * (tcp_distance - (camera_distance_m - .05)), .02 * (q - home)]
 
     result = least_squares(residual, np.clip(home, lower, upper), bounds=(lower, upper), max_nfev=160)
     error = residual(result.x)
