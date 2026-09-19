@@ -619,6 +619,58 @@ one-pose bench results, not an optimal grip or evidence of bruise-free fruit.
 The differing rigid/flex outcomes mean the rigid model cannot yet stand in for
 the flex benchmark without further contact and mesh-resolution checks.
 
+## Experimental learning and deformable-backend foundations
+
+The shared-belief student in `treesim/kiwi_rl/models_torch.py` has registered
+RGB-D, map, recurrent memory, intent, and action/event modules. The separate
+privileged teacher in `teacher.py` can provide confidence-masked supervision
+without sharing its hidden state or gradients with the student. These model
+components are unit-tested, including CUDA updates and checkpoint round-trips;
+they are **not yet an integrated harvesting trainer**.
+
+The isolated deformable investigation uses MuJoCo/MuJoCo-Warp 3.13.0 and Warp
+1.15.0. It does not upgrade the legacy `environment.yml` runtime. The CUDA
+learning stack and Optuna are pinned with hashes under `.devin/training/`.
+Use a separate Python 3.12 environment and scope the CUDA package index to Torch:
+
+```bash
+uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
+  --require-hashes .devin/training/requirements-gpu.lock
+python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
+```
+
+`scripts/check_deformable_backend.py` checks real flex contact against ground,
+other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
+jaw, applies gravity, holds, opens, and checks release. Device-side checks latch
+solver overflow, nonfinite state, element inversion, jaw/palm loads and the
+first ground contact across physics substeps. Native CPU reports provide an
+independent comparison.
+
+```bash
+python scripts/check_deformable_backend.py --relic /path/to/relic \
+  --case grip --backend gpu --count 9 --seconds 4 --iterations 1000 \
+  --contact-time .002 --normalize-meshes --output /path/to/new-report.json
+```
+
+This command is a development screen and may fail. Reports explicitly contain
+`training_ready: false`; passing a contact screen does not prove full robot
+balance, safe fruit handling, backend equivalence, or an overnight-ready trainer.
+The current numerical profiles still need complete validation, including force
+spikes, release behavior and timestep sensitivity. Failed reports are retained.
+
+MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
+miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by
+normalizing mesh coordinates while verifying unchanged world-space surfaces,
+body mass, center of mass and inertia tensors. It neither simplifies colliders
+nor edits external RELIC assets. Valid geom IDs also take precedence over stale
+flex IDs when interpreting mixed rigid/flex GPU contacts, matching the solver.
+
+The RELIC import checks all 10,000 observations, identical copied weights, and
+finite outputs. Its approved numerical comparison uses
+`abs(error) <= 1e-5 + 2e-6 * abs(reference)` to account for floating-point rounding;
+this is separate from the physical gait benchmark. A CUDA parity failure still
+blocks that import rather than producing an accepted actor.
+
 ## Continue the project
 
 See the [RL implementation specification](docs/rl-blueprint.html) (Spanish) for

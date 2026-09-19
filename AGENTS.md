@@ -127,3 +127,27 @@ Preserve other workloads. Keep caches and outputs on the SSD; the root disk is
 space constrained. Do not kill unrelated processes. First CUDA compilation can
 be slow; inspect the log before restarting a job. Desktop DISPLAY/XAUTHORITY
 values are session-specific, so verify them rather than hardcoding new scripts.
+
+## Isolated deformable training development
+
+The approved training work uses `training/envs/flex-gpu` under the existing SSD
+experiment root, separately from `conda/` and `pergola/`. Its candidate stack is
+MuJoCo/MuJoCo-Warp 3.13.0, Warp 1.15.0 and CUDA Torch 2.10.0. Do not upgrade the
+legacy environment to these versions. Dependency inputs are under
+`.devin/training/`; backend acceptance and the full training launcher are not yet complete.
+
+Run learning tests with `python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v`.
+GPU monitor and mesh-frame tests require the isolated JP environment. A feature
+screen from `scripts/check_deformable_backend.py` is not a training-readiness report.
+
+MJWarp 3.13 flex contact filtering can reject offset jaw meshes because its
+mesh-convex bounding-sphere test adds the original mesh offset again. The
+`normalize_collision_meshes` helper normalizes authored mesh coordinates while
+checking world-space collision surfaces and mass/inertia invariance. Preserve
+its geometry-equivalence and actual GPU-contact regressions; do not substitute
+simpler gripper colliders or zero model fields without validation.
+
+In mixed rigid/flex GPU contacts, valid geom IDs take precedence over stale flex
+IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
+than identifying fruit contact from `contact.flex` alone. Numerical overflow,
+nonfinite states and element inversion must remain latched across substeps.
