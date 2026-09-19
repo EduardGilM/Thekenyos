@@ -3,6 +3,7 @@ from collections import deque
 import io
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -28,6 +29,17 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual([record.get('round') for record in records], [None, 1])
         self.assertEqual(len(records[0]['payload']), 70000)
         self.assertIn('deque(f,maxlen=limit)', REMOTE_PROBE)
+
+    def test_remote_probe_executes_with_branch_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'phase-events.jsonl').write_text('{"phase":"cti-v2"}\n')
+            (root/'cti-branches.jsonl').write_text(json.dumps({'records': ['x'*70000]})+'\n')
+            probe=REMOTE_PROBE.replace('/mnt/ssd/experiments/kiwi-pergola/training/runs/teacher-reward-cti-001',tmp)
+            result=subprocess.run([sys.executable,'-c',probe],capture_output=True,text=True,check=True)
+            state=json.loads(result.stdout)
+            self.assertEqual(state['phase'],'cti-v2')
+            self.assertEqual(len(state['branch_diagnostics'][0]['records'][0]),70000)
 
     def test_best_uses_physical_outcomes_and_retains_earliest_tie(self):
         def row(step,success=0,failure=0,grasp=0,distance=.1):

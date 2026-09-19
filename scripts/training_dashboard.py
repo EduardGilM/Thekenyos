@@ -27,6 +27,7 @@ RENDER_TIMEOUT = 1800
 CHECKPOINT_RE = re.compile(r'checkpoint-(\d{6})\.pt\Z')
 
 REMOTE_PROBE = r'''import json, os, pathlib, time
+from collections import deque
 root = pathlib.Path('/mnt/ssd/experiments/kiwi-pergola/training/runs/teacher-reward-cti-001')
 def read(name):
     try: return json.loads((root/name).read_text())
