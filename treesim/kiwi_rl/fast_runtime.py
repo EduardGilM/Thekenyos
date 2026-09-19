@@ -359,6 +359,33 @@ def _scripted_jaw_hold(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=w
 
 
 @wp.kernel
+def _pin_scripted_jaw(enabled: wp.array(dtype=int),
+                      xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                      chassis: int, fruit_bodies: wp.array(dtype=int),
+                      active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
+                      qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
+                      targets: wp.array2d(dtype=float), jaw_qposadr: int, jaw_dofadr: int,
+                      jaw_hold: wp.array(dtype=float), jaw_open: float, open_xy_m: float):
+    """Kinematic jaw hold/open. The 0.3 N·m PD alone lets the kiwi slip out."""
+    if enabled[0] == 0:
+        return
+    world = wp.tid()
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    fruit_pos = xpos[world, fruit]
+    dx = fruit_pos[0] - basket_world[0]
+    dy = fruit_pos[1] - basket_world[1]
+    over = wp.sqrt(dx * dx + dy * dy) < open_xy_m
+    desired = jaw_open if over else jaw_hold[world]
+    qpos[world, jaw_qposadr] = desired
+    qvel[world, jaw_dofadr] = 0.0
+    targets[world, 18] = desired
+
+
+@wp.kernel
 def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                                chassis: int, fruit_bodies: wp.array(dtype=int),
                                active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
@@ -497,8 +524,10 @@ class FastRuntime:
             chassis_joint = int(self.model.body_jntadr[self.control.chassis])
             self._chassis_qposadr = int(self.model.jnt_qposadr[chassis_joint])
             self._jaw_qposadr = int(self.control.contract.qids[18])
+            self._jaw_dofadr = int(self.control.contract.dofs[18])
             from .reach_teacher import jaw_open_closed_q
             self._jaw_open, self._jaw_closed = jaw_open_closed_q(self.model, self._jaw_qposadr)
+            self._easy_pin = wp.zeros(1, dtype=int, device=self.device)
             from treesim.basket import CENTER
             self._basket_center = wp.vec3(*CENTER)
             robot = self.manifest['robot']
@@ -552,6 +581,12 @@ class FastRuntime:
                           inputs=[self._actions, self.control.targets, self._action_lower,
                                   self._action_upper, self._flags, 2.5 * self.control_dt], device=self.device)
                 for _ in range(self.substeps):
+                    wp.launch(_pin_scripted_jaw, dim=self.worlds, inputs=[
+                        self._easy_pin, self.data.xpos, self.data.xmat, self.chassis,
+                        self.task.fruit_body, self.task.active_fruit, self._basket_center,
+                        self.data.qpos, self.data.qvel, self.control.targets,
+                        int(self._jaw_qposadr), int(self._jaw_dofadr), self._easy_jaw_hold,
+                        float(self._jaw_open), float(self._open_xy_m)], device=self.device)
                     self.control.apply()
                     mw.step(self.gpu_model, self.data)
                     self._refresh(mw)
@@ -783,6 +818,7 @@ class FastRuntime:
         fractions are a rigid contact sweep, not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
+        self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
         if shaping_coef is None:
             coef = EASY_PRESET['shaping_coef'] if self._easy else EASY_PRESET['default_shaping_coef']
         else:

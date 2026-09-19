@@ -181,6 +181,7 @@ class TrainingMonitorTests(unittest.TestCase):
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
         self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
         self.assertIn('jaw_open_closed_q', inspect.getsource(_record_progress_video_locked))
+        self.assertIn('controller.qids[18]', inspect.getsource(_record_progress_video_locked))
         html_easy_video = render_dashboard_html(dict(
             schema='training-monitor/v1', training_ready=False, run='x', rows=1,
             latest=dict(step=1), series={}, generated_at='now',

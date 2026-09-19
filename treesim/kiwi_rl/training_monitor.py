@@ -923,6 +923,10 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             controller.targets[12:] = np.clip(
                 controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
+                if preview.get('easy'):
+                    data.qpos[int(controller.qids[18])] = desired
+                    data.qvel[int(controller.dofs[18])] = 0.0
+                    controller.targets[18] = desired
                 controller.apply(data)
                 mujoco.mj_step(model, data)
                 if any(w.number for w in data.warning) or not np.isfinite(data.qpos).all():

@@ -134,6 +134,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('hold_close_frac', run_src)
         runtime_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _scripted_jaw_hold', runtime_src)
+        self.assertIn('def _pin_scripted_jaw', runtime_src)
         self.assertIn('grasp_local_m', run_src)
         self.assertIn('hold_sweep_rows', run_src)
         self.assertIn('set_easy_progress', run_src)

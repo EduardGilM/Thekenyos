@@ -193,6 +193,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _apply_easy_start', src)
         self.assertIn('def _apply_easy_jaw_hold', src)
         self.assertIn('def _scripted_jaw_hold', src)
+        self.assertIn('def _pin_scripted_jaw', src)
+        self.assertIn('self._easy_pin', src)
         self.assertIn('qpos[world, jaw_qposadr] = hold', src)
         self.assertIn('def _run_hold_sweep', src)
         self.assertIn('self._easy_jaw_hold_next.assign', src)
