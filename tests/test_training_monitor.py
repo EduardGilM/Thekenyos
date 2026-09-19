@@ -145,6 +145,7 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('harvest_jackpot_sum', mon_src)
         self.assertIn('success_window_return_mean', mon_src)
         self.assertIn('reward_window_mean', mon_src)
+        self.assertIn('fail_return_sum', mon_src)
 
     def test_curriculum_preview_matches_stage_reset(self):
         deposit = curriculum_preview_from_checkpoint({

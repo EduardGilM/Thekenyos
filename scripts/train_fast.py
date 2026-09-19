@@ -85,6 +85,8 @@ def apply_easy_cli(args):
         args.teacher_mix = preset['teacher_mix']
     if getattr(args, 'shaping_coef', None) is None:
         args.shaping_coef = preset['shaping_coef']
+    args.entropy_coef = float(preset['entropy_coef'])
+    args.ppo_epochs = int(preset['ppo_epochs'])
     return args
 
 
@@ -295,8 +297,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
     n_order = int(order.numel())
     batch_size = min(minibatch_worlds, n_order)
     metrics = []
-    if not isinstance(epochs, int) or not 1 <= epochs <= 8:
-        raise ValueError('epochs must be an integer in [1, 8]')
+    if not isinstance(epochs, int) or not 1 <= epochs <= 16:
+        raise ValueError('epochs must be an integer in [1, 16]')
     if not np_finite(entropy_coef) or entropy_coef < 0:
         raise ValueError('entropy_coef must be finite and >= 0')
     if 'memory0' in rows[0]:
@@ -366,9 +368,11 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
         success_steps = torch.stack([r['success'] for r in rows]).to(dtype=rewards.dtype)
         deposit_mass = float((rewards * success_steps).sum())
         success_window = float(window[success_any].mean()) if n_success else 0.0
+        fail_mass = float((rewards * ended.to(dtype=rewards.dtype) * (1.0 - success_steps)).sum())
     else:
         deposit_mass = 0.0
         success_window = 0.0
+        fail_mass = 0.0
     # A 64-step sum of the time cost looks ~64× worse than the old per-step
     # mean and still hides +10000 among 3072 worlds. Headline the harvest
     # return when a world deposited; otherwise keep the per-step scale.
@@ -394,7 +398,8 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 reward_std=float(window.std(unbiased=False)),
                 success_window_return_mean=success_window,
                 deposit_return_sum=deposit_mass,
-                deposit_return_mean=deposit_mass / float(rewards.shape[1]))
+                deposit_return_mean=deposit_mass / float(rewards.shape[1]),
+                fail_return_sum=fail_mass)
 
 
 def np_finite(value):
@@ -585,6 +590,9 @@ def run(args):
             config['hold_close_frac'] = easy_info.get('hold_close_frac')
             config['shaping_length_m'] = easy_info.get('shaping_length_m')
             config['deposit_reward'] = easy_info.get('deposit_reward')
+            config['fail_reward'] = easy_info.get('fail_reward')
+            config['ppo_lr'] = float(EASY_PRESET['ppo_lr'])
+            config['ppo_epochs'] = int(EASY_PRESET['ppo_epochs'])
             config['ppo_clip'] = float(EASY_PRESET['ppo_clip'])
             config['ppo_grad_clip'] = float(EASY_PRESET['ppo_grad_clip'])
             config['ppo_adv_std_cap'] = float(EASY_PRESET['ppo_adv_std_cap'])
@@ -621,7 +629,10 @@ def run(args):
         if args.initialize_from:
             load_checkpoint(args.initialize_from, {'student':policy}, None,
                             expected_meta={'camera':'hand_color_sensor'})
-        optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
+        ppo_lr = float(EASY_PRESET['ppo_lr']) if easy else 3e-4
+        if not np_finite(ppo_lr) or not 1e-5 <= ppo_lr <= 1e-2:
+            raise ValueError('ppo_lr must be finite in [1e-5, 1e-2]')
+        optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle)
         apply_stage(runtime, stage, numpy_rng)
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
@@ -681,7 +692,7 @@ def run(args):
                 ppo_unclip = bool(EASY_PRESET['ppo_unclip_positive'])
                 ppo_repeat = int(EASY_PRESET['ppo_success_repeat'])
                 ppo_sil = float(EASY_PRESET['ppo_imitation_coef'])
-                ppo_epochs = int(args.ppo_epochs)
+                ppo_epochs = int(EASY_PRESET['ppo_epochs'])
                 if int(torch.stack([r['success'] for r in rows]).any(dim=0).sum()) > 0:
                     ppo_epochs = max(ppo_epochs, int(EASY_PRESET['ppo_success_epochs']))
             else:
@@ -863,7 +874,7 @@ def main():
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
-                   help='Potential-shaping scale; --easy defaults to 5, otherwise 2')
+                   help='Potential-shaping scale; --easy defaults to 25, otherwise 2')
     p.add_argument('--eval-profile', choices=['default', 'speedrun'], default='default')
     p.add_argument('--mask-idle-locomotion', action=argparse.BooleanOptionalAction, default=True,
                    help='Drop N3 from PPO log-prob/entropy while the stage holds the chassis')
@@ -883,11 +894,11 @@ def main():
         p.error('Invalid video-every or video-steps')
     if a.stage not in {s.name for s in __import__('treesim.kiwi_rl.curriculum', fromlist=['STAGES']).STAGES}:
         p.error(f'Unknown curriculum stage {a.stage}')
-    if not 0 <= a.entropy_coef <= 0.1 or not 0.9 <= a.gamma <= 1.0 or not 1 <= a.ppo_epochs <= 8:
+    if not 0 <= a.entropy_coef <= 0.1 or not 0.9 <= a.gamma <= 1.0 or not 1 <= a.ppo_epochs <= 16:
         p.error('Invalid PPO entropy, gamma or epochs')
     if not 0.0 <= a.teacher_mix <= 1.0:
         p.error('Invalid teacher-mix')
-    if not 0.0 <= a.shaping_coef <= 20.0:
+    if not 0.0 <= a.shaping_coef <= 50.0:
         p.error('Invalid shaping-coef')
     run(a)
 

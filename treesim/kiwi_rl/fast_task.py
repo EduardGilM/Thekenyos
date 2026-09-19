@@ -234,7 +234,7 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
            deposit_paid: wp.array2d(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
            retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
            grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
-           loss_paid: wp.array(dtype=wp.uint8)):
+           loss_paid: wp.array(dtype=wp.uint8), fail_paid: wp.array(dtype=wp.uint8)):
     world = wp.tid()
     if mask[world] != 0:
         detached[world] = wp.uint8(0)
@@ -254,6 +254,7 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
         grasp_paid[world] = wp.uint8(0)
         detach_paid[world] = wp.uint8(0)
         loss_paid[world] = wp.uint8(0)
+        fail_paid[world] = wp.uint8(0)
         active_fruit[world] = 0
         harvested[world] = 0
         for index in range(MAX_FRUITS):
@@ -323,6 +324,7 @@ class FastHarvestTask:
         self.detach_paid = wp.zeros_like(self.detached)
         self.deposit_paid = wp.zeros((self.worlds, MAX_FRUITS), dtype=wp.uint8, device=self.device)
         self.loss_paid = wp.zeros_like(self.detached)
+        self.fail_paid = wp.zeros_like(self.detached)
         self.deposited = wp.zeros((self.worlds, MAX_FRUITS), dtype=wp.uint8, device=self.device)
         self.active_fruit = wp.zeros(self.worlds, dtype=int, device=self.device)
         self.harvested = wp.zeros(self.worlds, dtype=int, device=self.device)
@@ -385,7 +387,7 @@ class FastHarvestTask:
                    self.success, self.failed, self.eq_active, self.fruit_count, self.equality_index,
                    self.active_fruit, self.deposited, self.harvested, self.deposit_paid, self.grasped, self.grasp_time,
                    self.retain_time, self.retained_detach, self.grasp_paid, self.detach_paid,
-                   self.loss_paid], device=self.device)
+                   self.loss_paid, self.fail_paid], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,

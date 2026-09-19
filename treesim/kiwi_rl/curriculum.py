@@ -66,7 +66,8 @@ SPEEDRUN_PRESET = {
 EASY_PRESET = {
     'teacher_mix': 0.0,
     'teacher_horizon_updates': 60,
-    'shaping_coef': 5.0,
+    'entropy_coef': 0.001,
+    'shaping_coef': 25.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
     # Carry from the original outside-crate start. Reward fruit 3D and hand
@@ -100,13 +101,17 @@ EASY_PRESET = {
     'start_side_y_m': 0.10,
     'start_z_span_m': 0.08,
     # +20 lost to -25 ground; +500 still vanished after advantage
-    # normalization and the 0.2 PPO clip. 10000 is an engineering jackpot
-    # so a rare settled deposit can move the student. Not a measured value.
+    # normalization and the 0.2 PPO clip. ±10000 is an engineering
+    # jackpot / miss so a rare settled deposit or a timeout can move
+    # the student. Not a measured value.
     'deposit_reward': 10000.0,
-    # Wide clip / high grad cap / capped adv std: a jackpot stays large
-    # after whitening. Value coef stays small so critic MSE on +10000 does
+    'fail_reward': -10000.0,
+    # Clip 0.5, low entropy, high LR and more epochs: push π toward
+    # the ±10000 terminals. Value coef stays small so critic MSE does
     # not steal the actor step. Extra PPO epochs may continue up to KL 0.50.
-    'ppo_clip': 0.8,
+    'ppo_clip': 0.5,
+    'ppo_lr': 3e-3,
+    'ppo_epochs': 8,
     'ppo_grad_clip': 5.0,
     'ppo_adv_std_cap': 1.0,
     'ppo_value_coef': 0.05,
@@ -117,7 +122,7 @@ EASY_PRESET = {
     'ppo_unclip_positive': True,
     'ppo_success_repeat': 24,
     'ppo_imitation_coef': 2.0,
-    'ppo_success_epochs': 4,
+    'ppo_success_epochs': 8,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,

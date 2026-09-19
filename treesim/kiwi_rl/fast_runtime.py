@@ -71,6 +71,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      loss_paid: wp.array(dtype=wp.uint8),
                      basket_center: wp.vec3, hover_offset: wp.vec3, dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
+                     fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
                      w_grasp: float, w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float,
                      shape_hand_fruit: wp.array(dtype=int)):
@@ -102,7 +103,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
         d_hover = wp.length(fruit_world - hover_world)
         tcp_diff = tcp - basket_world
         d_hand_xy = wp.sqrt(tcp_diff[0] * tcp_diff[0] + tcp_diff[1] * tcp_diff[1])
-        phi = 0.5 * (wp.exp(-d_hover / length) + wp.exp(-d_hand_xy / length))
+        phi = 0.25 * wp.exp(-d_hover / length) + 0.75 * wp.exp(-d_hand_xy / length)
     else:
         phi = wp.exp(-d_shape / length)
     shaped = float(0.)
@@ -145,6 +146,9 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     episode_time[world] = episode_time[world] + dt
     timed_out[world] = wp.uint8(episode_time[world] >= timeout_s[world])
     terminated[world] = wp.uint8(fallen or failed[world] != 0 or success[world] != 0 or timed_out[world] != 0)
+    if terminated[world] != 0 and success[world] == 0 and fail_paid[world] == 0:
+        r = r + fail_w[world]
+        fail_paid[world] = wp.uint8(1)
     reward[world] = r
 
 
@@ -605,6 +609,7 @@ class FastRuntime:
             self._shaping_length = wp.full(worlds, float(EASY_PRESET['default_shaping_length_m']),
                                            dtype=float, device=self.device)
             self._deposit_w = wp.full(worlds, float(W_DEPOSIT), dtype=float, device=self.device)
+            self._fail_w = wp.zeros(worlds, dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
             self._allow_locomotion = wp.zeros(worlds, dtype=wp.uint8, device=self.device)
@@ -762,7 +767,8 @@ class FastRuntime:
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
                           self.task.deposited, self.task.loss_paid, self._basket_center,
                           self._hover_offset, self.control_dt,
-                          self._gamma_step, self._deposit_w, W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
+                          self._gamma_step, self._deposit_w, self._fail_w, self.task.fail_paid,
+                          W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
                           self._shape_hand_fruit], device=self.device)
 
@@ -1011,8 +1017,8 @@ class FastRuntime:
             coef = EASY_PRESET['shaping_coef'] if self._easy else EASY_PRESET['default_shaping_coef']
         else:
             coef = float(shaping_coef)
-        if not np.isfinite(coef) or coef < 0 or coef > 20:
-            raise ValueError('shaping_coef must be finite in [0, 20]')
+        if not np.isfinite(coef) or coef < 0 or coef > 50:
+            raise ValueError('shaping_coef must be finite in [0, 50]')
         if open_xy_m is None:
             self._open_xy_m = float(EASY_PRESET['open_xy_m'])
         else:
@@ -1034,6 +1040,13 @@ class FastRuntime:
         if not np.isfinite(deposit) or not 1.0 <= deposit <= 10000.0:
             raise ValueError('deposit_reward must be finite in [1, 10000]')
         self._deposit_w.assign(np.full(self.worlds, deposit, dtype=np.float32))
+        if self._easy:
+            fail = float(EASY_PRESET['fail_reward'])
+        else:
+            fail = 0.0
+        if not np.isfinite(fail) or not -10000.0 <= fail <= 0.0:
+            raise ValueError('fail_reward must be finite in [-10000, 0]')
+        self._fail_w.assign(np.full(self.worlds, fail, dtype=np.float32))
         if self._easy and self._hold_sweep is None:
             self._hold_sweep = self._run_hold_sweep()
             self._chosen_close_frac = float(self._hold_sweep['chosen_close_frac'])
@@ -1065,6 +1078,7 @@ class FastRuntime:
             'shaping_coef': coef,
             'shaping_length_m': length,
             'deposit_reward': deposit,
+            'fail_reward': fail,
             'open_xy_m': self._open_xy_m,
             'open_rim_z_m': self._open_rim_z_m,
             'hover_error_m': float(self.hover_error_m),

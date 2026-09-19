@@ -29,7 +29,7 @@ W_OBSTACLE_CONTACT_PER_S = -1.0
 
 
 def approach_center_potential(fruit_xyz, tcp_xyz, basket_xyz, length_m=0.60):
-    """Mean of fruit-to-target and hand-XY-to-target potentials.
+    """Hand-heavy mix of fruit-to-target and hand-XY-to-target potentials.
 
     Easy mode passes the open hover (rim + 28 cm), not the liner floor:
     a 10 cm-over-hole TCP puts the ~0.20 m wrist through the crate, and
@@ -47,7 +47,7 @@ def approach_center_potential(fruit_xyz, tcp_xyz, basket_xyz, length_m=0.60):
         raise ValueError('length_m must be finite in [0.05, 2.0] m')
     d_fruit = float(np.linalg.norm(fruit - basket))
     d_hand_xy = float(np.linalg.norm(tcp[:2] - basket[:2]))
-    return 0.5 * (float(np.exp(-d_fruit / length)) + float(np.exp(-d_hand_xy / length)))
+    return 0.25 * float(np.exp(-d_fruit / length)) + 0.75 * float(np.exp(-d_hand_xy / length))
 
 
 @dataclass
