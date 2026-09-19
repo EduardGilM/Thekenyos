@@ -306,6 +306,25 @@ def _apply_easy_hover(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
 
 
 @wp.kernel
+def _easy_airdrop(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                  qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
+                  targets: wp.array2d(dtype=float), fruit_qposadr: wp.array(dtype=int),
+                  fruit_dofadr: wp.array(dtype=int), jaw_qposadr: int, jaw_open: float,
+                  drop_m: float):
+    """Open the jaw and lower a free fruit below TCP. Not a liner teleport."""
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 1:
+        return
+    qadr = fruit_qposadr[0]
+    dadr = fruit_dofadr[0]
+    qpos[world, qadr + 2] = qpos[world, qadr + 2] - drop_m
+    for i in range(6):
+        qvel[world, dadr + i] = 0.0
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
+
+
+@wp.kernel
 def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                                chassis: int, fruit_bodies: wp.array(dtype=int),
                                active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
@@ -723,6 +742,11 @@ class FastRuntime:
                 self.task.eq_active, self.task.detached, self.task.grasped, self.task.grasp_paid,
                 self._chassis_qposadr, 1.0, self._randomize_layout, self._layout_dx, self._layout_dy],
                 device=self.device)
+            if self._easy:
+                wp.launch(_easy_airdrop, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
+                    self._fruit_qposadrs, self._fruit_dofadrs, self._jaw_qposadr, self._jaw_open,
+                    float(EASY_PRESET['drop_offset_m'])], device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
             self._measure_reward(mask_wp)

@@ -128,6 +128,9 @@ class CurriculumTest(unittest.TestCase):
         local = hover_tcp_local_m(0.12)
         np.testing.assert_allclose(local, CENTER + np.array([0.0, 0.0, SIZE[2] + 0.12]))
         self.assertGreater(float(local[2]), float(CENTER[2] + SIZE[2]))
+        drop_z = float(local[2] - EASY_PRESET['drop_offset_m'])
+        self.assertGreater(drop_z, float(CENTER[2] + SIZE[2]))
+        self.assertEqual(EASY_PRESET['drop_offset_m'], 0.06)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(0.0)
         with self.assertRaises(ValueError):
