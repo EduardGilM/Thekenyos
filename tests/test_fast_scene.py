@@ -11,15 +11,17 @@ import numpy as np
 
 class FastSceneXmlTest(unittest.TestCase):
     def test_reattach_moves_liner_off_chassis(self):
-        from treesim.kiwi_rl.fast_scene import BASKET_SHELL_BODY, reattach_basket_collision_geoms
+        from treesim.kiwi_rl.fast_scene import (
+            ARM_CRATE_PAIR_PREFIX, BASKET_SHELL_BODY, prepare_arm_crate_collision,
+        )
         xml = '''<mujoco><worldbody><body name="chassis">
           <geom name="basket_floor" type="box" size=".1 .1 .01"/>
           <geom name="basket_liner" type="box" size=".01 .1 .1"/>
           <geom name="basket_visual_1" type="box" size=".02 .02 .02"/>
           <body name="arm_link_wr1"><geom name="hand" type="sphere" size=".05"/></body>
         </body></worldbody></mujoco>'''
-        patched = reattach_basket_collision_geoms(xml)
-        self.assertEqual(reattach_basket_collision_geoms(patched), patched)
+        patched = prepare_arm_crate_collision(xml)
+        self.assertEqual(prepare_arm_crate_collision(patched), patched)
         root = ET.fromstring(patched)
         shell = root.find(f'.//body[@name="{BASKET_SHELL_BODY}"]')
         self.assertIsNotNone(shell)
@@ -31,6 +33,9 @@ class FastSceneXmlTest(unittest.TestCase):
         self.assertNotIn('basket_floor', chassis_geoms)
         self.assertNotIn('basket_liner', chassis_geoms)
         self.assertIsNotNone(shell.find('inertial'))
+        pairs = [p.get('name') for p in root.findall('contact/pair')
+                 if (p.get('name') or '').startswith(ARM_CRATE_PAIR_PREFIX)]
+        self.assertEqual(len(pairs), 2)
 
 
 XML = '''<mujoco>
@@ -123,7 +128,7 @@ class FastSceneTest(unittest.TestCase):
 
     def test_basket_shell_restores_arm_crate_contacts(self):
         import mujoco
-        from treesim.kiwi_rl.fast_scene import BASKET_SHELL_BODY, reattach_basket_collision_geoms
+        from treesim.kiwi_rl.fast_scene import BASKET_SHELL_BODY, prepare_arm_crate_collision
 
         xml = '''<mujoco>
         <worldbody>
@@ -149,8 +154,8 @@ class FastSceneTest(unittest.TestCase):
         self.assertEqual(_arm_basket_contacts(before, before_data), 0)
         self.assertAlmostEqual(float(before.body_mass[before.body('chassis').id]), 5.0, places=5)
 
-        patched = reattach_basket_collision_geoms(xml)
-        self.assertEqual(reattach_basket_collision_geoms(patched), patched)
+        patched = prepare_arm_crate_collision(xml)
+        self.assertEqual(prepare_arm_crate_collision(patched), patched)
         after = mujoco.MjModel.from_xml_string(patched)
         after_data = mujoco.MjData(after)
         mujoco.mj_forward(after, after_data)

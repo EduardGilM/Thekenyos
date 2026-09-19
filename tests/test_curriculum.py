@@ -160,6 +160,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('out_applied[world, joint] = 0.0', src)
         scene_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_scene.py').read_text(encoding='utf-8')
         self.assertIn('def reattach_basket_collision_geoms', scene_src)
+        self.assertIn('def enable_arm_basket_contact_pairs', scene_src)
         self.assertIn('basket_shell', scene_src)
         with self.assertRaises(ValueError):
             hover_tcp_local_m(0.0)

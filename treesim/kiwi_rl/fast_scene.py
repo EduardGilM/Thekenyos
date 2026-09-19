@@ -68,6 +68,63 @@ def reattach_basket_collision_geoms(xml: str) -> str:
     return ET.tostring(root, encoding='unicode')
 
 
+ARM_CRATE_PAIR_PREFIX = 'arm_crate_'
+
+
+def _geom_collides(geom: ET.Element) -> bool:
+    contype, conaffinity = geom.get('contype'), geom.get('conaffinity')
+    if contype == '0' and conaffinity == '0':
+        return False
+    return True
+
+
+def enable_arm_basket_contact_pairs(xml: str) -> str:
+    """Force arm-link vs liner/floor contacts.
+
+    A welded ``basket_shell`` still shares the chassis weld id, so MuJoCo
+    ``filterparent`` and chassis-arm ``exclude`` keep swallowing those pairs.
+    Explicit ``<pair>`` entries override both. Does not add joints or welds.
+    """
+    if not isinstance(xml, str) or not xml:
+        raise ValueError('scene XML must be a non-empty string')
+    if f'name="{ARM_CRATE_PAIR_PREFIX}' in xml or f"name='{ARM_CRATE_PAIR_PREFIX}" in xml:
+        return xml
+    root = ET.fromstring(xml)
+    parent_of = {child: parent for parent in root.iter() for child in parent}
+    basket, arm = [], []
+    for geom in root.findall('.//geom'):
+        name = geom.get('name') or ''
+        if not name or not _geom_collides(geom):
+            continue
+        body = geom
+        while body is not None and body.tag != 'body':
+            body = parent_of.get(body)
+        bname = body.get('name') if body is not None else ''
+        if name.startswith(BASKET_COLLISION_PREFIXES):
+            basket.append(name)
+        elif bname and 'arm_link' in bname:
+            arm.append(name)
+    if not basket:
+        return xml
+    if not arm:
+        raise ValueError('basket collision geoms need named arm-link geoms for contact pairs')
+    contact = root.find('contact')
+    if contact is None:
+        contact = ET.SubElement(root, 'contact')
+    index = 0
+    for floor in basket:
+        for link in arm:
+            ET.SubElement(contact, 'pair', name=f'{ARM_CRATE_PAIR_PREFIX}{index}',
+                          geom1=floor, geom2=link, condim='3')
+            index += 1
+    return ET.tostring(root, encoding='unicode')
+
+
+def prepare_arm_crate_collision(xml: str) -> str:
+    """Detach the liner and force arm-crate contacts. Mass stays on the chassis."""
+    return enable_arm_basket_contact_pairs(reattach_basket_collision_geoms(xml))
+
+
 def _read_base(directory: Path):
     xml = (directory / 'base.xml').read_text()
     manifest = json.loads((directory / 'manifest.json').read_text())
@@ -203,7 +260,7 @@ def assemble_fast_scene(directory, *, fruit_count: int | None = None,
     # Normalize authored collision meshes after adding the fruit, preserving the
     # existing GPU/MJWarp coordinate-frame workaround and physical invariants.
     assembled_xml, normalization = normalize_collision_meshes(ET.tostring(root, encoding='unicode'))
-    assembled_xml = reattach_basket_collision_geoms(assembled_xml)
+    assembled_xml = prepare_arm_crate_collision(assembled_xml)
     model = mujoco.MjModel.from_xml_string(assembled_xml)
     data = mujoco.MjData(model)
     # Copy home coordinates by joint name. Fixed canopy support can remove
@@ -268,7 +325,7 @@ def load_fast_scene(directory):
     root = ET.fromstring(xml)
     if asset_digests(root) != manifest.get('asset_sha256', {}):
         raise ValueError('Scene asset content changed')
-    xml = reattach_basket_collision_geoms(xml)
+    xml = prepare_arm_crate_collision(xml)
     model = mujoco.MjModel.from_xml_string(xml)
     if model.nflex or any(model.eq_type[i] == mujoco.mjtEq.mjEQ_WELD for i in range(model.neq)):
         raise ValueError('Fast scene must contain no flex objects or weld equalities')
