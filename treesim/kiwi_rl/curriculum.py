@@ -91,8 +91,10 @@ EASY_PRESET = {
     'start_side_y_m': 0.10,
     'start_z_span_m': 0.04,
     # +20 deposit lost to -25 ground, so worlds that almost succeed learn to
-    # stay away. 100 is an engineering jackpot, not a measured harvest value.
-    'deposit_reward': 100.0,
+    # stay away. 100 was still small next to a window of ground hits.
+    # 500 is the enable_easy ceiling: an engineering jackpot, not a
+    # measured harvest value.
+    'deposit_reward': 500.0,
     'ik_accept_err_m': 0.025,
     'n_hold_levels': 10,
     'hold_close_min': 0.25,

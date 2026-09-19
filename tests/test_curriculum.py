@@ -142,7 +142,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['start_side_y_m'], 0.10)
         self.assertEqual(preset['start_y_span_m'], 0.04)
         self.assertEqual(preset['start_z_span_m'], 0.04)
-        self.assertEqual(preset['deposit_reward'], 100.0)
+        self.assertEqual(preset['deposit_reward'], 500.0)
         self.assertEqual(HOLD_SWEEP_MARGIN_M, 0.40)
         self.assertEqual(HOLD_SWEEP_CLEARANCE_M, 0.28)
         self.assertEqual(preset['n_start_poses'], 24)
