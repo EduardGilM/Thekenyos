@@ -192,7 +192,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertFalse(harvest.easy)
         self.assertFalse(harvest.ik_demo)
         self.assertFalse(harvest.ik_grasp)
-        self.assertEqual(harvest.demo_updates, 32)
+        self.assertEqual(harvest.demo_updates, 10)
         self.assertEqual(harvest.updates, 36)
         self.assertEqual(harvest.stage, 'stationary_harvest')
         self.assertEqual(harvest.worlds, 512)

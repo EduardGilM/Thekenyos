@@ -505,8 +505,8 @@ class CurriculumTest(unittest.TestCase):
             IK_HARVEST_PRESET, apply_ik_harvest_preset, sample_world_skills,
         )
         preset = apply_ik_harvest_preset({'gate_success_rate': 0.80})
-        self.assertEqual(preset['demo_updates'], 32)
-        self.assertEqual(preset['rl_updates'], 4)
+        self.assertEqual(preset['demo_updates'], 10)
+        self.assertEqual(preset['rl_updates'], 26)
         self.assertEqual(preset['updates'], 36)
         self.assertEqual(preset['worlds'], 512)
         self.assertEqual(preset['steps'], 256)

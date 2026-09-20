@@ -271,10 +271,12 @@ IK_GRASP_PRESET = {
 # Stage-3 full cycle: privileged IK picks hanging fruit, holds, then carries
 # into the liner. Fruit stays free; scripted jaw; eval keeps teacher_mix=0.
 # Collect needs a long horizon so BC can see settle, so the recipe uses
-# fewer worlds than the 2048×64 grasp tape. Not a weld or field harvest.
+# fewer worlds than the 2048×64 grasp tape. Ten IK updates seed the
+# pick/carry; the rest is teacher-off PPO with the detach→opening line.
+# Not a weld or field harvest.
 IK_HARVEST_PRESET = {
-    'demo_updates': 32,
-    'rl_updates': 4,
+    'demo_updates': 10,
+    'rl_updates': 26,
     'updates': 36,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
