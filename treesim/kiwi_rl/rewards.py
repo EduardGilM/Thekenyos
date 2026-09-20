@@ -18,6 +18,12 @@ import numpy as np
 W_DEPOSIT = 20.0
 W_GRASP_STABLE = 0.5
 W_DETACH_HELD = 2.0
+# One-shot RL breadcrumbs after detach. Engineering, not a measured harvest
+# value. The origin (detach COM) is never paid; eval keeps guidance at 0.
+W_CARRY_LINE = 8.0
+CARRY_LINE_POINTS = 8
+CARRY_LINE_RADIUS_M = 0.10
+CARRY_LINE_MAX_POINTS = 8
 W_LOSS = -25.0
 W_SPILL = -25.0
 W_DAMAGE_PER_UNIT = -5.0
@@ -26,6 +32,59 @@ W_TIME_PER_S = -0.05
 W_SMOOTH = -0.01
 W_FALSE_FINISH = -2.0
 W_OBSTACLE_CONTACT_PER_S = -1.0
+
+
+def carry_line_waypoints_world_m(origin_xyz, target_xyz, n_points=CARRY_LINE_POINTS):
+    """Straight detach→opening samples. Skips the start so detach is not free.
+
+    Points sit at t = 1/n … 1. The last sample is the opening target, not the
+    liner floor. Fruit stays a free body.
+    """
+    origin = np.asarray(origin_xyz, dtype=np.float64).reshape(3)
+    target = np.asarray(target_xyz, dtype=np.float64).reshape(3)
+    n = int(n_points)
+    if not np.isfinite(origin).all() or not np.isfinite(target).all():
+        raise ValueError('carry-line ends must be finite')
+    if n < 1 or n > CARRY_LINE_MAX_POINTS:
+        raise ValueError(f'n_points must be in [1, {CARRY_LINE_MAX_POINTS}]')
+    ts = (np.arange(n, dtype=np.float64) + 1.0) / float(n)
+    return origin.reshape(1, 3) * (1.0 - ts.reshape(-1, 1)) + target.reshape(1, 3) * ts.reshape(-1, 1)
+
+
+def pay_carry_line_once(fruit_xyz, origin_xyz, target_xyz, paid_mask, *,
+                        radius_m=CARRY_LINE_RADIUS_M, bonus=W_CARRY_LINE,
+                        n_points=CARRY_LINE_POINTS, armed=True, grasped=True):
+    """Pay each unpaid waypoint at most once when the fruit COM first enters it.
+
+    The detach origin is not a waypoint. A dropped fruit (not grasped) does not
+    collect crumbs while falling. Returns (reward, new_mask, n_hits).
+    """
+    fruit = np.asarray(fruit_xyz, dtype=np.float64).reshape(3)
+    if not np.isfinite(fruit).all():
+        raise ValueError('fruit_xyz must be finite')
+    radius = float(radius_m)
+    pay = float(bonus)
+    if not np.isfinite(radius) or not 0.0 < radius <= 0.25:
+        raise ValueError('radius_m must be finite in (0, 0.25] m')
+    if not np.isfinite(pay) or not 0.0 < pay <= 20.0:
+        raise ValueError('bonus must be finite in (0, 20]')
+    mask = int(paid_mask)
+    if mask < 0:
+        raise ValueError('paid_mask must be a non-negative bitfield')
+    if not armed or not grasped:
+        return 0.0, mask, 0
+    points = carry_line_waypoints_world_m(origin_xyz, target_xyz, n_points=n_points)
+    reward = 0.0
+    hits = 0
+    for index, point in enumerate(points):
+        flag = 1 << index
+        if mask & flag:
+            continue
+        if float(np.linalg.norm(fruit - point)) <= radius:
+            mask |= flag
+            reward += pay
+            hits += 1
+    return float(reward), int(mask), int(hits)
 
 
 def approach_center_potential(fruit_xyz, tcp_xyz, basket_xyz, length_m=0.60):

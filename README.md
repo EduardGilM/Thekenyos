@@ -841,10 +841,15 @@ slide to the opening and opens. Catalog rows that clip the crate or miss the
 hanging COM by more than ~3 cm are discarded. The floating base is pinned so
 gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 32 updates on 512 worlds
-× 256 steps, then four PPO updates with the teacher off. Evaluation keeps
-`teacher_mix=0` and `guidance_weight=0`. Success is a settled liner deposit,
-not a wall touch. This is not a paper picking angle or a tissue-safe grasp;
-`training_ready` stays false.
+× 256 steps, then four PPO updates with the teacher off. During those RL
+updates only, the first detach latches a straight 8-point line from the fruit
+COM to the opening (not the liner floor); each unpaid point pays `+8` once
+when the held COM first enters a 10 cm radius. The origin is never paid, a
+dropped fruit cannot collect crumbs while falling, and evaluation keeps
+`teacher_mix=0` and `guidance_weight=0` so the line stays off the score.
+Success is a settled liner deposit, not a wall touch or a waypoint hit. This
+is not a paper picking angle or a tissue-safe grasp; `training_ready` stays
+false.
 
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \

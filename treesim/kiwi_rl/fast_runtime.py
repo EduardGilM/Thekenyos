@@ -22,8 +22,9 @@ from .curriculum import (
 )
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
-    W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
-    W_LOSS, W_SMOOTH, W_TIME_PER_S,
+    CARRY_LINE_POINTS, CARRY_LINE_RADIUS_M, W_CARRY_LINE, W_DAMAGE_PER_UNIT,
+    W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE, W_LOSS, W_SMOOTH,
+    W_TIME_PER_S,
 )
 
 # Latched per-world bits. Overflow, a nonfinite action, or a single-world
@@ -175,6 +176,68 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
         r = r + fail_w[world]
         fail_paid[world] = wp.uint8(1)
     reward[world] = r
+
+
+@wp.kernel
+def _pay_carry_line(xipos: wp.array2d(dtype=wp.vec3), fruit_bodies: wp.array(dtype=int),
+                    active_fruit: wp.array(dtype=int), xpos: wp.array2d(dtype=wp.vec3),
+                    xmat: wp.array2d(dtype=wp.mat33), chassis: int, basket_center: wp.vec3,
+                    release_offset: wp.array(dtype=wp.vec3), detached: wp.array(dtype=wp.uint8),
+                    grasped: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
+                    goal: wp.array(dtype=int), guidance: wp.array(dtype=float),
+                    mask: wp.array(dtype=wp.uint8), enabled: wp.array(dtype=int),
+                    armed: wp.array(dtype=int), origin: wp.array(dtype=wp.vec3),
+                    paid: wp.array(dtype=int), hits: wp.array(dtype=int),
+                    hits_step: wp.array(dtype=int), reward: wp.array(dtype=float),
+                    n_points: wp.array(dtype=int), radius: wp.array(dtype=float),
+                    bonus: wp.array(dtype=float)):
+    """One-shot detach→opening crumbs. Eval keeps guidance at 0 and must stay off."""
+    world = wp.tid()
+    if mask[world] == 0:
+        return
+    hits_step[world] = 0
+    if enabled[0] == 0 or guidance[world] <= 0.0 or goal[world] == 1:
+        return
+    if detached[world] == 0 or grasped[world] == 0 or ground_contact[world] != 0:
+        return
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit_pos = xipos[world, fruit_bodies[idx]]
+    if armed[world] == 0:
+        armed[world] = 1
+        origin[world] = fruit_pos
+        paid[world] = 0
+        return
+    count = n_points[0]
+    rad = radius[0]
+    pay = bonus[0]
+    if count < 1 or rad <= 0.0 or pay == 0.0:
+        return
+    if count > 8:
+        count = 8
+    rotation = xmat[world, chassis]
+    target = xpos[world, chassis] + rotation @ basket_center + rotation @ release_offset[0]
+    span = target - origin[world]
+    if wp.length(span) < 1.0e-4:
+        return
+    bits = paid[world]
+    added = float(0.0)
+    hit_count = int(0)
+    inv = 1.0 / float(count)
+    for i in range(8):
+        if i < count:
+            wpnt = origin[world] + span * (float(i + 1) * inv)
+            flag = 1 << i
+            if (bits & flag) == 0 and wp.length(fruit_pos - wpnt) <= rad:
+                bits = bits | flag
+                added = added + pay
+                hit_count = hit_count + 1
+    paid[world] = bits
+    if hit_count > 0:
+        reward[world] = reward[world] + added
+        hits[world] = hits[world] + hit_count
+        hits_step[world] = hit_count
 
 
 @wp.kernel
@@ -1095,6 +1158,18 @@ class FastRuntime:
             self._easy_start_index_next = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_hover_cohort = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_released = wp.zeros(worlds, dtype=int, device=self.device)
+            # Captured into the CUDA graph. Enable in-place during RL only.
+            self._carry_line_enabled = wp.zeros(1, dtype=int, device=self.device)
+            self._carry_line_n = wp.zeros(1, dtype=int, device=self.device)
+            self._carry_line_radius = wp.zeros(1, dtype=float, device=self.device)
+            self._carry_line_bonus = wp.zeros(1, dtype=float, device=self.device)
+            self._carry_line_armed = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_origin = wp.zeros(worlds, dtype=wp.vec3, device=self.device)
+            self._carry_line_paid = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_hits = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_step = wp.zeros(worlds, dtype=int, device=self.device)
+            self._configure_carry_line(
+                CARRY_LINE_POINTS, CARRY_LINE_RADIUS_M, W_CARRY_LINE)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
             self._easy_jaw_hold_next = wp.zeros(worlds, dtype=float, device=self.device)
             closed_holds = np.full(worlds, self._jaw_closed, dtype=np.float32)
@@ -1169,6 +1244,16 @@ class FastRuntime:
                           W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
                           self._shape_hand_fruit, self._easy_released], device=self.device)
+        wp.launch(_pay_carry_line, dim=self.worlds,
+                  inputs=[self.data.xipos, self.task.fruit_body, self.task.active_fruit,
+                          self.data.xpos, self.data.xmat, self.chassis, self._basket_center,
+                          self._release_offset, self.task.detached, self.task.grasped,
+                          self.task.ground_contact, self.task.goal, self._guidance, mask,
+                          self._carry_line_enabled, self._carry_line_armed,
+                          self._carry_line_origin, self._carry_line_paid,
+                          self._carry_line_hits, self._carry_line_step, self._reward,
+                          self._carry_line_n, self._carry_line_radius,
+                          self._carry_line_bonus], device=self.device)
 
     def _latch(self):
         wp.launch(_latch_state, dim=(self.worlds, max(self.data.qpos.shape[1], self.data.qvel.shape[1])),
@@ -1236,6 +1321,7 @@ class FastRuntime:
             'timed_out': wp.to_torch(self._timed_out).bool(),
             'release_supported': True,
             'release_fired': wp.to_torch(self._easy_released).bool(),
+            'carry_line_hits': wp.to_torch(self._carry_line_step),
             **{key: wp.to_torch(value) for key,value in self.task.outputs().items()},
         }
 
@@ -1490,6 +1576,32 @@ class FastRuntime:
             raise ValueError('shape offsets must be finite')
         self._hover_offset.assign(np.ascontiguousarray(hover))
         self._release_offset.assign(np.ascontiguousarray(release))
+
+    def _configure_carry_line(self, n_points, radius_m, bonus):
+        """Write captured-graph breadcrumb knobs. Does not enable the line."""
+        n = int(n_points)
+        radius = float(radius_m)
+        pay = float(bonus)
+        if n < 1 or n > 8:
+            raise ValueError('carry_line_points must be in [1, 8]')
+        if not np.isfinite(radius) or not 0.0 < radius <= 0.25:
+            raise ValueError('carry_line_radius_m must be finite in (0, 0.25] m')
+        if not np.isfinite(pay) or not 0.0 < pay <= 20.0:
+            raise ValueError('carry_line_bonus must be finite in (0, 20]')
+        self._carry_line_n.assign(np.array([n], dtype=np.int32))
+        self._carry_line_radius.assign(np.array([radius], dtype=np.float32))
+        self._carry_line_bonus.assign(np.array([pay], dtype=np.float32))
+        return {
+            'carry_line_points': n,
+            'carry_line_radius_m': radius,
+            'carry_line_bonus': pay,
+        }
+
+    def set_carry_line_enabled(self, enabled):
+        """RL-only detach→opening crumbs. Eval keeps guidance_weight=0."""
+        flag = 1 if enabled else 0
+        self._carry_line_enabled.assign(np.array([flag], dtype=np.int32))
+        return {'carry_line_enabled': int(flag)}
 
     def _commit_queued_carry_starts(self, mask):
         """Move queued catalog rows onto resetting worlds only."""
@@ -2063,6 +2175,20 @@ class FastRuntime:
         self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
         self._deposit_w.assign(np.full(self.worlds, float(knobs['deposit_reward']), dtype=np.float32))
         self._fail_w.assign(np.full(self.worlds, float(knobs['fail_reward']), dtype=np.float32))
+        line = self._configure_carry_line(
+            knobs['carry_line_points'], knobs['carry_line_radius_m'],
+            knobs['carry_line_bonus'])
+        from treesim.basket import SIZE
+        hover_c = float(knobs['hover_clearance_m'])
+        release_c = float(knobs['release_clearance_m'])
+        if not np.isfinite(hover_c) or not 0.05 <= hover_c <= 0.40:
+            raise ValueError('hover_clearance_m must be finite in [0.05, 0.40] m')
+        if not np.isfinite(release_c) or not 0.05 <= release_c <= 0.40:
+            raise ValueError('release_clearance_m must be finite in [0.05, 0.40] m')
+        self._set_shape_offsets(
+            (0.0, 0.0, float(SIZE[2] + hover_c)),
+            (0.0, 0.0, float(SIZE[2] + release_c)),
+        )
         close = float(knobs['jaw_close_frac'])
         if not np.isfinite(close) or not 0.15 <= close <= 0.85:
             raise ValueError('jaw_close_frac must be finite in [0.15, 0.85]')
@@ -2094,6 +2220,7 @@ class FastRuntime:
             'hold_close_frac': close,
             'scripted_jaw': bool(self._ik_harvest),
             'weld': False,
+            **line,
             'n_start_poses': int(catalog.get('n_start_poses', 0)),
             'n_hard_starts': int(catalog.get('n_hard_starts', 0)),
             'n_waypoints': int(catalog.get('n_waypoints', 0)),
@@ -2480,6 +2607,14 @@ class FastRuntime:
                       inputs=[mask_wp, self._easy_released], device=self.device)
             wp.launch(_clear_masked_int, dim=self.worlds,
                       inputs=[mask_wp, self._waypoint_index], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_armed], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_paid], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_hits], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_step], device=self.device)
             if self._ik_demo or self._ik_grasp or self._ik_harvest:
                 self._commit_queued_carry_starts(mask)
             if self._easy and not self._ik_demo:

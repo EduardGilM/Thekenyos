@@ -309,6 +309,11 @@ IK_HARVEST_PRESET = {
     # Gentler than the 0.45 grasp pin that sat at 24 N over the 15 N fail.
     'jaw_close_frac': 0.32,
     'jaw_close_radius_m': 0.045,
+    # RL-only one-shot line after detach. Ends at the opening, not the floor.
+    # Eval keeps guidance_weight=0 so these crumbs stay off the score.
+    'carry_line_points': 8,
+    'carry_line_radius_m': 0.10,
+    'carry_line_bonus': 8.0,
     'eval_every': 8,
     'checkpoint_every': 4,
     'deposit_reward': 30.0,

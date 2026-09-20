@@ -307,6 +307,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['inside_basket'] = info['inside_basket'].clone()
             if 'basket_contact' in info:
                 row['basket_contact'] = info['basket_contact'].clone()
+            if 'carry_line_hits' in info:
+                row['carry_line_hits'] = info['carry_line_hits'].clone()
             if teacher_applied is not None:
                 row['teacher_applied'] = teacher_applied.clone()
             rows.append(row)
@@ -659,6 +661,10 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         skills['reset_mode'] = np.full(runtime.worlds, int(RESET_PREGRASP), dtype=np.int32)
     runtime.configure_skills(skills)
     horizon = evaluation_horizon_steps(stage, control_dt, profile=eval_profile)
+    saved_line = None
+    if hasattr(runtime, 'set_carry_line_enabled'):
+        saved_line = int(np.asarray(runtime._carry_line_enabled.numpy()).reshape(-1)[0])
+        runtime.set_carry_line_enabled(False)
     saved_hover = None
     if ((getattr(runtime, '_ik_demo', False) or getattr(runtime, '_ik_grasp', False)
          or getattr(runtime, '_ik_harvest', False)) and hasattr(runtime, 'set_carry_progress')):
@@ -757,6 +763,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     }
     if saved_hover is not None:
         runtime.restore_easy_hover(saved_hover)
+    if saved_line is not None:
+        runtime.set_carry_line_enabled(bool(saved_line))
     return result
 
 
@@ -1022,6 +1030,8 @@ def run(args):
         for iteration in range(args.updates):
             began = time.monotonic()
             demo_phase = bool((ik_demo or ik_grasp or ik_harvest) and iteration < demo_updates)
+            if hasattr(runtime, 'set_carry_line_enabled'):
+                runtime.set_carry_line_enabled(not demo_phase)
             if ik_grasp and iteration == demo_updates:
                 apply_stage(runtime, stage, numpy_rng)
                 carry = {}
@@ -1119,6 +1129,8 @@ def run(args):
                 grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
+                carry_line_hits=int(torch.stack([r['carry_line_hits'] for r in rows]).sum())
+                if 'carry_line_hits' in rows[0] else 0,
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
                 recovered_worlds=int(carry.get('recovered_worlds', 0)),
                 overflow_worlds=int(carry.get('overflow_worlds', 0)),
