@@ -173,6 +173,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('enable_ik_grasp', run_src)
         self.assertIn('ik_grasp', run_src)
         self.assertIn('primary_only', run_src)
+        self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
+        self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)
         self.assertIn("row['inside_basket']", collect_src)
         self.assertIn("row['fallen']", collect_src)

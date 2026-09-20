@@ -907,6 +907,9 @@ class FastRuntime:
             self._ik_demo = False
             self._ik_grasp = False
             self._grasp_close_index = 1
+            self._grasp_catalog_locked = False
+            self._catalog_fruit_world_m = None
+            self._last_grasp_catalog = {}
             self._n_waypoints = 1
             self._n_hard_starts = 0
             self._waypoint_q = wp.zeros((1, 6), dtype=float, device=self.device)
@@ -1491,9 +1494,14 @@ class FastRuntime:
         mujoco.mj_forward(self.model, data)
         chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
         fruit_p = np.asarray(data.xpos[self.fruit_body], dtype=np.float64)
+        fruit_source = 'cpu_mj_forward'
         gpu_fruit = self._gpu_fruit_world_m()
-        if gpu_fruit is not None and float(np.linalg.norm(gpu_fruit - fruit_p)) > 0.02:
+        # Training steps the GPU hanging fruit. Target that pose whenever the
+        # device buffer is finite so the close/pull joints are not aimed at
+        # an unset CPU kinematics COM (~21 cm off in grasp1).
+        if gpu_fruit is not None:
             fruit_p = gpu_fruit
+            fruit_source = 'gpu_xpos'
         q_home = qpos[qids].copy()
         safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
         if (safe.shape == (6,) and np.isfinite(safe).all()
@@ -1576,6 +1584,7 @@ class FastRuntime:
         self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
         self._waypoint_q = wp.array(path_qs.reshape(-1, 6), dtype=float, device=self.device)
         self._hover_start_index = int(start_qs.shape[0] - 1)
+        self._catalog_fruit_world_m = np.asarray(fruit_p, dtype=np.float64).reshape(3)
         self.hover_error_m = 0.0
         self.easy_start_error_m = 0.0
         return {
@@ -1585,6 +1594,8 @@ class FastRuntime:
             'grasp_close_index': int(self._grasp_close_index),
             'catalog_grasp_tcp_err_mean_m': float(np.mean(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
             'catalog_grasp_tcp_err_max_m': float(np.max(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
+            'catalog_fruit_source': fruit_source,
+            'catalog_fruit_world_m': [float(v) for v in self._catalog_fruit_world_m],
             'hover_error_m': 0.0,
         }
 
@@ -1604,6 +1615,32 @@ class FastRuntime:
         if not np.isfinite(fruit).all() or float(np.linalg.norm(fruit)) < 1e-6:
             return None
         return fruit
+
+    def _relock_grasp_catalog_to_gpu(self):
+        """Rebuild IK once if the settled GPU fruit moved from the catalog COM.
+
+        First ``enable_ik_grasp`` may run before the hanging equality is
+        visible on device. Closing on that stale COM is empty air, not a grasp.
+        One rebuild; fruit stays attached. Not a weld.
+        """
+        if not self._ik_grasp or getattr(self, '_grasp_catalog_locked', False):
+            return
+        gpu = self._gpu_fruit_world_m()
+        catalog = getattr(self, '_catalog_fruit_world_m', None)
+        if gpu is None:
+            return
+        if (catalog is not None
+                and float(np.linalg.norm(np.asarray(catalog, dtype=np.float64) - gpu)) <= 0.02):
+            self._grasp_catalog_locked = True
+            return
+        host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+        q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+        try:
+            info = self._build_grasp_catalog(q0)
+        except ValueError:
+            return
+        self._last_grasp_catalog = info
+        self._grasp_catalog_locked = True
 
     def enable_ik_grasp(self, enabled=True, *, shaping_coef=None):
         """Hanging fruit, open jaw, privileged IK to grasp and pull.
@@ -1644,7 +1681,14 @@ class FastRuntime:
         self._easy_jaw_hold_next.assign(holds)
         host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
         q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+        self._grasp_catalog_locked = False
+        if self._ik_grasp:
+            import mujoco_warp as mw
+            with wp.ScopedDevice(self.device):
+                mw.forward(self.gpu_model, self.data)
+                self._refresh(mw)
         catalog = self._build_grasp_catalog(q0) if self._ik_grasp else {}
+        self._last_grasp_catalog = catalog
         return {
             'easy': False,
             'ik_demo': False,
@@ -2042,6 +2086,8 @@ class FastRuntime:
                     device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
+            if self._ik_grasp:
+                self._relock_grasp_catalog_to_gpu()
             self._measure_reward(mask_wp)
             wp.launch(_basket_distance, dim=self.worlds,
                       inputs=[self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,

@@ -883,6 +883,11 @@ def run(args):
             config['n_hard_starts'] = grasp_info.get('n_hard_starts')
             config['n_start_poses'] = grasp_info.get('n_start_poses')
             config['grasp_close_index'] = grasp_info.get('grasp_close_index')
+            config['catalog_grasp_tcp_err_mean_m'] = grasp_info.get('catalog_grasp_tcp_err_mean_m')
+            config['catalog_grasp_tcp_err_max_m'] = grasp_info.get('catalog_grasp_tcp_err_max_m')
+            config['catalog_fruit_source'] = grasp_info.get('catalog_fruit_source')
+            config['catalog_fruit_world_m'] = grasp_info.get('catalog_fruit_world_m')
+            config['jaw_close_radius_m'] = float(IK_GRASP_PRESET['jaw_close_radius_m'])
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])
             config['ppo_epochs'] = int(knobs['ppo_epochs'])
@@ -959,11 +964,16 @@ def run(args):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             rollout_seconds = time.monotonic() - began
-            if ik_demo:
+            if ik_demo or ik_grasp:
                 live_wp = np.asarray(runtime._waypoint_index.numpy(), dtype=np.int32).reshape(-1)
                 start_info = dict(start_info)
                 start_info['carry_waypoint_mean'] = float(live_wp.mean()) if live_wp.size else 0.0
                 start_info['carry_waypoint_max'] = int(live_wp.max()) if live_wp.size else 0
+                catalog = getattr(runtime, '_last_grasp_catalog', None) or {}
+                start_info['catalog_grasp_tcp_err_mean_m'] = catalog.get(
+                    'catalog_grasp_tcp_err_mean_m', start_info.get('catalog_grasp_tcp_err_mean_m'))
+                start_info['catalog_fruit_source'] = catalog.get(
+                    'catalog_fruit_source', start_info.get('catalog_fruit_source'))
             if demo_phase:
                 for row in rows:
                     for key in ('raw', 'logp', 'value'):
@@ -1018,6 +1028,8 @@ def run(args):
                 carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
                 carry_waypoint_mean=float(start_info.get('carry_waypoint_mean', 0.0)),
                 carry_waypoint_max=int(start_info.get('carry_waypoint_max', 0)),
+                catalog_grasp_tcp_err_mean_m=start_info.get('catalog_grasp_tcp_err_mean_m'),
+                catalog_fruit_source=start_info.get('catalog_fruit_source'),
                 grasp_offset_mean_m=float(getattr(runtime, '_grasp_offset_mean_m', 0.0)),
                 grasp_offset_std_m=float(getattr(runtime, '_grasp_offset_std_m', 0.0)),
                 grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
