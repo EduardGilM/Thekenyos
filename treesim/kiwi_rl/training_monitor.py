@@ -738,28 +738,36 @@ def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
     import mujoco
     import numpy as np
     from treesim.kiwi_rl.curriculum import EASY_PRESET
-    from treesim.kiwi_rl.reach_teacher import hover_tcp_world_m, solve_tcp_hover
+    from treesim.kiwi_rl.reach_teacher import hover_tcp_world_m
     if clearance_m is None:
         clearance_m = float(EASY_PRESET['hover_clearance_m'])
     mujoco.mj_kinematics(model, data)
     qids = np.asarray(controller.qids[12:18], dtype=int)
-    dofs = np.asarray(controller.dofs[12:18], dtype=int)
     joints = np.asarray(controller.joints[12:18], dtype=int)
     ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
     limited = np.asarray(model.jnt_limited[joints], dtype=bool)
     ranges[limited] = np.asarray(model.jnt_range[joints], dtype=np.float64)[limited]
-    q_init = np.asarray(data.qpos[qids], dtype=np.float64)
     target = hover_tcp_world_m(
         data.xpos[controller.chassis], data.xmat[controller.chassis], clearance_m)
     target = target + np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3) @ np.array(
         [float(EASY_PRESET['release_target_inset_x_m']), 0.0, 0.0], dtype=np.float64)
-    arm_q, err = solve_tcp_hover(
-        model, data.qpos, int(tcp_site), target, qids, dofs, q_init, ranges)
-    if not np.isfinite(arm_q).all() or not np.isfinite(err):
+    arm_q = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64)
+    if (arm_q.shape != (6,) or not np.isfinite(arm_q).all()
+            or np.any(arm_q < ranges[:, 0]) or np.any(arm_q > ranges[:, 1])):
         return float('inf')
     data.qpos[qids] = arm_q
     controller.targets[12:18] = arm_q
     mujoco.mj_forward(model, data)
+    err = float(np.linalg.norm(np.asarray(data.site_xpos[int(tcp_site)]) - target))
+    for contact_index in range(int(data.ncon)):
+        pair = (
+            model.geom(int(data.contact[contact_index].geom1)).name or '',
+            model.geom(int(data.contact[contact_index].geom2)).name or '',
+        )
+        if any(name.startswith('basket_') for name in pair):
+            other = pair[1] if pair[0].startswith('basket_') else pair[0]
+            if not other.startswith('basket_'):
+                return float('inf')
     return float(err)
 
 

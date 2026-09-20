@@ -755,7 +755,9 @@ opening; outside it first targets the collision-safe 28 cm hover. The CPU
 dashboard preview uses the same hover-first reset instead of showing a stale
 side-wall approach. Hover and release sit 15 cm toward the robot side of the
 opening so the wrist stays outside the liner; the jaw cannot open below the
-rim. Once it opens it stays open and shaping stops. PPO excludes that
+rim. The high-hover joint pose is fitted for the pinned RELIC asset and rejected
+at runtime if TCP error, joint limits or arm/basket contacts disagree. Once the
+jaw opens it stays open and shaping stops. PPO excludes that
 scripted jaw dimension, whitens advantages normally, and self-imitates only the
 causal episode prefix ending in success. The easy optimizer uses clip 0.2,
 learning rate 5e-4, four epochs and target KL 0.05. These are student-side

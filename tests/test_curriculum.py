@@ -135,6 +135,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['hover_clearance_m'], 0.28)
         self.assertEqual(preset['release_target_clearance_m'], 0.14)
         self.assertEqual(preset['release_target_inset_x_m'], 0.15)
+        self.assertEqual(len(preset['safe_hover_arm_q']), 6)
+        self.assertTrue(np.isfinite(preset['safe_hover_arm_q']).all())
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertFalse(preset['start_over_opening'])
         self.assertTrue(preset['shape_hand_and_fruit'])

@@ -80,6 +80,12 @@ EASY_PRESET = {
     # Drop on the robot-side half of the opening so the ~20 cm wrist stays
     # outside the liner instead of hanging vertically inside the basket.
     'release_target_inset_x_m': 0.15,
+    # Fitted on the pinned RELIC arm/fast-scene asset: TCP at the high
+    # robot-side hover, tool +X toward chassis -X, no arm/basket contacts.
+    # Runtime validation rejects this if geometry, limits or IK error change.
+    'safe_hover_arm_q': (
+        3.10759, -2.16162, 1.73299, 0.08165, 0.42989, -1.63584,
+    ),
     # Reset at the safe high hover, then shape fruit 3D to the release target
     # and hand XY to the opening. Introduce at most 25% outside-crate starts;
     # the prior all-far catalog prevented the release skill from bootstrapping.

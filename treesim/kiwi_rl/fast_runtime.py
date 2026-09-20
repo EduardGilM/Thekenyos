@@ -962,10 +962,29 @@ class FastRuntime:
         drop_target = drop_target + chassis_R @ np.array(
             [float(EASY_PRESET['release_target_inset_x_m']), 0.0, 0.0],
             dtype=np.float64)
-        drop_q, drop_err = solve_tcp_hover(
-            self.model, qpos, self.tcp_site, drop_target, qids, dofs, q_home, ranges)
-        if not np.isfinite(drop_q).all() or not np.isfinite(drop_err):
-            drop_q, drop_err = q_home.astype(np.float32), 1.0
+        drop_q = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+        if (drop_q.shape != (6,) or not np.isfinite(drop_q).all()
+                or np.any(drop_q < ranges[:, 0]) or np.any(drop_q > ranges[:, 1])):
+            raise ValueError('safe_hover_arm_q is nonfinite, out of range or malformed')
+        data.qpos[:] = qpos
+        data.qpos[qids] = drop_q
+        mujoco.mj_forward(self.model, data)
+        drop_err = float(np.linalg.norm(np.asarray(data.site_xpos[self.tcp_site]) - drop_target))
+        basket_arm_contacts = []
+        for contact_index in range(int(data.ncon)):
+            pair = (
+                self.model.geom(int(data.contact[contact_index].geom1)).name or '',
+                self.model.geom(int(data.contact[contact_index].geom2)).name or '',
+            )
+            if any(name.startswith('basket_') for name in pair):
+                other = pair[1] if pair[0].startswith('basket_') else pair[0]
+                if not other.startswith('basket_'):
+                    basket_arm_contacts.append(pair)
+        if drop_err > float(EASY_PRESET['ik_accept_err_m']) or basket_arm_contacts:
+            raise ValueError(
+                f'safe hover pose failed validation: error={drop_err:.6f}, '
+                f'basket_contacts={basket_arm_contacts}')
+        drop_q = drop_q.astype(np.float32)
         n = int(EASY_PRESET['n_start_poses'])
         accept = float(EASY_PRESET['ik_accept_err_m'])
         over_opening = bool(EASY_PRESET.get('start_over_opening'))
