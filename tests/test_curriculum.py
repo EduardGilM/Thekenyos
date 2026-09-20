@@ -293,6 +293,7 @@ class CurriculumTest(unittest.TestCase):
         curriculum_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'curriculum.py').read_text(encoding='utf-8')
         self.assertIn('def harvest_run_knobs', curriculum_src)
         self.assertIn('def mix_harvest_reset_modes', curriculum_src)
+        self.assertIn('def assign_harvest_deposit_goals', curriculum_src)
         self.assertIn('def sample_harvest_deposit_waypoints', curriculum_src)
         self.assertIn('def _privileged_harvest_action', src)
         self.assertIn('def _build_harvest_catalog', src)
@@ -591,10 +592,10 @@ class CurriculumTest(unittest.TestCase):
         self.assertTrue(np.all(skills['goal_id'] == 2))
         self.assertTrue(np.all(skills['guidance_weight'] == 1.0))
 
-    def test_harvest_deposit_start_mix_keeps_harvest_goal(self):
+    def test_harvest_deposit_start_mix_marks_deposit_only(self):
         from treesim.kiwi_rl.curriculum import (
-            RESET_DEPOSIT, RESET_PREGRASP, mix_harvest_reset_modes,
-            sample_harvest_deposit_waypoints,
+            GOAL_ID, RESET_DEPOSIT, RESET_PREGRASP, assign_harvest_deposit_goals,
+            mix_harvest_reset_modes, sample_harvest_deposit_waypoints,
         )
         hanging = np.full(200, RESET_PREGRASP, dtype=np.int32)
         mixed = mix_harvest_reset_modes(hanging, 0.5, np.random.default_rng(0))
@@ -604,6 +605,14 @@ class CurriculumTest(unittest.TestCase):
         self.assertTrue(np.all(again == RESET_PREGRASP))
         with self.assertRaises(ValueError):
             mix_harvest_reset_modes(hanging, 0.9, np.random.default_rng(0))
+        harvest = np.full(200, GOAL_ID['HARVEST'], dtype=np.int32)
+        goals = assign_harvest_deposit_goals(harvest, mixed)
+        self.assertTrue(np.all(goals[mixed == RESET_DEPOSIT] == GOAL_ID['DEPOSIT_ONLY']))
+        self.assertTrue(np.all(goals[mixed == RESET_PREGRASP] == GOAL_ID['HARVEST']))
+        unchanged = assign_harvest_deposit_goals(harvest, again)
+        self.assertTrue(np.all(unchanged == GOAL_ID['HARVEST']))
+        with self.assertRaises(ValueError):
+            assign_harvest_deposit_goals(harvest[:3], mixed)
         waypoints = sample_harvest_deposit_waypoints(mixed, pull_index=4, n_waypoints=11,
                                                     rng=np.random.default_rng(2))
         self.assertEqual(waypoints.shape, (200,))
@@ -625,7 +634,7 @@ class CurriculumTest(unittest.TestCase):
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
         import train_fast
-        from treesim.kiwi_rl.curriculum import RESET_DEPOSIT, RESET_PREGRASP
+        from treesim.kiwi_rl.curriculum import GOAL_ID, RESET_DEPOSIT, RESET_PREGRASP
 
         class _Runtime:
             worlds = 40
@@ -637,13 +646,17 @@ class CurriculumTest(unittest.TestCase):
         skills = train_fast.apply_stage(
             runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
             primary_only=True, deposit_start_frac=0.5)
-        self.assertTrue(np.all(skills['goal_id'] == 2))
-        self.assertEqual(int((skills['reset_mode'] == RESET_DEPOSIT).sum()), 20)
-        self.assertEqual(int((skills['reset_mode'] == RESET_PREGRASP).sum()), 20)
+        deposit = skills['reset_mode'] == RESET_DEPOSIT
+        hanging_train = skills['reset_mode'] == RESET_PREGRASP
+        self.assertEqual(int(deposit.sum()), 20)
+        self.assertEqual(int(hanging_train.sum()), 20)
+        self.assertTrue(np.all(skills['goal_id'][deposit] == GOAL_ID['DEPOSIT_ONLY']))
+        self.assertTrue(np.all(skills['goal_id'][hanging_train] == GOAL_ID['HARVEST']))
         hanging = train_fast.apply_stage(
             runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
             evaluate_only=True, force_pregrasp=True, deposit_start_frac=0.5)
         self.assertTrue(np.all(hanging['reset_mode'] == RESET_PREGRASP))
+        self.assertTrue(np.all(hanging['goal_id'] == GOAL_ID['HARVEST']))
 
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')

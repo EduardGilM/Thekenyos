@@ -10,10 +10,10 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    EASY_PRESET, IK_DEMO_PRESET, IK_GRASP_PRESET, IK_HARVEST_PRESET,
+    EASY_PRESET, GOAL_ID, IK_DEMO_PRESET, IK_GRASP_PRESET, IK_HARVEST_PRESET,
     RESET_DEPOSIT, RESET_PREGRASP, apply_easy_preset, apply_ik_demo_preset,
     apply_ik_grasp_preset, apply_ik_harvest_preset, apply_speedrun_preset,
-    harvest_run_knobs, mix_harvest_reset_modes,
+    assign_harvest_deposit_goals, harvest_run_knobs, mix_harvest_reset_modes,
     easy_start_far_frac, easy_teacher_mix, evaluate_skills,
     evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask,
     next_stage, promotion_ready, sample_world_skills, stage_named,
@@ -805,9 +805,11 @@ def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False,
                 force_pregrasp=False, deposit_start_frac=None, train_timeout_s=None):
     """Write per-world skills. ``train_timeout_s`` shortens training episodes only.
 
-    ``deposit_start_frac`` keeps the HARVEST goal and restores a held, already
-    detached kiwi on a catalog carry waypoint. Eval must keep
-    ``force_pregrasp`` so the score stays hanging-only.
+    ``deposit_start_frac`` restores a held, already detached kiwi on a
+    catalog carry waypoint and marks those worlds DEPOSIT_ONLY so the
+    scripted-pin overlap is not a 15 N harvest fail. Hanging worlds stay
+    HARVEST. Eval must keep ``force_pregrasp`` so the score stays
+    hanging-only.
     """
     if evaluate_only:
         skills = evaluate_skills(stage, runtime.worlds)
@@ -819,6 +821,8 @@ def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False,
     elif deposit_start_frac is not None and not evaluate_only:
         skills['reset_mode'] = mix_harvest_reset_modes(
             skills['reset_mode'], deposit_start_frac, rng)
+        skills['goal_id'] = assign_harvest_deposit_goals(
+            skills['goal_id'], skills['reset_mode'])
     if train_timeout_s is not None and not evaluate_only:
         timeout = float(train_timeout_s)
         if not np_finite(timeout) or not 5.0 <= timeout <= 900.0:
@@ -1167,6 +1171,8 @@ def run(args):
                 deposit_start_worlds=int((np.asarray(runtime._reset_mode.numpy()).reshape(-1) == RESET_DEPOSIT).sum())
                 if ik_harvest else 0,
                 pregrasp_start_worlds=int((np.asarray(runtime._reset_mode.numpy()).reshape(-1) == RESET_PREGRASP).sum())
+                if ik_harvest else 0,
+                deposit_only_worlds=int((np.asarray(runtime.task.goal.numpy()).reshape(-1) == GOAL_ID['DEPOSIT_ONLY']).sum())
                 if ik_harvest else 0,
                 deposit_start_frac=float(deposit_start_frac or 0.0),
                 deposit_waypoint_mean=float(getattr(runtime, '_deposit_waypoint_mean', 0.0)),

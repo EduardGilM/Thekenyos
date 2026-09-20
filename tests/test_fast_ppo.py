@@ -188,14 +188,17 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('knobs=knobs', inspect.getsource(train_fast.run))
         self.assertIn('retained_detach_events', run_src)
         self.assertIn('mix_harvest_reset_modes', inspect.getsource(train_fast))
+        self.assertIn('assign_harvest_deposit_goals', inspect.getsource(train_fast))
         self.assertIn('deposit_start_frac', run_src)
         self.assertIn('deposit_start_worlds', run_src)
+        self.assertIn('deposit_only_worlds', run_src)
         self.assertIn('stage_kwargs', run_src)
         stage_src = inspect.getsource(train_fast.apply_stage)
         self.assertIn('train_timeout_s', stage_src)
         self.assertIn('not evaluate_only', stage_src)
         self.assertIn('deposit_start_frac', stage_src)
         self.assertIn('mix_harvest_reset_modes', stage_src)
+        self.assertIn('assign_harvest_deposit_goals', stage_src)
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
@@ -448,7 +451,7 @@ class FastTrainerCLITest(unittest.TestCase):
         import numpy as np
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
         import train_fast
-        from treesim.kiwi_rl.curriculum import RESET_DEPOSIT, RESET_PREGRASP, stage_named
+        from treesim.kiwi_rl.curriculum import GOAL_ID, RESET_DEPOSIT, RESET_PREGRASP, stage_named
 
         class _Runtime:
             worlds = 40
@@ -460,13 +463,17 @@ class FastTrainerCLITest(unittest.TestCase):
         skills = train_fast.apply_stage(
             runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
             primary_only=True, deposit_start_frac=0.5)
-        self.assertTrue(np.all(skills['goal_id'] == 2))
-        self.assertEqual(int((skills['reset_mode'] == RESET_DEPOSIT).sum()), 20)
-        self.assertEqual(int((skills['reset_mode'] == RESET_PREGRASP).sum()), 20)
+        deposit = skills['reset_mode'] == RESET_DEPOSIT
+        hanging_train = skills['reset_mode'] == RESET_PREGRASP
+        self.assertEqual(int(deposit.sum()), 20)
+        self.assertEqual(int(hanging_train.sum()), 20)
+        self.assertTrue(np.all(skills['goal_id'][deposit] == GOAL_ID['DEPOSIT_ONLY']))
+        self.assertTrue(np.all(skills['goal_id'][hanging_train] == GOAL_ID['HARVEST']))
         hanging = train_fast.apply_stage(
             runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
             evaluate_only=True, force_pregrasp=True, deposit_start_frac=0.5)
         self.assertTrue(np.all(hanging['reset_mode'] == RESET_PREGRASP))
+        self.assertTrue(np.all(hanging['goal_id'] == GOAL_ID['HARVEST']))
 
 
 class FastRuntimeFaultTest(unittest.TestCase):

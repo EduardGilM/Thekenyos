@@ -847,13 +847,15 @@ kept every world on a hanging start: eval grasp 94 → 0 % and
 `harvest_successes` stayed 0 because a held detach was ~1 % and the
 carry never began. The continue still uses entropy 0.004 and lr `3e-4`
 with two clipped epochs (harvest6/7 forgot the grasp at lr `5e-4`, four
-epochs and unclipped positive advantages). Training now keeps the
-HARVEST goal but restores half the worlds already held and detached on a
-post-pull catalog waypoint (high slide through the opening) so carry and
-release get a gradient; eval stays hanging-only with
-`force_pregrasp`. After detach, hover/opening shaping
-(`shape_hand_fruit`) replaces the old basket-centre pull that aimed the
-wrist into the liner. Fruit stays free; this is not a weld.
+epochs and unclipped positive advantages). Training now restores half
+the worlds already held and detached on a post-pull catalog waypoint
+(high slide through the opening) so carry and release get a gradient.
+Those in-hand worlds are `DEPOSIT_ONLY`: the 0.32 pin overlaps the free
+fruit at reset (~97 N in harvest9) and HARVEST would fail the 15 N jaw
+gate before the 0.5 s no-hand settle. Hanging worlds stay HARVEST; eval
+stays hanging-only with `force_pregrasp`. After detach, hover/opening
+shaping (`shape_hand_fruit`) replaces the old basket-centre pull that
+aimed the wrist into the liner. Fruit stays free; this is not a weld.
 Harvest3/4 grasped (eval 49–87 %) but never deposited:
 the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
 no signal once held, and 180 s episodes let a frozen hold run ~35 updates.

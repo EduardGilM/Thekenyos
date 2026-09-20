@@ -306,10 +306,13 @@ IK_HARVEST_PRESET = {
     'rl_continue_pull_close_frac': 0.40,
     'rl_continue_detach_reward': 40.0,
     # Harvest8 finished 48 hanging-only updates at 0 harvest: eval grasp
-    # 94 → 0 % and basket distance stayed ~1.0 m. The continue now keeps
-    # the HARVEST goal but restores a fraction of worlds already held and
-    # detached on a post-pull catalog waypoint so carry/release gets a
-    # gradient. Eval stays hanging-only. Fruit stays free; not a weld.
+    # 94 → 0 % and basket distance stayed ~1.0 m. Harvest9 mixed in-hand
+    # starts but kept HARVEST, so the 0.32 pin (~97 N overlap) failed
+    # those worlds before the 0.5 s no-hand settle. The continue now
+    # restores a fraction already held and detached on a post-pull
+    # waypoint and marks those worlds DEPOSIT_ONLY so the existing jaw-
+    # overlap exemption can settle a liner drop. Hanging worlds stay
+    # HARVEST. Eval stays hanging-only. Fruit stays free; not a weld.
     'rl_continue_deposit_start_frac': 0.50,
     'rl_continue_shape_hand_fruit': True,
     'bc_epochs': 6,
@@ -717,8 +720,10 @@ def mix_harvest_reset_modes(reset_mode, deposit_frac, rng):
 
     HARVEST's default reset is the authored hang, which skips the catalog.
     Training keeps those worlds on RESET_PREGRASP and only then overwrites
-    a fraction to RESET_DEPOSIT. Goals stay HARVEST. Eval should not call
-    this. Fruit stays a free body.
+    a fraction to RESET_DEPOSIT. Callers must then run
+    ``assign_harvest_deposit_goals`` so in-hand starts are DEPOSIT_ONLY
+    (jaw-overlap while the pin opens is not a harvest fail). Eval should
+    not call this. Fruit stays a free body.
     """
     n = np.asarray(reset_mode, dtype=np.int32).reshape(-1).size
     modes = np.full(n, RESET_PREGRASP, dtype=np.int32)
@@ -732,6 +737,23 @@ def mix_harvest_reset_modes(reset_mode, deposit_frac, rng):
         selected = np.asarray(rng.choice(n, size=count, replace=False), dtype=np.int64)
         modes[selected] = RESET_DEPOSIT
     return modes
+
+
+def assign_harvest_deposit_goals(goal_id, reset_mode):
+    """Mark in-hand harvest starts DEPOSIT_ONLY. Hanging worlds stay as given.
+
+    The oracle skips the 15 N jaw fail when ``goal==0`` because deposit
+    fruit starts already in the mouth; rigid overlap while it falls past
+    the gripper is not a crush gate. HARVEST (goal 2) still fails that
+    spike, so a RESET_DEPOSIT mix that keeps HARVEST never settles.
+    Eval must not call this. Fruit stays a free body.
+    """
+    goals = np.asarray(goal_id, dtype=np.int32).reshape(-1).copy()
+    modes = np.asarray(reset_mode, dtype=np.int32).reshape(-1)
+    if goals.size != modes.size:
+        raise ValueError('goal_id and reset_mode must have the same length')
+    goals[modes == RESET_DEPOSIT] = np.int32(GOAL_ID['DEPOSIT_ONLY'])
+    return goals
 
 
 def sample_harvest_deposit_waypoints(reset_mode, pull_index, n_waypoints, rng):
