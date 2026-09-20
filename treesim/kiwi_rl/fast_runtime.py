@@ -167,7 +167,8 @@ class FastRuntime:
                  resolution=(64, 48), nconmax=128, njmax=512, device='cuda:0',
                  arm_speed_rad_s=2.5, solver_iterations=100, jaw_cap_Nm=1.0, task_profile=None,
                  absolute_jaw=False, initial_jaw_rad=None, jaw_rate_rad_s=1.0, fruit_damping=0.,
-                 fruit_jitter_m=(0., 0., 0.), fruit_reach_fraction=(0., 0.), fruit_sector_deg=70.):
+                 fruit_jitter_m=(0., 0., 0.), fruit_reach_fraction=(0., 0.), fruit_sector_deg=70.,
+                 fruit_roll_friction=None, detach_requires_hold=False):
         if not isinstance(worlds, int) or not 1 <= worlds <= 4096:
             raise ValueError('worlds must be an integer in [1, 4096]')
         if not np.isfinite(control_dt) or control_dt <= 0:
@@ -207,6 +208,17 @@ class FastRuntime:
             raise ValueError('fruit_sector_deg must be in (0, 180]')
         self.randomizes_fruit = any(self.fruit_jitter_m) or self.fruit_reach_fraction[1] > 0
         self.model, initial, self.manifest = load_fast_scene(Path(directory))
+        self.fruit_roll_friction = None if fruit_roll_friction is None else float(fruit_roll_friction)
+        if self.fruit_roll_friction is not None:
+            # Rolling resistance for every fruit (engineering assumption, not a measured value).
+            # Rigid ellipsoids on the plane otherwise roll indefinitely; a torn kiwi should stop
+            # within about a metre. Rolling friction needs a 6-D contact model.
+            if not 0 <= self.fruit_roll_friction <= .1:
+                raise ValueError('fruit_roll_friction must be in [0, 0.1]')
+            for fruit in self.manifest.get('fruits', []):
+                g = int(self.model.geom(fruit['geom']).id)
+                self.model.geom_condim[g] = 6
+                self.model.geom_friction[g, 2] = self.fruit_roll_friction
         if self.fruit_damping:
             # Engineering assumption, not a measured material property: a free
             # rigid ellipsoid on the liner never meets the settle criterion
@@ -302,7 +314,8 @@ class FastRuntime:
             self.chassis = self.control.chassis
             from .fast_task import FastHarvestTask
             self.task_profile = task_profile
-            self.task = FastHarvestTask(self.model, self.data, self.manifest, task_profile=task_profile)
+            self.task = FastHarvestTask(self.model, self.data, self.manifest, task_profile=task_profile,
+                                        detach_requires_hold=detach_requires_hold)
             import torch
             fruit_entry = self.manifest['fruits'][0]
             self.anchor_site = int(self.model.site(fruit_entry['anchor_site']).id)

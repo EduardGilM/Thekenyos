@@ -30,6 +30,9 @@ def main():
     p.add_argument('--max-walk-seconds', type=float, default=20.)
     p.add_argument('--deposit-trigger', choices=('oracle', 'proprioceptive'), default='proprioceptive')
     p.add_argument('--max-seconds', type=float, default=240.)
+    p.add_argument('--fruit-roll-friction', type=float, default=None, help='Rolling friction for the kiwis (6-D contacts); stops torn fruit from rolling away')
+    p.add_argument('--detach-requires-hold', action='store_true', help='The stem only yields to a secure grasp: knocked kiwis swing instead of being torn off')
+    p.add_argument('--max-attempts', type=int, default=3, help='Harvest attempts per kiwi while it is still on the vine')
     p.add_argument('--freeze-legs-while-harvesting', action='store_true', help='Hold the current stance targets (no gait stepping) from stand through stow, like the fixed-base training')
     p.add_argument('--yaw-sign', type=float, default=1., help='Sign of the gait yaw-rate command that turns the robot counter-clockwise')
     p.add_argument('--vy-sign', type=float, default=1., help='Sign of the gait lateral command that moves the robot to its left')
@@ -56,7 +59,8 @@ def main():
         rt = FastRuntime(a.scene, worlds=1, camera=None, task_profile=SEQUENCE_PROFILE,
                          arm_speed_rad_s=cfg.get('arm_speed_rad_s', .5), solver_iterations=100,
                          jaw_cap_Nm=cfg.get('jaw_cap_Nm', .6), absolute_jaw=cfg.get('absolute_jaw', True),
-                         initial_jaw_rad=cfg.get('initial_jaw_rad', -1.4), jaw_rate_rad_s=cfg.get('jaw_rate_rad_s', 1.))
+                         initial_jaw_rad=cfg.get('initial_jaw_rad', -1.4), jaw_rate_rad_s=cfg.get('jaw_rate_rad_s', 1.),
+                         fruit_roll_friction=a.fruit_roll_friction, detach_requires_hold=a.detach_requires_hold)
         rt.prepare_settled_reset(gait)   # legs stay live: this robot walks
         rt.reset()
         fruits = rt.manifest['fruits']
@@ -153,7 +157,7 @@ def main():
 
         remaining = list(range(len(fruits))) if not a.order else list(a.order)
         harvested = 0
-        retried = set()
+        attempts = {}
         while remaining and t * dt < a.max_seconds:
             pos, rot = chassis_pose()
             if a.order:
@@ -165,7 +169,11 @@ def main():
             # Stand point: fruit `stand_distance` ahead of the chassis along its heading, like the training scene.
             approach = fw[:2] - pos[:2]
             heading = math.atan2(float(approach[1]), float(approach[0]))
-            stand_xy = fw[:2] - a.stand_distance * torch.tensor([math.cos(heading), math.sin(heading)], device='cuda')
+            # Retries come in from a slightly different side and range so the same failure does not repeat.
+            n = attempts.get(index, 0)
+            heading += (0., .25, -.25, .5, -.5)[n % 5]
+            stand = a.stand_distance + (0., -.04, .04, -.08, .08)[n % 5]
+            stand_xy = fw[:2] - stand * torch.tensor([math.cos(heading), math.sin(heading)], device='cuda')
             events.append(dict(t=t * dt, event='walk', fruit=index, fruit_world=[round(float(x), 3) for x in fw], stand=[round(float(x), 3) for x in stand_xy]))
             hold_arm = torch.zeros(1, 7, device='cuda'); hold_arm[0, 6] = jaw_open
             walked = 0
@@ -220,9 +228,10 @@ def main():
                                                 else 'ground_drop' if bool(progress.graph_ground_drop[0]) else 'unheld' if float(progress.unheld_time[0]) >= .12 else 'load_or_damage'); break
                     if bool(deposit.released[0]) and int(deposit.open_steps[0]) > 60:
                         outcome = 'released'; break
-            if outcome == 'timeout' and not bool(now['detached'][0]) and index not in retried:
-                retried.add(index); remaining.insert(0, index)
-                events.append(dict(t=t * dt, event='retry', fruit=index))
+            attempts[index] = attempts.get(index, 0) + 1
+            if outcome != 'in_basket' and not bool(now['detached'][0]) and attempts[index] < a.max_attempts:
+                remaining.insert(0, index)   # still on the vine: walk up again and retry
+                events.append(dict(t=t * dt, event='retry', fruit=index, attempt=attempts[index] + 1, after=outcome))
             harvested += outcome == 'in_basket'
             fl = rot.T @ (fruit_world(index) - chassis_pose()[0])
             events.append(dict(t=t * dt, event='harvest', fruit=index, outcome=outcome, steps=k + 1,
@@ -245,7 +254,8 @@ def main():
         a.output.mkdir(parents=True, exist_ok=True)
         report = dict(scene=str(a.scene), checkpoint=str(a.checkpoint), fruits=len(fruits), harvested=harvested,
                       events=events, frames=len(states), fps=25, simulated_seconds=t * dt, role='teacher',
-                      freeze_legs_while_harvesting=a.freeze_legs_while_harvesting, stand_distance=a.stand_distance,
+                      freeze_legs_while_harvesting=a.freeze_legs_while_harvesting, stand_distance=a.stand_distance, fruit_roll_friction=a.fruit_roll_friction,
+                      detach_requires_hold=a.detach_requires_hold, attempts=attempts,
                       reward_profile=SEQUENCE_PROFILE, controller=__doc__.strip().splitlines()[0])
         (a.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         np.savez_compressed(a.output / 'states.npz', qpos=np.array(states))

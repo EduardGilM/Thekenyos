@@ -113,6 +113,7 @@ def _record(
     success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), chassis: int, fruit_radius: wp.vec3,
     basket_center: wp.vec3, basket_size: wp.vec3, wall: float, fruit_root: int, chassis_root: int,
     settle_seconds: float, ground_is_failure: int, held_at_detach: wp.array(dtype=wp.uint8),
+    detach_requires_hold: int,
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
@@ -146,7 +147,7 @@ def _record(
             stem_squared += force * force
     stem = wp.sqrt(stem_squared)
     stem_force[world] = stem
-    if detached[world] == 0 and stem > DETACH_FORCE_N:
+    if detached[world] == 0 and stem > DETACH_FORCE_N and (detach_requires_hold == 0 or stable_grasp[world] != 0):
         detached[world] = wp.uint8(1)
         held_at_detach[world] = wp.uint8(stable_grasp[world] != 0 and
             maximum_load <= JAW_FORCE_LIMIT_N and damage_proxy[world] <= .05)
@@ -225,8 +226,11 @@ class FastHarvestTask:
 
     FORCE_CHECKS = FORCE_CHECKS
 
-    def __init__(self, model, data, manifest, *, task_profile=None):
+    def __init__(self, model, data, manifest, *, task_profile=None, detach_requires_hold=False):
         from .reward_graph import GRAPH_PROFILES
+        # Deployment/demo option: the stem only yields to a secure grasp, so a knocked fruit
+        # swings on its stem instead of being torn off and flung.
+        self.detach_requires_hold = bool(detach_requires_hold)
         if task_profile not in (None, *GRAPH_PROFILES):
             raise ValueError('Unknown physical task profile')
         self.settle_seconds = 2. if task_profile in GRAPH_PROFILES else SETTLE_TIME_S
@@ -331,7 +335,7 @@ class FastHarvestTask:
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.model.body(self.manifest['fruits'][0]['body']).id]),
             int(self.model.body_rootid[self.chassis]), self.settle_seconds, int(self.ground_is_failure),
-            self.held_at_detach], device=self.device)
+            self.held_at_detach, int(self.detach_requires_hold)], device=self.device)
         return self.outputs()
 
     def reset(self, mask=None):

@@ -1,0 +1,371 @@
+{
+  "scene": "/mnt/ssd/experiments/kiwi-pergola/training/scenes/demo-multi-003",
+  "checkpoint": "/mnt/ssd/experiments/kiwi-pergola/training/runs/teacher-sequence-015/checkpoint-000800.pt",
+  "fruits": 6,
+  "harvested": 3,
+  "events": [
+    {
+      "t": 0.0,
+      "event": "walk",
+      "fruit": 0,
+      "fruit_world": [
+        0.433,
+        -1.25,
+        1.36
+      ],
+      "stand": [
+        -0.036,
+        -1.23
+      ]
+    },
+    {
+      "t": 11.22,
+      "event": "stand",
+      "fruit": 0,
+      "walk_seconds": 8.22,
+      "stand_error_m": 0.105,
+      "yaw_error_rad": 0.0,
+      "chassis_height": 0.49,
+      "fruit_in_chassis_frame": [
+        0.638,
+        -0.005,
+        0.823
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 23.12,
+      "event": "harvest",
+      "fruit": 0,
+      "outcome": "in_basket",
+      "steps": 595,
+      "closest_m": 0.018,
+      "max_load": 1.0,
+      "stem_force": 0.0,
+      "grasp_time": 0.0,
+      "detached": true,
+      "bilateral": false,
+      "fruit_in_chassis_frame_end": [
+        -0.227,
+        0.039,
+        0.325
+      ],
+      "completed": {
+        "position": true,
+        "grip": true,
+        "extract": true,
+        "carry": true,
+        "deposit": true,
+        "complete": true
+      }
+    },
+    {
+      "t": 33.12,
+      "event": "walk",
+      "fruit": 1,
+      "fruit_world": [
+        1.433,
+        -1.15,
+        1.36
+      ],
+      "stand": [
+        0.963,
+        -1.164
+      ]
+    },
+    {
+      "t": 53.18,
+      "event": "stand",
+      "fruit": 1,
+      "walk_seconds": 17.06,
+      "stand_error_m": 0.083,
+      "yaw_error_rad": 0.012,
+      "chassis_height": 0.485,
+      "fruit_in_chassis_frame": [
+        0.603,
+        -0.032,
+        0.837
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 56.78,
+      "event": "harvest",
+      "fruit": 1,
+      "outcome": "failure:physical",
+      "steps": 180,
+      "closest_m": 1.102,
+      "max_load": 5.7,
+      "stem_force": 3.6,
+      "grasp_time": 0.0,
+      "detached": false,
+      "bilateral": true,
+      "fruit_in_chassis_frame_end": [
+        0.413,
+        0.071,
+        0.963
+      ],
+      "completed": {
+        "position": false,
+        "grip": false,
+        "extract": false,
+        "carry": false,
+        "deposit": false,
+        "complete": false
+      }
+    },
+    {
+      "t": 59.74,
+      "event": "walk",
+      "fruit": 2,
+      "fruit_world": [
+        2.433,
+        -1.33,
+        1.36
+      ],
+      "stand": [
+        1.967,
+        -1.268
+      ]
+    },
+    {
+      "t": 80.78,
+      "event": "stand",
+      "fruit": 2,
+      "walk_seconds": 18.04,
+      "stand_error_m": 0.091,
+      "yaw_error_rad": 0.01,
+      "chassis_height": 0.483,
+      "fruit_in_chassis_frame": [
+        0.624,
+        -0.03,
+        0.825
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 83.48,
+      "event": "harvest",
+      "fruit": 2,
+      "outcome": "failure:physical",
+      "steps": 135,
+      "closest_m": 1.209,
+      "max_load": 2.0,
+      "stem_force": 3.3,
+      "grasp_time": 0.0,
+      "detached": false,
+      "bilateral": false,
+      "fruit_in_chassis_frame_end": [
+        0.552,
+        0.049,
+        0.878
+      ],
+      "completed": {
+        "position": false,
+        "grip": false,
+        "extract": false,
+        "carry": false,
+        "deposit": false,
+        "complete": false
+      }
+    },
+    {
+      "t": 86.2,
+      "event": "walk",
+      "fruit": 3,
+      "fruit_world": [
+        3.333,
+        -1.2,
+        1.36
+      ],
+      "stand": [
+        2.863,
+        -1.213
+      ]
+    },
+    {
+      "t": 109.2,
+      "event": "stand",
+      "fruit": 3,
+      "walk_seconds": 20.0,
+      "stand_error_m": 0.167,
+      "yaw_error_rad": 0.105,
+      "chassis_height": 0.48,
+      "fruit_in_chassis_frame": [
+        0.672,
+        0.081,
+        0.849
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 119.5,
+      "event": "harvest",
+      "fruit": 3,
+      "outcome": "in_basket",
+      "steps": 515,
+      "closest_m": 0.24,
+      "max_load": 1.3,
+      "stem_force": 0.0,
+      "grasp_time": 0.0,
+      "detached": true,
+      "bilateral": false,
+      "fruit_in_chassis_frame_end": [
+        -0.226,
+        0.041,
+        0.324
+      ],
+      "completed": {
+        "position": true,
+        "grip": true,
+        "extract": true,
+        "carry": true,
+        "deposit": true,
+        "complete": true
+      }
+    },
+    {
+      "t": 128.32,
+      "event": "walk",
+      "fruit": 4,
+      "fruit_world": [
+        -0.567,
+        -1.2,
+        1.36
+      ],
+      "stand": [
+        -0.097,
+        -1.204
+      ]
+    },
+    {
+      "t": 151.32,
+      "event": "stand",
+      "fruit": 4,
+      "walk_seconds": 20.0,
+      "stand_error_m": 0.147,
+      "yaw_error_rad": 0.018,
+      "chassis_height": 0.487,
+      "fruit_in_chassis_frame": [
+        0.665,
+        -0.031,
+        0.834
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 153.08,
+      "event": "harvest",
+      "fruit": 4,
+      "outcome": "failure:invalid_extract",
+      "steps": 88,
+      "closest_m": 1.361,
+      "max_load": 0.5,
+      "stem_force": 0.0,
+      "grasp_time": 0.0,
+      "detached": true,
+      "bilateral": false,
+      "fruit_in_chassis_frame_end": [
+        0.607,
+        -0.01,
+        0.871
+      ],
+      "completed": {
+        "position": false,
+        "grip": false,
+        "extract": false,
+        "carry": false,
+        "deposit": false,
+        "complete": false
+      }
+    },
+    {
+      "t": 155.34,
+      "event": "walk",
+      "fruit": 5,
+      "fruit_world": [
+        -1.567,
+        -1.35,
+        1.36
+      ],
+      "stand": [
+        -1.098,
+        -1.314
+      ]
+    },
+    {
+      "t": 176.8,
+      "event": "stand",
+      "fruit": 5,
+      "walk_seconds": 18.46,
+      "stand_error_m": 0.114,
+      "yaw_error_rad": 0.007,
+      "chassis_height": 0.486,
+      "fruit_in_chassis_frame": [
+        0.625,
+        -0.046,
+        0.837
+      ],
+      "training_reference": [
+        0.55,
+        -0.005,
+        0.87
+      ]
+    },
+    {
+      "t": 188.74,
+      "event": "harvest",
+      "fruit": 5,
+      "outcome": "in_basket",
+      "steps": 597,
+      "closest_m": 0.18,
+      "max_load": 0.9,
+      "stem_force": 0.0,
+      "grasp_time": 0.0,
+      "detached": true,
+      "bilateral": false,
+      "fruit_in_chassis_frame_end": [
+        -0.251,
+        0.03,
+        0.314
+      ],
+      "completed": {
+        "position": true,
+        "grip": true,
+        "extract": true,
+        "carry": true,
+        "deposit": true,
+        "complete": true
+      }
+    }
+  ],
+  "frames": 4983,
+  "fps": 25,
+  "simulated_seconds": 199.26,
+  "role": "teacher",
+  "freeze_legs_while_harvesting": false,
+  "stand_distance": 0.47,
+  "fruit_roll_friction": 0.02,
+  "reward_profile": "sequence-harvest/v2",
+  "controller": "Orchard demo: walk between kiwis with the learned gait, harvest each with the RL arm policy,"
+}
