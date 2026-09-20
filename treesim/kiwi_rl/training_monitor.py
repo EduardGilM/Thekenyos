@@ -751,6 +751,8 @@ def apply_native_easy_hover(model, data, controller, tcp_site: int, *,
     q_init = np.asarray(data.qpos[qids], dtype=np.float64)
     target = hover_tcp_world_m(
         data.xpos[controller.chassis], data.xmat[controller.chassis], clearance_m)
+    target = target + np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3) @ np.array(
+        [float(EASY_PRESET['release_target_inset_x_m']), 0.0, 0.0], dtype=np.float64)
     arm_q, err = solve_tcp_hover(
         model, data.qpos, int(tcp_site), target, qids, dofs, q_init, ranges)
     if not np.isfinite(arm_q).all() or not np.isfinite(err):

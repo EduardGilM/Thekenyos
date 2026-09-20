@@ -77,6 +77,9 @@ EASY_PRESET = {
     # free fruit into the scripted release band. This is a numerical
     # curriculum target, not a measured grasp pose.
     'release_target_clearance_m': 0.14,
+    # Drop on the robot-side half of the opening so the ~20 cm wrist stays
+    # outside the liner instead of hanging vertically inside the basket.
+    'release_target_inset_x_m': 0.15,
     # Reset at the safe high hover, then shape fruit 3D to the release target
     # and hand XY to the opening. Introduce at most 25% outside-crate starts;
     # the prior all-far catalog prevented the release skill from bootstrapping.

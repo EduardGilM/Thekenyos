@@ -413,7 +413,8 @@ def _in_release_zone(fruit: wp.vec3, tcp: wp.vec3, basket: wp.vec3,
         t_local = wp.transpose(rot) @ (tcp - basket)
         fruit_ok = wp.abs(f_local[0]) < open_half_xy[0] and wp.abs(f_local[1]) < open_half_xy[1]
         tcp_ok = wp.abs(t_local[0]) < open_half_xy[0] and wp.abs(t_local[1]) < open_half_xy[1]
-        if fruit_ok and tcp_ok and f_local[2] < rim_z_m + open_max_above_rim_m:
+        above_rim = f_local[2] > rim_z_m and t_local[2] > rim_z_m
+        if fruit_ok and tcp_ok and above_rim and f_local[2] < rim_z_m + open_max_above_rim_m:
             return 1
         return 0
     fdx = fruit[0] - basket[0]
@@ -702,13 +703,18 @@ class FastRuntime:
             # 28 cm hover. Once fruit and TCP XY are over the hole, it switches
             # to 14 cm inside the <=16 cm scripted release band.
             release_target = float(EASY_PRESET['release_target_clearance_m'])
+            release_inset_x = float(EASY_PRESET['release_target_inset_x_m'])
             if (not np.isfinite(release_target) or release_target < 0.05
                     or release_target > self._open_max_above_rim_m):
                 raise ValueError('release_target_clearance_m must be finite in [0.05, release cap]')
+            if (not np.isfinite(release_inset_x)
+                    or abs(release_inset_x) >= float(hx) - 0.04):
+                raise ValueError('release_target_inset_x_m must stay inside the opening')
             self._hover_offset = wp.vec3(
-                0.0, 0.0, float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
+                release_inset_x, 0.0,
+                float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
             self._release_offset = wp.vec3(
-                0.0, 0.0, float(SIZE[2] + release_target))
+                release_inset_x, 0.0, float(SIZE[2] + release_target))
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -953,6 +959,9 @@ class FastRuntime:
         home_local = chassis_R.T @ (home_tcp - chassis_p)
         drop_target = hover_tcp_world_m(
             chassis_p, chassis_R, EASY_PRESET['hover_clearance_m'])
+        drop_target = drop_target + chassis_R @ np.array(
+            [float(EASY_PRESET['release_target_inset_x_m']), 0.0, 0.0],
+            dtype=np.float64)
         drop_q, drop_err = solve_tcp_hover(
             self.model, qpos, self.tcp_site, drop_target, qids, dofs, q_home, ranges)
         if not np.isfinite(drop_q).all() or not np.isfinite(drop_err):
@@ -1210,6 +1219,7 @@ class FastRuntime:
             'far_frac_cap': float(EASY_PRESET['far_frac_cap']),
             'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
             'release_target_clearance_m': float(EASY_PRESET['release_target_clearance_m']),
+            'release_target_inset_x_m': float(EASY_PRESET['release_target_inset_x_m']),
             'shape_to_hover': shape_both,
             'weld': False,
             'scope': ('kiwi starts in the jaws; scripted hold/open under 15 N; '

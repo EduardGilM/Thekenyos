@@ -134,6 +134,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['entropy_coef'], 0.001)
         self.assertEqual(preset['hover_clearance_m'], 0.28)
         self.assertEqual(preset['release_target_clearance_m'], 0.14)
+        self.assertEqual(preset['release_target_inset_x_m'], 0.15)
         self.assertEqual(preset['default_shaping_coef'], 2.0)
         self.assertFalse(preset['start_over_opening'])
         self.assertTrue(preset['shape_hand_and_fruit'])

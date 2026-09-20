@@ -144,9 +144,12 @@ def over_opening_xy(fruit_xyz, tcp_xyz, basket_xyz, rotation=None, *, inset_m=0.
     tcp_ok = abs(float(tcp_local[0])) < hx and abs(float(tcp_local[1])) < hy
     if not (fruit_ok and tcp_ok):
         return False
+    from treesim.basket import SIZE
+    if fruit.size >= 3 and tcp.size >= 3:
+        if float(fruit_local[2]) <= float(SIZE[2]) or float(tcp_local[2]) <= float(SIZE[2]):
+            return False
     if max_above_rim_m is None:
         return True
-    from treesim.basket import SIZE
     max_above = float(max_above_rim_m)
     if not np.isfinite(max_above) or not 0.0 <= max_above <= 0.4:
         raise ValueError('max_above_rim_m must be finite in [0, 0.4] m')

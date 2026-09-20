@@ -233,6 +233,9 @@ class ReachTeacherMathTest(unittest.TestCase):
             hover, hover, basket, inset_m=0.04, max_above_rim_m=0.16))
         self.assertTrue(over_opening_xy(
             dip, dip, basket, inset_m=0.04, max_above_rim_m=0.16))
+        below_rim = [0.0, 0.0, 0.145 + 0.28 - 0.01]
+        self.assertFalse(over_opening_xy(
+            below_rim, below_rim, basket, inset_m=0.04, max_above_rim_m=0.16))
         self.assertFalse(fruit_in_release_zone(
             hover, basket, open_xy_m=0.15, rim_z_m=0.28, tcp_xyz=hover,
             release_over_opening=True, inset_m=0.04, max_above_rim_m=0.16))
