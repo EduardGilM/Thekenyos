@@ -145,6 +145,46 @@ class KiwiStreetRenderTest(unittest.TestCase):
             self.assertLess(height, street.CANOPY_Z_M - 0.15)
             self.assertGreater(height, 0.3)
 
+    def test_scripted_arm_stays_under_the_beams(self):
+        # Home pose: hand in front of and above the shoulder, well under the roof.
+        home = street.arm_hand_height(-0.9, 1.8, -0.9)
+        self.assertGreater(home, street.ARM_SHOULDER_Z_M)
+        # Straight up is the geometric maximum of the chain and must exceed it.
+        straight_up = street.arm_hand_height(-np.pi / 2, 0.0, 0.0)
+        self.assertAlmostEqual(
+            straight_up, street.ARM_SHOULDER_Z_M + street.ARM_UPPER_M[0]
+            + street.ARM_FORE_M[0] + street.ARM_HAND_M[0], places=6)
+        self.assertLess(street.arm_wander_max_hand_z(), street.ARM_HAND_MAX_Z_M)
+        self.assertGreater(
+            street.arm_wander_max_hand_z({**street.SPOT_ARM_WANDER, "arm_sh1": (-1.6, 0.4)}),
+            street.ARM_HAND_MAX_Z_M)
+
+    def test_upright_leaves_drops_hanging_shoot_leaves(self):
+        class _Leaf:
+            def __init__(self, frame):
+                self.frame = frame
+
+        up = _Leaf((0.0, 0.0, 0.0, 1.0))                     # +Z stays +Z
+        down = _Leaf((1.0, 0.0, 0.0, 0.0))                   # 180 deg about X
+        s = np.sin(np.pi / 4)
+        sideways = _Leaf((0.0, s, 0.0, s))                   # +Z -> +X
+        np.testing.assert_allclose(street.leaf_out_dir(up.frame), (0, 0, 1), atol=1e-12)
+        np.testing.assert_allclose(street.leaf_out_dir(down.frame), (0, 0, -1), atol=1e-12)
+        kept = street.upright_leaves([up, down, sideways])
+        self.assertEqual(kept, [up, sideways])
+
+    def test_shadow_eye_sits_upstream_of_a_camera_centred_focus(self):
+        focus = street.shadow_focus((2.0, 1.0, 0.6), 10.0, 0.0, -5.0)
+        np.testing.assert_allclose(focus, (5.0, 1.0, street.SHADOW_FOCUS_Z_M))
+        light_dir = (-0.34, 0.58, -0.74)
+        eye = street.shadow_light_pos(focus, light_dir)
+        d = np.asarray(light_dir) / np.linalg.norm(light_dir)
+        np.testing.assert_allclose(np.dot(focus - eye, d), street.SHADOW_BACK_M)
+        self.assertGreater(eye[2], street.CANOPY_Z_M + 1.0)
+        self.assertLess(street.SHADOW_BACK_M, street.SHADOW_HALF_M)
+        with self.assertRaises(ValueError):
+            street.shadow_light_pos(focus, (0.0, 0.0, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

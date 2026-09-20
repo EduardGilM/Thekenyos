@@ -54,6 +54,22 @@ CAMERA_LOOKAT = (2.4, 0.18, 0.48)
 CAMERA_DISTANCE_M = 13.6
 CAMERA_AZIMUTH_DEG = 18.0
 CAMERA_ELEVATION_DEG = -11.0
+# MuJoCo renders directional shadows from an orthographic light camera at the
+# light's ``pos``: lateral half-size shadowclip*extent and depth range
+# [0, shadowclip*extent] downstream of ``pos`` (measured with probes; casters
+# upstream of ``pos`` are clipped). Track the camera's region of interest and
+# back the eye off along the light direction so the roof stays in front.
+SHADOW_HALF_M = 24.0
+SHADOW_BACK_M = 12.0
+SHADOW_FOCUS_Z_M = 0.8
+SHADOW_MAP_PX = 8192
+# Scripted arm: hand must stay under the beams. Planar FK constants from the
+# RELIC Spot URDF (metres): shoulder above body, upper arm, forearm, hand.
+ARM_SHOULDER_Z_M = 0.188
+ARM_UPPER_M = (0.3385, 0.0)
+ARM_FORE_M = (0.4033, 0.075)
+ARM_HAND_M = (0.20, 0.015)
+ARM_HAND_MAX_Z_M = CANOPY_Z_M - 0.30
 
 SPOT_HOME = {
     "arm_sh0": 0.0, "arm_sh1": -0.9, "arm_el0": 1.8, "arm_el1": 0.0,
@@ -65,8 +81,8 @@ SPOT_HOME = {
 SPOT_ARM = ("arm_sh0", "arm_sh1", "arm_el0", "arm_el1", "arm_wr0", "arm_wr1", "arm_f1x")
 # Centre and amplitude of the scripted arm wander, clipped to model ranges.
 SPOT_ARM_WANDER = {
-    "arm_sh0": (0.0, 0.75), "arm_sh1": (-1.15, 0.55), "arm_el0": (1.65, 0.45),
-    "arm_el1": (0.0, 0.55), "arm_wr0": (-0.55, 0.55), "arm_wr1": (0.0, 0.9),
+    "arm_sh0": (0.0, 0.70), "arm_sh1": (-0.85, 0.35), "arm_el0": (1.75, 0.40),
+    "arm_el1": (0.0, 0.55), "arm_wr0": (-0.60, 0.50), "arm_wr1": (0.0, 0.9),
     "arm_f1x": (-0.8, 0.6),
 }
 SPOT_LEGS = ("fl", "fr", "hl", "hr")
@@ -192,7 +208,7 @@ def _block_field(rng, shape, cell: int, dtype=np.float32) -> np.ndarray:
     return grid[y[:, None], x[None, :]]
 
 
-def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
+def ground_texture(floor, xs, ys, seed: int, n: int = 4096) -> bytes:
     """Orchard sod with vine-row soil strips, wheel tracks and post pads.
 
     Mid-scale (0.1-2 m) structure carries the look: anything finer than a
@@ -216,17 +232,19 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     blades = _iso_field(rng, n, (1.2,), (1.0,))
     speck = rng.random((n, n), dtype=np.float32)
 
-    dark = np.array([0.11, 0.18, 0.05], np.float32)
-    mid = np.array([0.22, 0.30, 0.09], np.float32)
-    light = np.array([0.36, 0.40, 0.13], np.float32)
-    straw = np.array([0.55, 0.46, 0.20], np.float32)
-    clover = np.array([0.09, 0.21, 0.08], np.float32)
-    soil_wet = np.array([0.17, 0.10, 0.05], np.float32)
-    soil_dry = np.array([0.55, 0.38, 0.19], np.float32)
-    rut = np.array([0.22, 0.15, 0.07], np.float32)
-    packed = np.array([0.50, 0.42, 0.28], np.float32)
+    # Olive/khaki orchard sod rather than a lime lawn; soil is a warm umber.
+    dark = np.array([0.12, 0.17, 0.06], np.float32)
+    mid = np.array([0.24, 0.28, 0.11], np.float32)
+    light = np.array([0.39, 0.39, 0.18], np.float32)
+    straw = np.array([0.52, 0.45, 0.25], np.float32)
+    clover = np.array([0.10, 0.20, 0.08], np.float32)
+    soil_wet = np.array([0.16, 0.11, 0.07], np.float32)
+    soil_dry = np.array([0.47, 0.36, 0.23], np.float32)
+    rut = np.array([0.22, 0.16, 0.09], np.float32)
+    packed = np.array([0.48, 0.42, 0.31], np.float32)
+    litter_col = np.array([0.44, 0.34, 0.14], np.float32)
 
-    t = np.clip(0.46 * patch + 0.42 * broad + 0.12 * tuft, 0.0, 1.0)
+    t = np.clip(0.42 * patch + 0.40 * broad + 0.18 * tuft, 0.0, 1.0)
     low = t < 0.5
     rgb = np.empty((n, n, 3), np.float32)
     a = (2.0 * t)[..., None]
@@ -240,7 +258,7 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     rgb = rgb * (1.0 - 0.5 * clo)[..., None] + (0.5 * clo)[..., None] * clover
     bare = np.clip((tuft - 0.985) / 0.015, 0, 1) * np.clip((broad - 0.55) / 0.4, 0, 1)
     rgb = rgb * (1.0 - 0.6 * bare)[..., None] + (0.6 * bare)[..., None] * (soil_dry * 0.85)
-    rgb *= (0.80 + 0.40 * blades)[..., None]
+    rgb *= (0.72 + 0.56 * blades)[..., None]
 
     soil_w = np.zeros((n, n), np.float32)
     for y in ys:
@@ -280,9 +298,11 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     stones = ((speck > 0.9975) & (soil_w > 0.4)).astype(np.float32)
     rgb = rgb * (1.0 - 0.7 * stones)[..., None] + (0.7 * stones)[..., None] * np.array(
         [0.42, 0.38, 0.30], np.float32)
-    litter = ((speck < 0.004) & (soil_w < 0.4)).astype(np.float32)
-    rgb = rgb * (1.0 - 0.6 * litter)[..., None] + (0.6 * litter)[..., None] * np.array(
-        [0.46, 0.38, 0.12], np.float32)
+    # Fallen leaves under the roof: sparse flecks plus a few drifted clumps.
+    litter = ((speck < 0.010) & (soil_w < 0.4)).astype(np.float32)
+    litter = np.maximum(litter, 0.6 * np.clip((tuft - 0.94) / 0.06, 0, 1)
+                        * np.clip((broad - 0.45) / 0.4, 0, 1) * (soil_w < 0.4))
+    rgb = rgb * (1.0 - 0.6 * litter)[..., None] + (0.6 * litter)[..., None] * litter_col
     return _png_bytes(np.flipud(np.clip(rgb, 0, 1)) * 255.0)
 
 
@@ -329,13 +349,13 @@ def leaf_texture(seed: int, sun: bool) -> bytes:
             0.85 * (1.0 - abs(k) / 8.0))
     veins *= 0.25 + 0.75 * v
     if sun:
-        dark = np.array([0.15, 0.32, 0.07])
-        light = np.array([0.36, 0.52, 0.12])
-        rib = np.array([0.24, 0.38, 0.09])
+        dark = np.array([0.14, 0.28, 0.08])
+        light = np.array([0.31, 0.44, 0.15])
+        rib = np.array([0.30, 0.40, 0.16])
     else:
-        dark = np.array([0.06, 0.18, 0.04])
-        light = np.array([0.15, 0.32, 0.07])
-        rib = np.array([0.10, 0.24, 0.06])
+        dark = np.array([0.07, 0.16, 0.05])
+        light = np.array([0.15, 0.27, 0.09])
+        rib = np.array([0.14, 0.24, 0.09])
     mix = np.clip(0.22 + 0.40 * mottling + 0.38 * blotch, 0.0, 1.0)
     rgb = dark + (light - dark) * mix[..., None]
     rgb *= speckle[..., None]
@@ -519,11 +539,11 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
         pitch = float(leaf_rng.uniform(-0.15, 0.45))
         material = "leaf_sun" if sun else "leaf_shade"
         if stressed:
-            tint = (leaf_rng.uniform(0.95, 1.15), leaf_rng.uniform(0.80, 0.95), 0.45)
+            tint = (leaf_rng.uniform(0.95, 1.12), leaf_rng.uniform(0.82, 0.95), 0.55)
         elif sun:
-            tint = (leaf_rng.uniform(0.98, 1.16), leaf_rng.uniform(0.98, 1.12), 0.80)
+            tint = (leaf_rng.uniform(0.90, 1.08), leaf_rng.uniform(0.94, 1.06), 0.90)
         else:
-            tint = (leaf_rng.uniform(0.82, 1.02), leaf_rng.uniform(0.90, 1.08), 0.82)
+            tint = (leaf_rng.uniform(0.82, 1.00), leaf_rng.uniform(0.88, 1.04), 0.92)
         geoms.append(
             f'    <geom type="mesh" mesh="leaf{_leaf_class(leaf.length)}" pos="'
             f'{leaf.attach[0]:.5f} {leaf.attach[1]:.5f} {leaf.attach[2]:.5f}" '
@@ -545,13 +565,13 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
   <option gravity="0 0 -9.81"/>
   <visual>
     <global offwidth="1920" offheight="1080" fovy="42"/>
-    <headlight ambient=".34 .33 .30" diffuse=".36 .36 .34" specular=".06 .06 .05"/>
-    <rgba haze=".88 .84 .76 1" fog=".84 .82 .76 1"/>
+    <headlight ambient=".30 .30 .27" diffuse=".20 .20 .19" specular=".04 .04 .03"/>
+    <rgba haze=".86 .86 .82 1" fog=".84 .83 .78 1"/>
     <map znear=".004" zfar="6" shadowclip="0.5"/>
-    <quality shadowsize="4096" offsamples="4"/>
+    <quality shadowsize="{SHADOW_MAP_PX}" offsamples="4"/>
   </visual>
   <asset>
-    <texture type="skybox" builtin="gradient" rgb1=".34 .50 .70" rgb2=".92 .86 .76"
+    <texture type="skybox" builtin="gradient" rgb1=".34 .50 .70" rgb2=".84 .86 .86"
              width="512" height="512"/>
     <texture type="2d" name="orchard" file="orchard_ground.png"/>
     <texture type="2d" name="wood" file="wood.png"/>
@@ -569,9 +589,9 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
               rgba="0.38 0.38 0.40 1"/>
     <material name="vine" reflectance="0.05" shininess="0.10" specular="0.08"/>
     <material name="leaf_sun" texture="leaf_sun" texrepeat="1 1" texuniform="false"
-              reflectance="0.05" shininess="0.30" specular="0.22"/>
+              reflectance="0.02" shininess="0.10" specular="0.08" emission="0.16"/>
     <material name="leaf_shade" texture="leaf_shade" texrepeat="1 1" texuniform="false"
-              reflectance="0.03" shininess="0.18" specular="0.12"/>
+              reflectance="0.01" shininess="0.06" specular="0.05" emission="0.04"/>
     <material name="kiwi" texture="kiwi" texuniform="true" reflectance="0.04"
               shininess="0.12" specular="0.08"/>
     <hfield name="orchard_ground" nrow="{nrow}" ncol="{ncol}"
@@ -580,7 +600,7 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
   </asset>
   <worldbody>
     <light name="key" directional="true" pos="12 -16 12" dir="-0.34 0.58 -0.74"
-           ambient=".33 .33 .30" diffuse=".88 .80 .64" specular=".26 .22 .16"
+           ambient=".34 .34 .31" diffuse=".78 .70 .56" specular=".20 .17 .12"
            castshadow="true"/>
     <light name="rim" directional="true" pos="-10 10 8" dir="0.40 -0.30 -0.86"
            castshadow="false" ambient=".07 .08 .10" diffuse=".24 .27 .32"
@@ -606,7 +626,7 @@ def _aisle_lights(xs, ys):
             out.append(
                 f'    <light name="aisle{i}{k}" pos="{x:.2f} {y:.2f} 1.40" dir="0 0 -1" '
                 f'cutoff="88" exponent="0.4" attenuation="0.90 0.06 0.006" '
-                f'castshadow="false" diffuse=".55 .50 .40" specular=".06 .05 .04"/>'
+                f'castshadow="false" diffuse=".48 .52 .38" specular=".05 .05 .04"/>'
             )
     return out[:6]
 
@@ -701,6 +721,76 @@ def trot_foot_offset(phase: float, stride: float, lift: float):
     u = (phase - 0.5) / 0.5
     smooth = u * u * (3.0 - 2.0 * u)
     return -0.5 * half + half * smooth, lift * np.sin(np.pi * u)
+
+
+def arm_hand_height(sh1: float, el0: float, wr0: float) -> float:
+    """Hand tip height above the Spot body frame for pitch joints (rad).
+
+    Planar chain about +Y (URDF link offsets); sh0/el1/wr1 do not change
+    height. Used to bound the scripted wander under the pergola beams.
+    """
+    z = ARM_SHOULDER_Z_M
+    z += _rot_y(sh1, ARM_UPPER_M)[1]
+    z += _rot_y(sh1 + el0, ARM_FORE_M)[1]
+    z += _rot_y(sh1 + el0 + wr0, ARM_HAND_M)[1]
+    return float(z)
+
+
+def arm_wander_max_hand_z(wander=SPOT_ARM_WANDER, body_z: float = SPOT_BODY_HEIGHT_M) -> float:
+    """Worst-case hand height above ground over the wander box corners and
+    a coarse interior grid (the sum-of-sines never leaves the box)."""
+    best = -np.inf
+    grids = []
+    for name in ("arm_sh1", "arm_el0", "arm_wr0"):
+        centre, amp = wander[name]
+        grids.append(np.linspace(centre - amp, centre + amp, 7))
+    for sh1 in grids[0]:
+        for el0 in grids[1]:
+            for wr0 in grids[2]:
+                best = max(best, arm_hand_height(sh1, el0, wr0))
+    return float(body_z + 0.012 + best)
+
+
+def camera_forward(azimuth_deg: float, elevation_deg: float) -> np.ndarray:
+    """Unit view direction of a MuJoCo free camera (azimuth 0 looks +X)."""
+    az, el = np.radians(azimuth_deg), np.radians(elevation_deg)
+    return np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
+
+
+def shadow_focus(lookat, distance: float, azimuth: float, elevation: float,
+                 ahead: float = 0.30) -> np.ndarray:
+    """Centre of the directional shadow cube: a little past the look-at point
+    along the horizontal view direction, near ground level."""
+    f = camera_forward(azimuth, elevation)
+    f[2] = 0.0
+    n = float(np.linalg.norm(f))
+    f = f / n if n > 1e-9 else np.zeros(3)
+    focus = np.asarray(lookat, dtype=np.float64) + ahead * float(distance) * f
+    focus[2] = SHADOW_FOCUS_Z_M
+    return focus
+
+
+def shadow_light_pos(focus, light_dir, back: float = SHADOW_BACK_M) -> np.ndarray:
+    """Directional-light eye: ``back`` metres upstream of the focus so the
+    depth window [0, SHADOW_HALF_M] brackets the roof and the aisle floor."""
+    d = np.asarray(light_dir, dtype=np.float64)
+    n = float(np.linalg.norm(d))
+    if n < 1e-9 or not np.isfinite(d).all():
+        raise ValueError("light direction must be finite and nonzero")
+    return np.asarray(focus, dtype=np.float64) - back * d / n
+
+
+def leaf_out_dir(frame) -> np.ndarray:
+    """World direction of the local +Z blade axis for an xyzw quaternion."""
+    x, y, z, w = (float(v) for v in frame)
+    return np.array([2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)])
+
+
+def upright_leaves(leaves, min_z: float = -0.15):
+    """Drop shoot leaves that hang below the canes. On a pergola the foliage
+    forms a roof above the wires and the fruit hangs free beneath it; leaves
+    pointing down would hide the crop from the aisle."""
+    return [leaf for leaf in leaves if leaf_out_dir(leaf.frame)[2] >= min_z]
 
 
 def style_spot(scene) -> None:
@@ -858,7 +948,7 @@ def grade(frame: np.ndarray, letterbox: bool = True) -> np.ndarray:
     from scipy.ndimage import gaussian_filter, zoom
     x = frame.astype(np.float32) / 255.0
     lum = x @ np.array([0.299, 0.587, 0.114], np.float32)
-    x = lum[..., None] + 1.10 * (x - lum[..., None])
+    x = lum[..., None] + 1.00 * (x - lum[..., None])
     curve = x * x * (3.0 - 2.0 * x)
     x = 0.62 * x + 0.38 * curve
     x = 0.025 + 0.975 * x
@@ -917,7 +1007,7 @@ def build_scene(args):
         leaf_length=LEAF_LENGTH_M, leaf_width=LEAF_WIDTH_M, physics=False,
         canopy_spacing_m=args.canopy_spacing,
     )
-    leaves = place_leaves(skeleton, foliage, seed=args.seed)
+    leaves = upright_leaves(place_leaves(skeleton, foliage, seed=args.seed))
     leaves.extend(sun_gaps(place_canopy_leaves(skeleton, foliage, seed=args.seed),
                            seed=args.seed, fraction=args.sun_gaps))
     xs, ys, aisles = row_layout()
@@ -1011,6 +1101,9 @@ def main():
     meansize = max(float(model.stat.meansize), 1e-3)
     model.vis.map.fogstart = 18.0 / meansize
     model.vis.map.fogend = 95.0 / meansize
+    # shadowclip is a multiple of stat.extent; express the cube in metres.
+    model.vis.map.shadowclip = SHADOW_HALF_M / max(float(model.stat.extent), 1e-3)
+    key_light = model.light("key").id
     data = mujoco.MjData(model)
     if with_spot:
         walkers = default_walkers(model, aisles, xs, floor.ground_z, args.seed)
@@ -1028,9 +1121,10 @@ def main():
     def render(t: float, lookat, distance, azimuth, elevation):
         for walker in walkers:
             walker.write(data, t)
-        if walkers:
-            # mj_forward also refreshes light_xpos/xdir; mj_kinematics alone does not.
-            mujoco.mj_forward(model, data)
+        model.light_pos[key_light] = shadow_light_pos(
+            shadow_focus(lookat, distance, azimuth, elevation), model.light_dir[key_light])
+        # mj_forward also refreshes light_xpos/xdir; mj_kinematics alone does not.
+        mujoco.mj_forward(model, data)
         camera.lookat[:] = lookat
         camera.distance = distance
         camera.azimuth = azimuth
