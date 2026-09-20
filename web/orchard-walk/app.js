@@ -131,7 +131,7 @@ async function loadOrchard() {
 
   // Perimeter hedge: an opaque wall of foliage so the flat world has no visible edge.
   {
-    const R = half + .9, HGT = 4.2, THK = .8;
+    const R = half + .9, HGT = 1.4, THK = .8;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x4a2c12, roughness: 1 });
     const walls = [[R, 0, THK, 2 * R + THK], [-R, 0, THK, 2 * R + THK], [0, R, 2 * R + THK, THK], [0, -R, 2 * R + THK, THK]];
     for (const [x, y, sx, sy] of walls) {
@@ -141,7 +141,7 @@ async function loadOrchard() {
     const blade = leafMeshes[2].geometry;
     const hedgeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: .85 });
     const autumn = [[.66, .34, .10], [.78, .48, .14], [.56, .24, .08], [.84, .60, .20], [.48, .30, .12]];
-    const perWall = 4800, hedgeLeaves = new THREE.InstancedMesh(blade, hedgeMat, 4 * perWall);
+    const perWall = 2400, hedgeLeaves = new THREE.InstancedMesh(blade, hedgeMat, 4 * perWall);
     hedgeLeaves.castShadow = true;
     const cols = new Float32Array(4 * perWall * 3);
     const e = new THREE.Euler(), s2 = new THREE.Vector3();
