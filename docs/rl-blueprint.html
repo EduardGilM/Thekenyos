@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Especificación técnica v3: visión RGB-D end-to-end entrenada con PPO y adaptación concurrente de RELIC con learning rate reducido.">
+  <title>Thekenyos — Especificación técnica RL v3.0</title>
+  <style>
+    :root { --paper:#f5f5ee; --surface:#fffef9; --ink:#20332c; --muted:#606e65; --line:#dce1d5; --green:#326447; --lime:#d9ef89; --rl:#eaf2df; --vision:#e9f1f5; --sand:#f6eedb; --mono:ui-monospace,SFMono-Regular,Consolas,monospace; --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; scroll-padding-top:24px; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.65 var(--sans); }
+    h1,h2,h3,h4,p { margin:0; }
+    h1 { font-size:clamp(36px,4vw,57px); line-height:1.1; letter-spacing:-2px; }
+    h2 { font-size:clamp(26px,3vw,35px); line-height:1.2; letter-spacing:-1px; }
+    h3 { font-size:19px; line-height:1.4; }
+    a { color:var(--green); text-underline-offset:4px; }
+    button { font:inherit; color:inherit; cursor:pointer; }
+    button:disabled { cursor:default; opacity:.35; }
+    button,a,summary { -webkit-tap-highlight-color:transparent; }
+    :focus-visible { outline:3px solid #285e77; outline-offset:4px; }
+    ul,ol { padding-left:21px; margin:0; }
+    li+li { margin-top:7px; }
+    code { font:.88em var(--mono); overflow-wrap:anywhere; }
+    .skip { position:fixed; top:-90px; left:16px; z-index:10; padding:10px; background:var(--ink); color:white; }
+    .skip:focus { top:10px; }
+    .sidebar { width:220px; position:fixed; inset:0 auto 0 0; padding:30px 23px; border-right:1px solid var(--line); background:var(--surface); display:flex; flex-direction:column; overflow-y:auto; z-index:2; }
+    .brand { display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--ink); font-size:19px; font-weight:750; letter-spacing:-.7px; }
+    .brand svg { flex:0 0 29px; }
+    .eyebrow { font:10px/1.6 var(--mono); letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
+    .sidebar>.eyebrow { margin:12px 0 35px; }
+    .navigation { display:grid; gap:5px; }
+    .navigation a { display:flex; gap:11px; padding:10px; margin:0 -10px; border-radius:7px; color:var(--muted); text-decoration:none; font-size:13px; }
+    .navigation a span { font:10px/2 var(--mono); opacity:.75; }
+    .navigation a:hover,.navigation a[aria-current="location"] { background:var(--rl); color:var(--ink); }
+    .sidebar-footer { margin-top:auto; padding-top:30px; font-size:12px; color:var(--muted); }
+    .sidebar-footer p { padding-top:18px; border-top:1px solid var(--line); }
+    .sidebar-footer strong { color:var(--ink); display:block; margin-bottom:6px; }
+    .sidebar-footer a { display:inline-block; margin-top:18px; }
+    main { max-width:1530px; margin-left:220px; padding:30px clamp(24px,4vw,65px) 0; }
+    .topline { display:flex; justify-content:space-between; align-items:center; gap:18px; border-bottom:1px solid var(--line); padding-bottom:25px; }
+    .status { font-size:12px; color:var(--green); }
+    .status::before { content:"● "; font-size:10px; }
+    .print-button { display:none; margin-left:8px; padding:8px 12px; border:1px solid var(--line); border-radius:6px; background:transparent; font-size:12px; }
+    .js .print-button { display:inline-block; }
+    .hero { display:grid; grid-template-columns:1fr 235px; align-items:end; gap:30px; padding:43px 0 30px; }
+    .hero-copy { margin-top:22px; max-width:650px; color:var(--muted); font-size:16px; }
+    .hero-aside { border-left:2px solid var(--green); padding-left:18px; font-size:13px; }
+    .hero-aside .eyebrow { margin-bottom:10px; }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); border:1px solid var(--line); border-radius:9px; background:var(--surface); margin-bottom:22px; }
+    .stats div { padding:16px 18px; }
+    .stats div+div { border-left:1px solid var(--line); }
+    .stats strong { display:block; font-size:15px; }
+    .stats small { display:block; font-size:12px; color:var(--muted); }
+    .notice { color:var(--muted); font-size:12px; }
+    section { border-bottom:1px solid var(--line); padding:48px 0; }
+    .section-heading { display:flex; justify-content:space-between; align-items:start; gap:24px; margin-bottom:24px; }
+    .section-heading .eyebrow { margin-bottom:9px; }
+    .description { max-width:770px; margin-top:13px; color:var(--muted); }
+    .mode-switch { display:none; flex-shrink:0; padding:4px; background:#e8ebdf; border-radius:8px; }
+    .js .mode-switch { display:flex; }
+    .mode-switch button { border:0; border-radius:5px; background:transparent; padding:8px 12px; font-size:12px; }
+    .mode-switch button[aria-pressed="true"] { background:var(--surface); font-weight:650; }
+    .legend { display:flex; flex-wrap:wrap; gap:17px; color:var(--muted); font-size:11px; margin-bottom:18px; }
+    .legend span::before { content:""; display:inline-block; width:8px; height:8px; background:#ccd4c9; border-radius:2px; margin-right:7px; }
+    .legend .learned::before { background:#87ae61; }
+    .legend .visual::before { background:#7ba8bf; }
+    .legend .classic::before { background:#cfb579; }
+    .architecture { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr); gap:22px; align-items:start; }
+    .flow { padding:24px; border:1px solid var(--line); border-radius:11px; background:var(--surface); min-width:0; }
+    .flow-caption { display:flex; justify-content:space-between; gap:10px; margin-bottom:18px; font:10px/1.5 var(--mono); color:var(--muted); }
+    .flow-single { width:86%; margin:auto; }
+    .node { display:block; width:100%; padding:12px 14px; background:#f0f1ea; border:1px solid var(--line); border-radius:7px; text-align:left; }
+    .node:hover { border-color:var(--green); }
+    .node[aria-pressed="true"] { border-color:var(--ink); box-shadow:0 0 0 2px var(--ink); }
+    .node.rl { background:var(--rl); }
+    .node.visual { background:var(--vision); }
+    .node.classic { background:var(--sand); }
+    .node-tag { display:block; font:9px/1.5 var(--mono); letter-spacing:.4px; text-transform:uppercase; margin-bottom:4px; }
+    .node strong { display:block; font-size:14px; line-height:1.4; }
+    .node small { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+    .connector { display:flex; align-items:center; justify-content:center; text-align:center; gap:7px; min-height:31px; color:var(--muted); font:10px/1.5 var(--mono); }
+    .connector::before { content:"↓"; font-size:15px; }
+    .branches { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .branches .node { min-height:90px; }
+    .join { height:17px; width:52%; border:solid var(--line); border-width:0 1px 1px; margin:auto; }
+    .flow-feedback { margin-top:15px; border:1px dashed #adc097; padding:10px; border-radius:6px; color:var(--green); font-size:11px; text-align:center; }
+    .flow-note { color:var(--muted); font-size:11px; margin-top:15px; }
+    .inspector { position:sticky; top:24px; border:1px solid var(--line); border-radius:11px; background:var(--surface); overflow:hidden; }
+    .inspector-header { padding:23px; background:var(--ink); color:white; }
+    .inspector-header .eyebrow { color:#c6d6bf; margin-bottom:8px; }
+    .inspector-header h3 { font-size:24px; }
+    .inspector-header p:last-child { font-size:12px; color:#d4ded1; margin-top:12px; }
+    .inspector-body { padding:22px; }
+    .io+.io { margin-top:18px; padding-top:17px; border-top:1px solid var(--line); }
+    .io .eyebrow { margin-bottom:8px; }
+    .io p,.io ul { font-size:13px; }
+    .io-output { padding:11px; background:var(--rl); border-radius:5px; }
+    .tag { display:inline-block; padding:4px 8px; background:var(--rl); border-radius:4px; color:var(--green); font:10px/1.6 var(--mono); margin-bottom:8px; }
+    .callout,.mode-explanation { margin-top:20px; padding:17px 20px; background:var(--rl); border-left:3px solid var(--green); font-size:13px; }
+    .callout strong { display:block; margin-bottom:5px; }
+    .callout.sand { background:var(--sand); border-color:#b19a66; }
+    .training-only { margin-top:18px; padding:22px; border:1px dashed #799e60; border-radius:8px; background:var(--rl); font-size:13px; }
+    .training-only h3 { font-size:17px; margin-bottom:10px; }
+    .spec-block { margin-top:27px; }
+    .spec-block>h3 { margin-bottom:12px; }
+    .spec-block>p,.spec-block>ul,.spec-block>ol { margin-top:12px; font-size:14px; }
+    .spec-block>p { overflow-wrap:anywhere; }
+    .spec-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:20px; }
+    .spec-card { min-width:0; padding:22px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
+    .spec-card h3 { margin-bottom:12px; }
+    .spec-card p,.spec-card ul { font-size:13px; margin-top:10px; }
+    .spec-code { background:#edf0e6; border:1px solid var(--line); border-radius:8px; padding:19px; font:12px/1.8 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; }
+    .table-wrap { overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:9px; margin-top:15px; }
+    table { width:100%; min-width:680px; border-collapse:collapse; text-align:left; font-size:13px; }
+    th { padding:13px 15px; background:#eef0e7; font:10px/1.5 var(--mono); text-transform:uppercase; color:var(--muted); letter-spacing:.5px; }
+    td { padding:15px; border-top:1px solid var(--line); vertical-align:top; }
+    td:first-child { font-weight:650; min-width:130px; }
+    .obs-table td,.obs-table th { padding:9px 12px; }
+    .obs-table td:first-child { font:11px/1.6 var(--mono); min-width:90px; }
+    .command-row { background:var(--rl); }
+    details { background:var(--surface); border:1px solid var(--line); border-radius:8px; margin-top:20px; }
+    summary { padding:17px 20px; font-weight:650; cursor:pointer; font-size:14px; }
+    .details-content { padding:0 20px 20px; font-size:13px; }
+    .details-content p { margin-top:12px; }
+    .curriculum { display:grid; grid-template-columns:245px minmax(0,1fr); gap:22px; align-items:start; }
+    .stage-controls { display:none; }
+    .js .stage-controls { display:grid; gap:6px; }
+    .stage-button { display:flex; align-items:start; gap:11px; width:100%; padding:12px; text-align:left; border:1px solid transparent; border-radius:7px; background:transparent; }
+    .stage-button:hover { background:#f0f2e7; border-color:var(--line); }
+    .stage-button[aria-pressed="true"] { background:var(--ink); color:white; }
+    .stage-number { flex:0 0 24px; font:12px/1.8 var(--mono); opacity:.7; }
+    .stage-button strong { display:block; font-size:13px; }
+    .stage-button small { display:block; font-size:10px; opacity:.7; }
+    .stage-panel { margin-bottom:15px; padding:27px; background:var(--surface); border:1px solid var(--line); border-radius:10px; }
+    .stage-panel .eyebrow { color:var(--green); margin-bottom:10px; }
+    .stage-panel h3 { font-size:27px; line-height:1.25; letter-spacing:-.7px; }
+    .stage-panel>p { color:var(--muted); font-size:14px; margin-top:13px; }
+    .stage-fields { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin:25px 0 0; }
+    .stage-fields dt { font:10px/1.6 var(--mono); text-transform:uppercase; color:var(--muted); margin-bottom:6px; }
+    .stage-fields dd { margin:0; font-size:13px; }
+    .stage-gate { padding:16px; margin-top:23px; border-radius:6px; background:var(--rl); font-size:13px; }
+    .stage-gate strong { display:block; font:10px/1.6 var(--mono); text-transform:uppercase; margin-bottom:6px; color:var(--green); }
+    .stage-nav { display:none; justify-content:space-between; align-items:center; gap:10px; }
+    .js .stage-nav { display:flex; }
+    .stage-nav button { border:1px solid var(--line); border-radius:5px; padding:8px 12px; background:var(--surface); font-size:12px; }
+    #stage-counter { font:11px var(--mono); color:var(--muted); }
+    .milestone { padding:26px; background:var(--ink); color:white; border-radius:9px; }
+    .milestone .eyebrow { color:var(--lime); margin-bottom:10px; }
+    .milestone p:last-child { margin-top:13px; color:#c8d7c6; font-size:13px; }
+    .sources { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:24px; font-size:12px; }
+    footer { display:flex; justify-content:space-between; align-items:start; gap:20px; padding:25px 0 35px; color:var(--muted); font-size:11px; }
+    noscript p { padding:15px; margin-top:20px; border:1px solid var(--line); font-size:13px; }
+    @media(min-width:1650px) { main { margin-inline:auto; max-width:1640px; padding-left:260px; } }
+    @media(max-width:1150px) { .sidebar{width:185px;padding-inline:20px} main{margin-left:185px;padding-inline:26px} .hero{grid-template-columns:1fr;gap:22px} .hero-aside{max-width:550px} .architecture{grid-template-columns:minmax(0,1.2fr) minmax(235px,1fr);gap:15px} .flow{padding:18px} .branches{gap:10px} .curriculum{grid-template-columns:215px minmax(0,1fr)} .stats div{padding:13px} }
+    @media(max-width:900px) { .sidebar{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:18px 24px 10px} .sidebar>.eyebrow,.sidebar-footer{display:none} .navigation{display:flex;flex-wrap:wrap;gap:3px 16px;margin-top:15px} .navigation a{padding:6px 0;margin:0;font-size:12px} .navigation a[aria-current="location"]{background:transparent;text-decoration:underline} main{margin-left:0} }
+    @media(max-width:680px) { main{padding:22px 18px 0} .sidebar{padding-inline:18px} .navigation a{gap:5px} .topline{align-items:start} .topline>.eyebrow{font-size:9px} .print-button{margin:5px 0 0} .status{font-size:11px} .hero{padding-top:30px} h1{font-size:44px} .hero-copy{font-size:15px} .stats{grid-template-columns:1fr 1fr} .stats div:nth-child(3){border-left:0} .stats div:nth-child(n+3){border-top:1px solid var(--line)} section{padding:36px 0} .section-heading{flex-direction:column;gap:16px} .architecture,.spec-grid,.curriculum,.sources{grid-template-columns:minmax(0,1fr)} .inspector{position:static} .flow{padding:18px 13px} .flow-single{width:88%} .node{padding:11px} .js .stage-controls{grid-template-columns:1fr 1fr} .stage-button{border-color:var(--line);padding:9px;gap:5px} .stage-number{flex-basis:20px} .stage-button strong{font-size:12px} .stage-panel{padding:22px} .stage-panel h3{font-size:25px} .spec-code{font-size:11px;padding:13px} footer{flex-direction:column;gap:8px} }
+    @media(prefers-reduced-motion:reduce) { html{scroll-behavior:auto} }
+    @media print { @page{size:A4;margin:15mm} body{background:white;font-size:10pt;print-color-adjust:exact;-webkit-print-color-adjust:exact} .sidebar,.skip,.print-button,.js .print-button,.mode-switch,.js .mode-switch,.stage-controls,.js .stage-controls,.stage-nav,.js .stage-nav,.print-hint,.mode-explanation{display:none} main{margin:0;padding:0;max-width:none} .hero{padding:20px 0} h1{font-size:34pt} section{padding:23px 0} .architecture,.spec-grid{grid-template-columns:1fr} .inspector{display:none} .flow{break-inside:avoid} .node{box-shadow:none!important;border-color:var(--line)!important} .stage-panel[hidden],.training-only[hidden]{display:block!important} .curriculum{display:block} .stage-panel,.milestone{break-inside:avoid} .table-wrap{overflow:visible} table{min-width:0;font-size:8.5pt} td,th{padding:8px} td:first-child,.obs-table td:first-child{min-width:0} .spec-code{font-size:8pt} a{color:inherit} }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#contenido">Saltar al contenido</a>
+  <aside class="sidebar" aria-label="Navegación del documento">
+    <a href="#contenido" class="brand"><svg width="29" height="34" viewBox="0 0 29 34" aria-hidden="true"><path d="M15 7C21 0 27 1 27 1c0 7-6 10-12 9" fill="#326447"/><ellipse cx="13" cy="21" rx="12" ry="12" fill="#d9ef89" stroke="#20332c" stroke-width="1.4"/><ellipse cx="13" cy="21" rx="3" ry="5" fill="#fffef9"/><path d="M13 12v2m0 14v2m-9-9h2m14 0h2M7 15l1 2m10 9 1 1M6 26l2-1m10-8 2-2" stroke="#20332c" stroke-width="1.3" stroke-linecap="round"/></svg>Thekenyos</a>
+    <p class="eyebrow">Engineering specification / v3</p>
+    <nav class="navigation" aria-label="Secciones">
+      <a href="#arquitectura" aria-current="location"><span>01</span> Arquitectura</a><a href="#contratos"><span>02</span> Inputs &amp; outputs</a><a href="#modelos"><span>03</span> Redes y tensores</a><a href="#control"><span>04</span> Runtime y control</a><a href="#curriculum"><span>05</span> Curriculum</a><a href="#aprendizaje"><span>06</span> Entrenamiento conjunto</a><a href="#implementacion"><span>07</span> Implementación</a><a href="#validacion"><span>08</span> Aceptación</a>
+    </nav>
+    <div class="sidebar-footer"><p><strong>De píxeles a acciones.</strong>Visión aprendida con PPO. RELIC se adapta durante la cosecha.</p><a href="../README.md">Estado del repositorio ↗</a></div>
+  </aside>
+  <main id="contenido">
+    <header>
+      <div class="topline"><span class="eyebrow">TK-RL-003 / Especificación de ingeniería</span><div><span class="status">Contrato propuesto · v3.0</span><button class="print-button" id="print-button" type="button">Imprimir / PDF ↗</button></div></div>
+      <div class="hero"><div><h1>Cosecha visual.<br>Aprendizaje end-to-end.</h1><p class="hero-copy">RGB-D → representación visual → decisiones de aproximación y manipulación. La visión aprende con la recompensa de la tarea; la marcha se ajusta en paralelo con un learning rate reducido.</p></div><div class="hero-aside"><p class="eyebrow">Decisión de diseño</p><p><strong>Sin detector supervisado.<br>Sin etapa separada de marcha.</strong><br>El contrato de éxito es cosechar mediante cámaras, no producir máscaras de cada kiwi.</p></div></div>
+      <div class="stats"><div><strong>Encoder RGB-D</strong><small>ResNet-18 + GroupNorm · desde cero</small></div><div><strong>3 políticas PPO</strong><small>Marcha · aproximación · manipulación</small></div><div><strong>RELIC · LR 5e−6</strong><small>Adaptación concurrente y control de deriva</small></div><div><strong>6 etapas de tarea</strong><small>Depósito → cosecha → generalización</small></div></div>
+      <p class="notice"><strong>Documento de implementación, no resultado ejecutado.</strong> Un Spot con brazo, pinza y cámaras originales; pérgola de 1,6 m, kiwi Hayward cosechable y cesta trasera de 0–6 kg. Manipulación estacionaria. <strong>DEBE</strong> denota contrato; valores <strong>iniciales</strong> son decisiones de ingeniería ajustables y versionadas. El runtime actual todavía utiliza inferencia ONNX, ruta programada y brazo fijo.</p>
+      <noscript><p>El contenido técnico y todas las etapas están disponibles sin JavaScript. Actívalo para inspeccionar bloques, alternar ejecución/entrenamiento y navegar el curriculum.</p></noscript>
+    </header>
+
+    <section id="arquitectura" aria-labelledby="architecture-title">
+      <div class="section-heading"><div><p class="eyebrow">01 / Arquitectura general</p><h2 id="architecture-title">La visión ya es parte de la política.</h2><p class="description">No existe un módulo que entregue centros, máscaras o IDs de kiwi al actor. La selección de fruta es implícita en la imagen, la orientación de la mano, las acciones y la memoria recurrente.</p></div><div class="mode-switch" role="group" aria-label="Modo del diagrama"><button id="execution-mode" type="button" aria-pressed="true">Ejecución</button><button id="training-mode" type="button" aria-pressed="false">Entrenamiento</button></div></div>
+      <div class="legend"><span class="visual">Encoder entrenado con RL</span><span class="learned">Política RL</span><span class="classic">Control y geometría conocidos</span><span>Sensores / física</span></div>
+      <div class="architecture">
+        <div class="flow" aria-label="Flujo completo de observaciones y acciones">
+          <div class="flow-caption"><span>Píxeles → acciones → nuevos píxeles</span><span class="print-hint">Selecciona un bloque</span></div>
+          <div class="flow-single"><button class="node" data-node="sensors" type="button" aria-pressed="false" aria-controls="node-inspector"><span class="node-tag">Hardware original</span><strong>Cámaras + estado del robot</strong><small>RGB/ToF de mano · profundidad corporal · propiocepción</small></button></div>
+          <div class="connector">RGB + profundidad + validez</div>
+          <div class="flow-single"><button class="node visual" data-node="perception" type="button" aria-pressed="false" aria-controls="node-inspector"><span class="node-tag">V3 / ResNet-18-GN · PPO</span><strong>Encoder visual end-to-end</strong><small>5 × 240 × 320 → z_visual [256]</small></button></div>
+          <div class="connector">geometría auxiliar desde profundidad, sin semántica de fruta</div>
+          <div class="flow-single"><button class="node classic" data-node="geometry" type="button" aria-pressed="false" aria-controls="node-inspector"><strong>Mapa local + geometría de cesta</strong><small>Espacio observado y montaje conocido; sin tracker de kiwis</small></button></div>
+          <div class="connector">z_visual + propiocepción + contexto</div>
+          <div class="branches"><div>
+            <button class="node rl" data-node="approach" type="button" aria-pressed="false" aria-controls="node-inspector"><span class="node-tag">N3 / CNN + GRU-256</span><strong>Aproximación visual</strong><small>488 valores → 3 acciones + evento de 2 clases</small></button>
+            <div class="connector">vx · vy · giro</div>
+            <button class="node rl" data-node="gait" type="button" aria-pressed="false" aria-controls="node-inspector"><span class="node-tag">G1 / MLP RELIC · LR reducido</span><strong>Marcha adaptativa</strong><small>84 observaciones → 12 acciones de patas</small></button>
+          </div><div>
+            <button class="node rl" data-node="manipulation" type="button" aria-pressed="true" aria-controls="node-inspector"><span class="node-tag">M3 / GRU-256</span><strong>Manipulación visual</strong><small>382 valores → 8 acciones + evento de 3 clases</small></button>
+            <div class="connector">Δposición · Δrotación · apertura/par</div>
+            <button class="node classic" data-node="ik" type="button" aria-pressed="false" aria-controls="node-inspector"><span class="node-tag">Solver matemático</span><strong>Cinemática + pinza</strong><small>Incrementos de mano → objetivos articulares</small></button>
+          </div></div>
+          <div class="join" aria-hidden="true"></div><div class="connector">eventos de las políticas + estado medido</div>
+          <div class="flow-single"><button class="node classic" data-node="coordinator" type="button" aria-pressed="false" aria-controls="node-inspector"><strong>Árbitro de fase y comandos</strong><small>Activa políticas, espera estabilidad, gestiona timeout y recuperación</small></button></div>
+          <div class="connector">un único escritor de objetivos</div>
+          <div class="flow-single"><button class="node classic" data-node="pd" type="button" aria-pressed="false" aria-controls="node-inspector"><strong>Controladores PD</strong><small>Objetivos + articulaciones → esfuerzos limitados</small></button></div>
+          <div class="connector">pares físicos</div>
+          <div class="flow-single"><button class="node" data-node="physics" type="button" aria-pressed="false" aria-controls="node-inspector"><strong>Spot + fruta + cesta</strong><small>Contactos, desprendimiento, transporte y derrames</small></button></div>
+          <div class="flow-feedback">↺ El actor observa el resultado y vuelve a decidir</div>
+          <p class="flow-note">El mapa se construye directamente con profundidad corporal; no depende del encoder. El árbitro coordina todo el bucle, no solo su final. Escribe los objetivos de brazo antes de construir las 84 entradas de RELIC. Las peticiones de fin de intento no son pruebas de depósito.</p>
+        </div>
+        <aside class="inspector" id="node-inspector" aria-label="Detalle del bloque seleccionado" aria-live="polite" aria-atomic="true">
+          <div class="inspector-header"><p class="eyebrow" id="node-kind">M3 / GRU-256 · PPO</p><h3 id="node-title">Manipulación visual</h3><p id="node-description">Aprende agarre, inclinación, tracción y depósito directamente desde RGB-D y propiocepción. No recibe coordenadas de fruta.</p></div>
+          <div class="inspector-body"><div class="io"><p class="eyebrow">↓ Inputs</p><ul id="node-inputs"><li>z_visual [256] de la imagen RGB-D completa.</li><li>P85, Context14 y Basket16.</li><li>Acción/evento anterior y estado GRU.</li></ul></div><div class="io"><p class="eyebrow">↑ Outputs</p><p class="io-output" id="node-output">8 acciones continuas + un evento categórico: continuar, finalizar o recuperar.</p></div><div class="io"><p class="eyebrow">Aprendizaje</p><span class="tag" id="node-method">PPO recurrente desde cero</span><p id="node-training">Depósito → agarre/desprendimiento → ciclo completo. V3 y RELIC también se actualizan durante estos rollouts.</p></div><div class="io"><p class="eyebrow">Contrato clave</p><p id="node-caveat">El árbitro no lee detached, held o stored verdaderos. La recompensa y la evaluación física sí pueden utilizarlos.</p></div></div>
+        </aside>
+      </div>
+      <div class="mode-explanation" id="mode-explanation" role="status">Ejecución: cámaras, propiocepción, geometría conocida y memoria. Ninguna etiqueta de kiwi entra en los actores.</div>
+      <div class="training-only" id="training-branch" hidden><h3>Estado privilegiado solo para recompensa y críticos</h3><p>La simulación aporta posiciones, contactos, separación y almacenamiento reales al evaluador de recompensas y a los críticos. No hay pérdida de segmentación, regresión de pose ni etiquetas visuales. El gradiente de V3 procede exclusivamente de los objetivos PPO de N3 y M3; los críticos no comparten su encoder.</p></div>
+      <div class="callout"><strong>Cambio respecto a la revisión anterior</strong>Se eliminan el detector de instancias, las observaciones de fruto detectado, el seguimiento por ID visual, el preentrenamiento supervisado y la fase independiente de marcha. N3/M3 incorporan cabezas de eventos aprendidas para sustituir las transiciones que antes dependían del detector. RELIC conserva su contrato de 84 entradas.</div>
+    </section>
+
+    <section id="contratos" aria-labelledby="contracts-title">
+      <div class="section-heading"><div><p class="eyebrow">02 / Contratos funcionales</p><h2 id="contracts-title">Qué entra y qué sale de cada bloque.</h2><p class="description">El sistema persigue almacenar cualquier kiwi cosechable observado. No necesita que un detector externo asigne un objetivo. La cesta y el robot sí tienen geometría conocida.</p></div></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Inputs outputs y entrenamiento"><table><thead><tr><th scope="col">Bloque</th><th scope="col">Inputs</th><th scope="col">Outputs</th><th scope="col">Aprendizaje</th></tr></thead><tbody>
+        <tr><td>V3 · visión</td><td>RGB-D completo de mano, validez de profundidad.</td><td>z_visual [B,256], representación interna sin significado semántico garantizado.</td><td>Solo PPO a través de N3/M3. Sin pesos visuales preentrenados.</td></tr>
+        <tr><td>Mapa / cesta</td><td>Profundidad corporal y de mano, calibración, estado estimado y montaje.</td><td>Mapa [B,3,64,64], Basket16 y ocupación observada.</td><td>Geometría clásica, sin segmentación de frutos.</td></tr>
+        <tr><td>N3 · aproximación</td><td>z_visual, mapa, P85, Context14, acción/evento previo, memoria.</td><td>3 comandos: vx, vy, giro; evento de 2 clases: continuar / intentar manipular.</td><td>PPO recurrente; aprende exploración y colocación.</td></tr>
+        <tr><td>G1 · marcha</td><td>R84: comando deseado, propiocepción, objetivos del brazo, acción anterior.</td><td>12 acciones → objetivos de patas.</td><td>PPO concurrente, actor LR inicial 5e−6.</td></tr>
+        <tr><td>M3 · manipulación</td><td>z_visual, P85, Context14, Basket16, acción/evento previo, memoria.</td><td>8 acciones continuas de mano/pinza; evento de 3 clases: continuar / finalizar / recuperar.</td><td>PPO recurrente desde cero, con curriculum físico.</td></tr>
+        <tr><td>Árbitro</td><td>Eventos solicitados, velocidad/inclinación, disponibilidad de sensores, apertura/carga, timers.</td><td>Fase, política activa, comandos permitidos, recuperación.</td><td>Reglas de ejecución; no identifica kiwis ni confirma éxito físico.</td></tr>
+        <tr><td>IK + PD</td><td>Incrementos de mano, apertura/par, estado articular y límites importados.</td><td>Objetivos articulares y pares limitados.</td><td>Control matemático reutilizado/adaptado.</td></tr>
+        <tr><td>C_G / C_N / C_M</td><td>Estado privilegiado y contexto de tarea.</td><td>V(s), retorno esperado.</td><td>Un crítico nuevo por tarea, usado solo al entrenar.</td></tr>
+      </tbody></table></div>
+      <details id="relic-details"><summary>Contrato R84: las entradas actuales de RELIC</summary><div class="details-content"><div class="table-wrap" tabindex="0" role="region" aria-label="Observaciones RELIC"><table class="obs-table"><thead><tr><th scope="col">Índices</th><th scope="col">N.º</th><th scope="col">Contenido</th></tr></thead><tbody>
+        <tr><td>0–2</td><td>3</td><td>Velocidad lineal actual en COM, expresada en cuerpo.</td></tr><tr><td>3–5</td><td>3</td><td>Velocidad angular actual en cuerpo.</td></tr><tr><td>6–8</td><td>3</td><td>Gravedad proyectada.</td></tr><tr class="command-row"><td>9–11</td><td>3</td><td>vx, vy y giro deseados: aquí se conectan las 3 salidas continuas de N3.</td></tr><tr><td>12–18</td><td>7</td><td>Objetivos del brazo y pinza, orden ARM.</td></tr><tr><td>19–30</td><td>12</td><td>Subobjetivos interlimb de patas; ceros para locomoción con las 4 patas.</td></tr><tr><td>31–33</td><td>3</td><td>Referencia roll [rad], pitch [rad], altura [m]: [0,0,0.55].</td></tr><tr><td>34–52</td><td>19</td><td>Posiciones articulares relativas a home, orden OBS_JOINTS.</td></tr><tr><td>53–71</td><td>19</td><td>Velocidades articulares, mismo orden.</td></tr><tr><td>72–83</td><td>12</td><td>Acción anterior de RELIC.</td></tr>
+      </tbody></table></div><p>Comprobado contra <a href="../treesim/spot.py">treesim/spot.py</a> y el comando interlimb upstream. Conservar <code>LEGS</code>, <code>ARM</code> y <code>OBS_JOINTS</code>; no ordenar alfabéticamente. No añadir cámara, carga exacta, normalización nueva ni head de eventos a este vector.</p><p>La configuración RELIC fijada declara MLP 512–256–128 con ELU, sin normalización empírica. Verificar la arquitectura real de los pesos publicados y exigir paridad ONNX/PyTorch antes de optimizar. <code>policy.pt</code> puede ser un exportado TorchScript, no un checkpoint con optimizador.</p></div></details>
+      <div class="callout sand"><strong>Qué significa end-to-end en esta especificación</strong>Las acciones reciben información visual mediante un encoder entrenado con retorno RL. Se conservan IK, PD y geometría de profundidad para control y navegación. No se afirma que la red produzca una máscara, una pose de fruto o una explicación interpretable de su atención.</div>
+    </section>
+
+    <section id="modelos" aria-labelledby="models-title">
+      <div class="section-heading"><div><p class="eyebrow">03 / Arquitecturas y esquemas</p><h2 id="models-title">Redes concretas para implementar.</h2><p class="description">PyTorch + torchvision para construir V3; rsl-rl como base PPO mediante adaptadores actor/crítico y distribución híbrida propios. Fijar versiones compatibles en el lock de entrenamiento tras el smoke test CUDA.</p></div></div>
+      <div class="spec-block" id="network-summary"><h3>3.1 Arquitectura de los actores</h3><div class="table-wrap" tabindex="0" role="region" aria-label="Arquitecturas concretas"><table><thead><tr><th scope="col">Modelo</th><th scope="col">Capas</th><th scope="col">Salida</th><th scope="col">Inicialización</th></tr></thead><tbody>
+        <tr><td>V3 · encoder RGB-D</td><td>ResNet-18, bloques [2,2,2,2], canales [64,128,256,512]. Conv inicial de 5 canales; GroupNorm(8,C) en lugar de BatchNorm. AdaptiveAvgPool(4,4) → flatten 8192 → Linear(8192,256) → LayerNorm → SiLU.</td><td>z_visual [B,256]. Pooling espacial 4×4 conserva estructura espacial gruesa.</td><td>Aleatoria, Kaiming para convoluciones. Sin ImageNet/COCO, detector o pérdida supervisada.</td></tr>
+        <tr><td>N3 · aproximación</td><td>CNN de mapa →128. Fusión 488→Linear256→SiLU→GRU(256,256), 1 capa→Linear128→SiLU; dos heads lineales.</td><td>μ [B,3], logits_event [B,2], h' [1,B,256].</td><td>Aleatoria; σ inicial 0,3. Bias de evento [2,0] favorece continuar al principio.</td></tr>
+        <tr><td>M3 · manipulación</td><td>Fusión 382→Linear256→SiLU→GRU(256,256), 1 capa→Linear128→SiLU; dos heads lineales.</td><td>μ [B,8], logits_event [B,3], h' [1,B,256].</td><td>Aleatoria; σ inicial 0,2. Bias de evento [2,0,0].</td></tr>
+        <tr><td>G1 · marcha</td><td>MLP 84→512→256→128→12, ELU entre capas, salida lineal, sin GRU.</td><td>μ [B,12]; σ inicial 0,15 al abrir entrenamiento.</td><td>Pesos RELIC equivalentes al ONNX; requiere comprobación numérica.</td></tr>
+      </tbody></table></div><p><strong>CNN de mapa:</strong> Conv2d(3,32,5,2,2)→GN(8,32)→SiLU→Conv2d(32,64,3,2,1)→GN(8,64)→SiLU→Conv2d(64,64,3,2,1)→GN(8,64)→SiLU→GAP→Linear(64,128)→SiLU. Las GRU y cabezas de N3/M3 son independientes; V3 es compartido.</p><p><strong>Distribuciones:</strong> N3/M3 usan Normal diagonal sobre u y <code>a=tanh(u)</code>, más Categorical sobre su evento. <code>logπ=Σlogπ_continuas_con_jacobiano + logπ_evento</code>. Guardar u, evento y logπ antes del árbitro. Log-σ entrenable, acotado a [−5,1]. En evaluación, tanh(μ) y argmax de eventos. G1 conserva salida lineal y escala originales; no aplicarle tanh.</p><p><strong>Razón del diseño:</strong> V3 conserva información espacial sin exigir detecciones. Las GRU manejan oclusión y desfase entre cámara y control. Los heads de eventos sustituyen la selección/transición basada en máscaras. Mantener G1 intacto facilita adaptar pesos existentes con poca deriva.</p></div>
+
+      <div class="spec-block" id="sensor-schema"><h3>3.2 SensorBatch/v3</h3><pre class="spec-code">hand_rgb           uint8   [B,3,240,320]
+hand_depth_m       float32 [B,1,240,320]  # registrada sobre RGB
+hand_depth_valid   bool    [B,1,240,320]
+body_gray          uint8   [B,5,1,120,160] # diagnóstico
+body_depth_m       float32 [B,5,1,120,160]
+body_depth_valid   bool    [B,5,1,120,160]
+camera_K           float32 [B,6,3,3]
+T_body_camera      float32 [B,6,4,4]     # pose estimada en captura
+capture_time_s     float64 [B,6]
+frame_valid        bool    [B,6]
+frame_id           int64   [B,6]
+
+V3_input = concat(2*RGB/255 - 1, clip(depth_m/4,0,1), depth_valid)
+         = float32 [B,5,240,320]</pre><p>4 m es escala numérica, no alcance garantizado de ToF. Inválidos: d=0 y máscara false. Convención óptica: +X derecha, +Y abajo, +Z delante; Newton usa quaterniones xyzw. Si el renderer entrega distancia a lo largo del rayo, convertir a profundidad óptica antes de usar K. Registrar RGB/ToF con extrínsecos; reescalar intrínsecos al redimensionar.</p><p>Renderizar hojas, robot y cesta para que ocluyan aunque alguna geometría no tenga colisión. No introducir IDs de geometría, imágenes con overlays, máscaras GT ni recortes centrados en posiciones verdaderas de kiwis. La entrada es la vista completa de la cámara original.</p><p><strong>Memoria visual:</strong> reutilizar frame_id a 25 Hz sobre imágenes de 10 Hz. La edad y validez llegan por P85. Una ausencia de frame no equivale a profundidad cero válida. No reconstruir un fruto oculto mediante su estado verdadero.</p></div>
+
+      <div class="spec-block" id="observation-schema"><h3>3.3 Obs/v3: propiocepción y contexto</h3><p>R84 es el contrato RELIC; P85 es distinto y se usa para cosecha. Todos los vectores son float32 finitos. La fuerza y el contacto de pinza deben proceder de estimadores basados en cargas/encoders, no de contactos exactos de fruto.</p><div class="table-wrap" tabindex="0" role="region" aria-label="Slices P85"><table class="obs-table"><thead><tr><th scope="col">Slice</th><th scope="col">Campo</th><th scope="col">Escala / semántica</th></tr></thead><tbody>
+        <tr><td>0:19</td><td>q_rel</td><td>Articulaciones menos home, orden OBS_JOINTS; dividir por π.</td></tr><tr><td>19:38</td><td>qd</td><td>Mismo orden; rad/s divididos por 10.</td></tr><tr><td>38:41 / 41:44</td><td>v_body / omega_body</td><td>Velocidad del COM y angular expresadas en cuerpo; /1 m/s y /3 rad/s.</td></tr><tr><td>44:47</td><td>gravity_body</td><td>Vector unitario.</td></tr><tr><td>47:54</td><td>arm_target</td><td>Orden ARM; rad /π.</td></tr><tr><td>54:63</td><td>tcp_pose_body</td><td>Posición 3 /1 m y primeras dos columnas de matriz de rotación (6).</td></tr><tr><td>63:69</td><td>tcp_velocity_body</td><td>Velocidad lineal aplicada en TCP y angular; /1 m/s y /3 rad/s.</td></tr><tr><td>69:70</td><td>gripper_open</td><td>0 cerrado, 1 abierto.</td></tr><tr><td>70:74</td><td>force_hand + valid</td><td>3 fuerzas estimadas /50 N más disponibilidad. Escala numérica, no fuerza segura.</td></tr><tr><td>74:75 / 75:79</td><td>height / foot_contact</td><td>Altura estimada /1 m; contactos estimados FL, FR, HL, HR.</td></tr><tr><td>79:82</td><td>base_command_previous</td><td>Comando aplicado /[0,4 m/s,0,3 m/s,0,7 rad/s].</td></tr><tr><td>82:84</td><td>hand_image_age / valid</td><td>Edad /1 s y disponibilidad de la vista.</td></tr><tr><td>84:85</td><td>grip_contact_score</td><td>Score de cierre frenado bajo esfuerzo, derivado de encoders/carga. No implica «kiwi sujeto».</td></tr>
+      </tbody></table></div><pre class="spec-code">Context14 = [phase_one_hot(6), goal_one_hot(3), phase_elapsed(1),
+             retry_fraction(1), basket_fill(1), basket_fill_valid(1),
+             ik_position_error(1)]
+phase = [EXPLORE, SETTLE, MANIPULATE, VERIFY, RECOVER, DONE]
+goal  = [DEPOSIT_ONLY, DETACH_ONLY, HARVEST]
+
+Basket16 = [position_hand(3), rotation_6d_hand(6), fill(1),
+            fill_valid(1), age_s(1), free_clearance_xyz(3), goal_valid(1)]
+
+N3Input = 256(z_visual) + 128(map_encoder) + 85(P85) + 14(Context14)
+          + 3(previous_action) + 2(previous_event_one_hot) = 488
+
+M3Input = 256(z_visual) + 85(P85) + 14(Context14) + 16(Basket16)
+          + 8(previous_action) + 3(previous_event_one_hot) = 382</pre><p><strong>Sin observación de fruto:</strong> no se entrega centro, eje, tamaño, clase, track ID ni estado de pedúnculo. goal es la tarea asignada al reset, no el estado verdadero actual. Los cambios de fase dependen de eventos aprendidos y gates sensoriales (§4), nunca de la separación física verdadera.</p><p><strong>Mapa auxiliar:</strong> [B,3,64,64], extensión 4×4 m en flat_body, celda 0,0625 m. Canales: altura máxima observada /2 m, ocupación [0,1], observada [0,1]. Raycasting desde profundidad; desconocido no se trata como libre. La geometría corporal conocida permite auto-filtrado.</p><p><strong>Basket16:</strong> cesta rígidamente montada y calibrada respecto al chasis. Estimar altura/ocupación por profundidad dentro de su volumen conocido; proponer un punto de depósito con margen al borde. No segmentar ni contar kiwis para producir este vector. Sin vista reciente: goal_valid=0 y último estimado con edad; el actor debe orientar la cámara para observarla.</p><p><strong>Escalas:</strong> Basket16 posición /2 m, holgura /0,5 m, edad /1 s. Tiempo de fase /timeout, reintentos /3, error IK /0,1 m. Dirección/rotación, one-hots y probabilidades sin escala. Recortar continuos normalizados a [−5,5], registrar saturación y preservar máscaras. No aplicar esa normalización a R84. El score de contacto de pinza es heurístico y puede responder a ramas, no una etiqueta de fruta.</p></div>
+
+      <div class="spec-block"><h3>3.4 Críticos separados</h3><pre class="spec-code">FruitTruth float32 [B,128,23] =
+  [position_body(3), quaternion_xyzw_body(4), linear_velocity_body(3),
+   angular_velocity_body(3), mass_kg(1), radii_m(3), damage_proxy(1),
+   attached(1), in_basket(1), ever_spilled(1), evaluator_reference(1), valid(1)]
+
+Priv24 = [payload_mass(1), payload_com_body(3), payload_inertia_diagonal(3),
+          ground_friction(1), reference_stem_load(1), reference_strength(1),
+          reference_fruit_stem_angle(1), reference_ground_contact(1),
+          reference_grasp_contact(1), true_body_height(1), foot_slip_speeds(4),
+          requested_base_command(3), true_hand_external_force(3)]
+
+FruitTruth → MLP(23,64,128), ELU → masked mean + max → 256
+CriticInput = R84 + P85 + Context14 + Priv24 + FruitPool256
+            = 84 + 85 + 14 + 24 + 256 = 463
+CriticInput → MLP(463,512,256,128,1), ELU → V(s)</pre><p>C_G, C_N y C_M no comparten parámetros entre sí ni con V3. Capacidad 128 frutos activos/pool por entorno; excederla es error. Referencia del evaluador: el fruto de contacto actual o el más próximo entre los candidatos del objetivo del skill; nunca se transmite al árbitro ni al actor.</p><p>Normalizar posiciones /2 m, velocidades /1 m/s y /3 rad/s, masa /6 kg, radios /0,1 m, inercia /1 kg·m², cargas /50 N, ángulo /π, comandos según sus límites. Quaterniones y flags sin cambio. Masked max devuelve cero si no hay frutos; no dejar −∞ como observación. Los actores y el árbitro DEBEN permanecer invariantes si cambia solo el estado privilegiado y no sus sensores.</p></div>
+      <div class="callout"><strong>Versionado incompatible con v2</strong>El tensor visual tiene 5 canales, N3/M3 incorporan eventos, Context14 cambia la máquina de estados y las dimensiones son 488/382/463. Usar nuevos hashes de esquema y checkpoints. Solo el actor G1 conserva su layout anterior de 84 entradas.</div>
+    </section>
+
+    <section id="control" aria-labelledby="control-title">
+      <div class="section-heading"><div><p class="eyebrow">04 / Runtime y control</p><h2 id="control-title">Coordinar sin un detector externo.</h2><p class="description">El RL decide cuándo intentar manipular y cuándo dar el intento por terminado. El árbitro garantiza ejecución ordenada; el evaluador independiente determina si realmente hubo cosecha.</p></div></div>
+      <div class="spec-block"><h3>4.1 Scheduler y acciones</h3><pre class="spec-code">physics_dt = 0.001 s     # PD y contactos: 1.000 Hz
+gait_dt    = 0.020 s     # G1: 50 Hz, 20 substeps pares
+harvest_dt = 0.040 s     # N3/M3/árbitro: 25 Hz
+camera_dt  = 0.100 s     # cámaras: 10 Hz, sin dependencia de GUI
+
+Tick de marcha:
+  1. Consumir imágenes cuya captura + latencia ya haya vencido.
+  2. Si hay frame nuevo: actualizar mapa/cesta y z_visual.
+  3. Cada 2 ticks: ejecutar actor activo y procesar evento solicitado.
+  4. Árbitro: filtrar base; escribir brazo/pinza; después construir R84.
+  5. Ejecutar G1, actualizar objetivos de patas.
+  6. Integrar 20 substeps, medir eventos/reward y capturar según reloj.
+  7. Preservar observación terminal antes de reset.</pre><div class="table-wrap" tabindex="0" role="region" aria-label="Contrato de acciones"><table><thead><tr><th scope="col">Acción</th><th scope="col">Transformación inicial</th><th scope="col">Semántica</th></tr></thead><tbody>
+        <tr><td>N3 continua [3]</td><td>[0,4;0,3;0,7]×tanh(u), en m/s, m/s, rad/s. Cambios por paso ≤[0,02;0,02;0,04].</td><td>Movimiento del cuerpo; 0 en MANIPULATE/VERIFY. No imponer velocidad al cuerpo físico.</td></tr>
+        <tr><td>N3 evento [2 logits]</td><td>Categorical: CONTINUE / ATTEMPT.</td><td>ATTEMPT solicita SETTLE y después M3. No necesita centro de kiwi ni resolver IK hacia un fruto detectado.</td></tr>
+        <tr><td>M3 a[0:3]</td><td>Limitar norma a 1 y escalar: DEPOSIT_ONLY, 0,004 m/paso; DETACH_ONLY/HARVEST inicial, 0,00036 m/paso (9 mm/s).</td><td>Δposición en frame de mano medido. Perfil HARVEST inicialmente lento para estudiar desprendimiento; no cambiar límite por un flag verdadero de detached.</td></tr>
+        <tr><td>M3 a[3:6]</td><td>Vector rotación, norma ≤1, escala 0,02 rad/paso. R_des=R_actual·Exp(Δr).</td><td>Inclinación elegida por la red. El ángulo del paper no se convierte en una rotación fija de muñeca.</td></tr>
+        <tr><td>M3 a[6:8]</td><td>open=(a6+1)/2; tau_limit=(a7+1)/2×tau_cap importado. Slew ≤0,05 de su rango por paso.</td><td>Mapear apertura a endpoints angulares originales verificados. tau_cap es límite de actuador, no fuerza segura sobre kiwi.</td></tr>
+        <tr><td>M3 evento [3 logits]</td><td>Categorical: CONTINUE / FINISH / RECOVER.</td><td>FINISH solicita verificación o termina el intento según fase; no genera por sí mismo premio de depósito.</td></tr>
+        <tr><td>G1 [12]</td><td>q_legs=home+0,2×u en orden LEGS. Salida lineal original.</td><td>Respetar límites articulares/PD, incluida rodilla dependiente de ángulo y velocidad.</td></tr>
+      </tbody></table></div><p>Las velocidades son configuraciones de ingeniería. El ensayo del paper a 9 mm/s es una condición de banco; mover la mano a esa velocidad no garantiza la misma velocidad de tracción del pedúnculo durante la inclinación. Registrar la velocidad física de separación. Aumentar el límite HARVEST requiere una revisión de sensibilidad física y nueva versión de configuración.</p><p>Guardar acción muestreada, evento, logπ y comando aplicado. Saturación y gates son transformaciones del entorno. No calcular logπ usando el comando saturado en lugar de la muestra. Los críticos y PPO reciben información de fase, pero los actores nunca reciben éxito verdadero del intento como observación.</p></div>
+      <div class="spec-block"><h3>4.2 Máquina de estados de ejecución</h3><div class="table-wrap" tabindex="0" role="region" aria-label="Máquina de estados sin detector"><table><thead><tr><th scope="col">Fase / propietario</th><th scope="col">Acción y transición</th><th scope="col">Gate / fallo</th></tr></thead><tbody>
+        <tr><td>EXPLORE · N3</td><td>N3 mira y mueve la base. Un barrido de brazo programado entre posturas originales alcanzables ayuda a ver la pérgola. ATTEMPT pausa el barrido en su postura actual y pasa a SETTLE.</td><td>Solo se acepta ATTEMPT con frame reciente (&lt;0,3 s) y postura finita. No comprobar presencia real de kiwi.</td></tr>
+        <tr><td>SETTLE · árbitro</td><td>Comando de base hacia cero, mantener postura de observación. Con velocidad estimada &lt;0,03 m/s y giro &lt;0,05 rad/s durante 0,3 s, pasar a MANIPULATE.</td><td>Timeout 5 s → RECOVER. M3 empieza con el mismo punto de vista y frame reciente.</td></tr>
+        <tr><td>MANIPULATE · M3</td><td>M3 decide todo el movimiento de agarre, separación, transporte y depósito, sin subfases ocultas. FINISH → VERIFY; RECOVER → recuperación.</td><td>Timeout según skill: depósito 30 s, desprendimiento 60 s, cosecha 180 s. Base estacionaria.</td></tr>
+        <tr><td>VERIFY · M3</td><td>Seguir observando y permitiendo mover la mano. Esperar al menos 1 s antes de aceptar FINISH; registrar «intento declarado terminado». En misión volver a EXPLORE; en un episodio de skill cerrar el episodio solicitado.</td><td>No convertir esa declaración en «fruto almacenado». Timeout 5 s → RECOVER. Recibir premio solo si el evaluador físico confirma el resultado requerido por goal.</td></tr>
+        <tr><td>RECOVER · árbitro</td><td>Frenar, retirar por trayecto conocido alcanzable. Si el score de cierre bajo esfuerzo persiste, conservar cierre y ofrecer a M3 un intento DEPOSIT_ONLY; el score no garantiza que tenga fruta.</td><td>Máximo 3 reintentos consecutivos; luego reexplorar otra vista. No abrir sobre vacío para ocultar un fallo.</td></tr>
+        <tr><td>DONE · árbitro</td><td>Presupuesto de misión agotado o cesta observada sin hueco utilizable en 3 inspecciones recientes. Mantener postura estable.</td><td>Reportar motivo. La política no recibe censo verdadero, masa exacta ni número real de frutos restantes.</td></tr>
+      </tbody></table></div><p>El árbitro lee únicamente eventos de N3/M3, encoders, estimación de estado/fuerza, mapa, cesta observada y timers. Ningún booleano real de agarre/desprendimiento/almacenamiento cambia una fase. Los skills también entrenan las cabezas de eventos: alcanzar el objetivo físico no termina automáticamente el episodio antes de FINISH/VERIFY. Al finalizar por petición, el evaluador calcula éxito o fracaso; ese resultado va al retorno y las métricas, no a las observaciones. En misión un FINISH permite otro intento, aunque el anterior haya fallado.</p><p>La memoria visual identifica implícitamente una oportunidad de cosecha; no se asocia un ID de fruto entre modelos. Cosechar otro kiwi accesible también es válido. Reiniciar h al activar una política desde otra; mantener h_M entre MANIPULATE y VERIFY. Reiniciar ambas memorias en reset de episodio, nunca borrar el ledger físico por un cambio de fase.</p></div>
+      <div class="spec-block"><h3>4.3 Cinemática inversa y PD</h3><p>Integrar <code>newton.ik</code> en un side-model del brazo original de Spot con base fijada al chasis, posición, orientación y límites articulares. Levenberg–Marquardt/DLS, warm-start en q actual, 32 iteraciones máximas y damping inicial 0,1. Tolerancias iniciales: 5 mm y 5°. Verificar colisión propia y con geometría observada. No usar poses reales de fruta para planificar la mano.</p><p>Si IK falla, reducir el incremento a la mitad y reintentar una vez; después conservar el objetivo actual y publicar error IK. Tras 0,5 s sin progreso, permitir RECOVER. Limitar cambios articulares por velocidad importada. PD existente: τ=Kp(q_des−q)−Kd·qd, con saturación de esfuerzo. Referencias cartesianas ancladas en pose medida para evitar acumulación de metas imposibles. Ningún cuerpo de fruta se fija a la mano; <code>KiwiField.hold()</code> sigue prohibido.</p></div>
+    </section>
+
+    <section id="curriculum" aria-labelledby="curriculum-title">
+      <div class="section-heading"><div><p class="eyebrow">05 / Curriculum de tarea</p><h2 id="curriculum-title">Seis etapas. Visión y marcha aprenden dentro.</h2><p class="description">No hay etapa 00, entrenamiento previo del detector ni fase de marcha. V3 se entrena con PPO desde el primer skill y G1 se adapta con LR reducido durante todas las etapas.</p></div></div>
+      <div class="curriculum"><div class="stage-controls" role="group" aria-label="Seleccionar etapa del curriculum">
+        <button class="stage-button" type="button" data-stage="1" aria-pressed="true" aria-controls="stage-1"><span class="stage-number">01</span><span><strong>Depositar desde píxeles</strong><small>V3 + M3 + G1</small></span></button>
+        <button class="stage-button" type="button" data-stage="2" aria-pressed="false" aria-controls="stage-2"><span class="stage-number">02</span><span><strong>Agarrar y desprender</strong><small>V3 + M3 + G1</small></span></button>
+        <button class="stage-button" type="button" data-stage="3" aria-pressed="false" aria-controls="stage-3"><span class="stage-number">03</span><span><strong>Cosecha estacionaria</strong><small>V3 + M3 + G1</small></span></button>
+        <button class="stage-button" type="button" data-stage="4" aria-pressed="false" aria-controls="stage-4"><span class="stage-number">04</span><span><strong>Aproximación visual</strong><small>V3 + N3 + M3 + G1</small></span></button>
+        <button class="stage-button" type="button" data-stage="5" aria-pressed="false" aria-controls="stage-5"><span class="stage-number">05</span><span><strong>Cosecha múltiple</strong><small>Explorar, repetir, recuperar</small></span></button>
+        <button class="stage-button" type="button" data-stage="6" aria-pressed="false" aria-controls="stage-6"><span class="stage-number">06</span><span><strong>Generalización</strong><small>Escenas y condiciones reservadas</small></span></button>
+      </div><div><div id="stage-panels" aria-live="polite">
+        <article class="stage-panel" id="stage-1" aria-labelledby="stage-title-1"><p class="eyebrow">Etapa 01 / Primera señal visual de tarea</p><h3 id="stage-title-1">Depositar desde píxeles.</h3><p>Fruto ya sujeto mediante un agarre físico estable y cesta visible. Aprender a acercar, abrir, retirar la mano y solicitar fin de intento.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>Encoder V3 y M3 desde cero con PPO. G1 y críticos en paralelo.</dd></div><div><dt>Reset inicial</dt><dd>Mano a 5–15 cm del punto de depósito; después ampliar hasta posturas habituales de transporte.</dd></div><div><dt>Curriculum interno</dt><dd>Cesta vacía → parcialmente ocupada; variar apariencia, posición inicial y cámara.</dd></div><div><dt>Goal / presupuesto</dt><dd>DEPOSIT_ONLY, 30 s. N3 todavía inactivo.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>≥90% de depósitos retenidos en 200 episodios reservados por semilla. V3 no recibe máscaras ni etiquetas de posición.</div></article>
+        <article class="stage-panel" id="stage-2" aria-labelledby="stage-title-2"><p class="eyebrow">Etapa 02 / Contacto y desprendimiento</p><h3 id="stage-title-2">Agarrar, inclinar y separar.</h3><p>Un kiwi visible, pinza abierta y mano inicialmente próxima. El paper informa la física angular, no una secuencia de acciones que se imita.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>V3/M3 con PPO; adaptación concurrente G1.</dd></div><div><dt>Reset inicial</dt><dd>Separación mano/fruto de 1–3 cm; ampliar a 8–15 cm y orientaciones variadas sin penetración inicial.</dd></div><div><dt>Memoria de skills</dt><dd>25% de episodios DEPOSIT_ONLY para conservar depósito.</dd></div><div><dt>Goal / presupuesto</dt><dd>DETACH_ONLY, 60 s. Velocidad de traslación inicial 9 mm/s.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>≥85% de separación física retenida. Registrar fuerzas, ángulo, velocidad, daño proxy y pérdidas; no premiar derribar fruta.</div></article>
+        <article class="stage-panel" id="stage-3" aria-labelledby="stage-title-3"><p class="eyebrow">Etapa 03 / Ciclo completo</p><h3 id="stage-title-3">De fruto colgante a cesta.</h3><p>Base estacionaria, localización de kiwi aleatoria dentro del espacio alcanzable. M3 aprende a inferir por imágenes y fuerza en qué punto de la tarea está.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>V3/M3, G1 y sus críticos. Un único actor M3 para todo el ciclo.</dd></div><div><dt>Reset / mezcla</dt><dd>75% cosecha completa, 25% skills anteriores. Variar fruto sin correlacionarlo siempre con la postura inicial del brazo.</dd></div><div><dt>Observación</dt><dd>RGB-D, P85, Context14 y cesta. Ninguna pose verdadera de fruta.</dd></div><div><dt>Goal / presupuesto</dt><dd>HARVEST, 180 s con perfil inicial lento.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>≥80% de ciclos completos retenidos. Evaluar eventos de fin y VERIFY sin utilizar éxito verdadero en el árbitro.</div></article>
+        <article class="stage-panel" id="stage-4" aria-labelledby="stage-title-4"><p class="eyebrow">Etapa 04 / Incorporar N3</p><h3 id="stage-title-4">Aprender dónde colocarse.</h3><p>N3 recibe imágenes y mapa, explora y solicita a M3 que intente cosechar. No recibe un waypoint de base derivado de la pose verdadera del kiwi.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>N3 nuevo; continúan PPO de V3/M3/G1. Preservar episodios estacionarios en la mezcla.</dd></div><div><dt>Reset</dt><dd>Base inicialmente 0,5–1 m fuera de una postura útil; ampliar hasta 2 m y distintas orientaciones.</dd></div><div><dt>Crédito</dt><dd>Recompensa de cosecha posterior llega también a N3. ATTEMPT no recibe premio por sí mismo.</dd></div><div><dt>Goal / presupuesto</dt><dd>HARVEST, 240 s. 25% de skills anteriores.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>≥75% de intentos completos almacenados en escenas reservadas, sin empeorar el benchmark nominal de marcha.</div></article>
+        <article class="stage-panel" id="stage-5" aria-labelledby="stage-title-5"><p class="eyebrow">Etapa 05 / Misión</p><h3 id="stage-title-5">Explorar y cosechar varios.</h3><p>El actor elige implícitamente oportunidades, almacena y repite. El árbitro permite errores y recuperación; el ledger físico evita premios duplicados.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>V3/N3/M3/G1 con las mismas trayectorias y relojes compatibles.</dd></div><div><dt>Dificultad</dt><dd>5 → 15 → 40 frutos. Ocupación y distribución de carga crecientes; todo fruto mantiene su cuerpo físico.</dd></div><div><dt>Mezcla</dt><dd>Dentro de la rama de tarea, 25% de skills anteriores. Continúa el 20% auxiliar de marcha.</dd></div><div><dt>Presupuesto</dt><dd>900 s por misión inicial; terminar por tiempo o capacidad observada.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>≥75% de intentos almacenados; reportar también censo total retenido y frutos/min para no esconder fruta nunca encontrada.</div></article>
+        <article class="stage-panel" id="stage-6" aria-labelledby="stage-title-6"><p class="eyebrow">Etapa 06 / Robustez</p><h3 id="stage-title-6">Demostrar uso real de la visión.</h3><p>Layouts nuevos, oclusión, ruido, latencia y apariencia no vistos. Comparar con cámara enmascarada y con el bundle anterior.</p><dl class="stage-fields"><div><dt>Se entrena</dt><dd>Los mismos modelos; ampliar randomización solo en train.</dd></div><div><dt>Se conserva</dt><dd>Test separado, perfiles físicos versionados y reference RELIC inicial.</dd></div><div><dt>Diagnósticos</dt><dd>Ablaciones visuales, cambios de posición de fruta a igual propiocepción y errores de evento.</dd></div><div><dt>Entrega</dt><dd>Bundle compatible, métricas por episodio y vídeos de éxitos/fallos.</dd></div></dl><div class="stage-gate"><strong>Condición de avance</strong>Aceptación §8, sin regresión física pendiente. No presentar un mapa de atención como detector validado.</div></article>
+      </div><div class="stage-nav"><button id="previous-stage" type="button">← Anterior</button><span id="stage-counter">01 / 06</span><button id="next-stage" type="button">Siguiente →</button></div></div></div>
+      <div class="callout"><strong>Los resets acercan el aprendizaje al éxito, no sustituyen la física.</strong>Los estados de fruto sujeto se obtienen cerrando la pinza original y dejando asentar contactos. Se puede usar un script para generar esos estados, pero no se entrenan acciones por imitación ni se aplica una unión artificial. Al ampliar dificultad, variar fruta y robot de forma que la postura inicial no revele siempre su ubicación.</div>
+    </section>
+
+    <section id="aprendizaje" aria-labelledby="learning-title">
+      <div class="section-heading"><div><p class="eyebrow">06 / Entrenamiento simultáneo</p><h2 id="learning-title">PPO visual + adaptación lenta de RELIC.</h2><p class="description">El LR bajo controla la magnitud de las actualizaciones. La mejora de marcha exige además experiencias relevantes, recompensas de locomoción y evaluación contra la política inicial.</p></div></div>
+      <div class="spec-block"><h3>6.1 Dos grupos de entornos, un entrenamiento</h3><pre class="spec-code">Batch inicial B=20 (ajustar después de perfilar GPU):
+  16 entornos de tarea       → curriculum actual, visión y actores N3/M3
+   4 entornos auxiliares    → comandos de marcha y brazo programados
+
+G1 recibe experiencia de los 20 entornos en todas las etapas.
+N3/M3/V3 reciben PPO solo de los 16 entornos de tarea.
+No existe una etapa de curriculum dedicada a marcha.
+
+Cada rollout de 5,12 s:
+  tarea:   T=128 pasos a 25 Hz
+  marcha:  T=256 pasos a 50 Hz, sobre la misma integración física
+  → actualizar actores/críticos → publicar versión conjunta → continuar</pre><p><strong>Grupo auxiliar:</strong> cesta física y carga de 0–6 kg con semilla; 30% quieto, 40% recta/lateral y 30% giros/frenadas, dentro de límites de N3. Remuestrear comandos cada 2–5 s con slew. Variar posturas y movimientos de brazo mediante trayectorias alcanzables programadas. Es experiencia de apoyo concurrente, no una política de cosecha ni una etapa previa.</p><p>Esto cubre movimiento durante los primeros skills estacionarios. En tarea, G1 experimenta además las fuerzas reales de manipulación y el incremento físico de carga al cosechar. No añadir masa exacta ni distribución de fruta como observaciones de G1.</p></div>
+      <div class="spec-block"><h3>6.2 Configuración PPO inicial</h3><div class="table-wrap" tabindex="0" role="region" aria-label="Hiperparámetros PPO conjuntos"><table><thead><tr><th scope="col">Parámetro</th><th scope="col">G1 · marcha</th><th scope="col">N3/M3/V3 · cosecha</th></tr></thead><tbody>
+        <tr><td>LR actor</td><td><strong>5e−6</strong>, Adam</td><td>N3/M3 3e−4; V3 1e−4, grupos de un mismo Adam</td></tr><tr><td>LR crítico</td><td>1e−4</td><td>3e−4 por crítico, optimizadores separados</td></tr><tr><td>γ / GAE λ</td><td>0,99 / 0,95</td><td>0,9996 / 0,95; horizonte largo para perfil de mano lento</td></tr><tr><td>Clip / value coefficient</td><td>0,1 / 1</td><td>0,2 / 1</td></tr><tr><td>Épocas / minibatches</td><td>1 / 4 por rollout</td><td>4 / 4 sobre secuencias</td></tr><tr><td>Entropy coefficient</td><td>0,002</td><td>Continuas: N3 0,005; M3 0,002. Categóricas: 0,005</td></tr><tr><td>Tope KL / gradiente</td><td>0,003 frente al actor del rollout; norma máxima 1</td><td>0,02 por actor; norma máxima 1</td></tr><tr><td>Memoria</td><td>Sin GRU</td><td>Secuencias de 32 pasos, hasta 16 de burn-in sin gradiente</td></tr><tr><td>Precisión</td><td>Float32</td><td>AMP solo en convoluciones; logπ, PPO, retornos y críticos en float32</td></tr>
+      </tbody></table></div><p><strong>Retención inicial de G1:</strong> conservar una copia congelada de RELIC de referencia. Añadir regularizador <code>0,01·mean((μ_G−μ_ref)²)</code> para limitar deriva, registrando su magnitud. Es una restricción sobre marcha, no una pérdida visual. Ajustar su peso solo con comparación emparejada si impide adaptarse a cargas nuevas.</p><p><strong>LR reducido no equivale a marcha congelada.</strong> G1 recibe PPO cada rollout y su crítico se entrena. La captura de CUDA usa buffers de objetivos, no una instancia ONNX inmutable: la versión entrenable debe ejecutar los nuevos pesos. Si KL o el benchmark se degradan, no publicar ese bundle; revisar gradientes/recompensas y retomar el último aceptado.</p></div>
+      <div class="spec-block"><h3>6.3 Propiedad de gradientes y bucle de actualización</h3><pre class="spec-code">L_high = masked_PPO_N3 + masked_PPO_M3
+         - entropy_continuous - entropy_events
+
+L_V3 = gradiente de L_high a través de RGB-D → z_visual
+       # sin segmentación, pose, BC, etiquetas ni pérdida del crítico
+
+L_G1 = PPO_gait + 0.01 * mean((mu_gait - mu_reference)^2)
+
+Por minibatch de tarea:
+  recomputar z_visual desde imágenes almacenadas
+  reconstruir secuencias N3/M3 con sus resets y burn-in
+  calcular pérdidas de ambos actores, normalizadas por pasos activos
+  sumar gradientes → un optimizer.step sobre V3/N3/M3
+  actualizar C_N y C_M con optimizadores separados
+
+Después, una época G1/C_G con su buffer a 50 Hz.
+Publicar todos los pesos al terminar la iteración; no durante rollout.</pre><p>Un único optimizador posee V3; no actualizarlo una vez desde N3 y otra desde M3 con momentos independientes. Si una política no está activa en un minibatch, su pérdida de actor es cero; no dividir entre cero. Críticos sin imágenes ni parámetros compartidos con V3. El adaptador rsl-rl debe soportar la distribución híbrida, observaciones estructuradas y máscaras de fase, no solo su actor continuo por defecto.</p><p><strong>Recurrencia:</strong> no barajar timesteps individuales. Guardar h inicial, acciones/eventos, máscaras de activación y reset. Recopilar RGB-D por frame_id, no por cada tick repetido. Recomputar embeddings durante PPO: una caché de z sin grafo impediría aprender visión. Al actualizar V3, invalidar embeddings y reconstruir h con la historia guardada desde última activación/reset, sin reiniciar física ni truncar la misión cada 5,12 s.</p><p><strong>Crédito temporal:</strong> N3/M3 comparten reloj de retornos de 25 Hz. Durante la fase de la otra política se enmascara la pérdida de actor pero se propagan recompensas/valores: N3 debe recibir crédito de un depósito posterior a ATTEMPT. Un cambio de fase no corta GAE. Conservar h_M al pasar de MANIPULATE a VERIFY.</p><p><strong>Finales:</strong> timeout → truncated y bootstrap desde final_critic_obs; caída/fallo terminal → terminated sin bootstrap. Nunca usar la observación ya reseteada. La declaración FINISH no es éxito ni terminación física automática de una misión.</p></div>
+      <div class="spec-block" id="reward-contract"><h3>6.4 Reward/v3: eventos físicos, no declaraciones</h3><p>Recompensas densas al principio hacen viable aprender desde píxeles. El estado real se permite para calcular reward y V(s), sin convertirse en una etiqueta que la red visual deba predecir. Tasas ×dt; eventos una vez por fruto.</p><div class="table-wrap" tabindex="0" role="region" aria-label="Recompensas propuestas"><table><thead><tr><th scope="col">Término</th><th scope="col">Definición inicial</th><th scope="col">Actor</th></tr></thead><tbody>
+        <tr><td>Almacenamiento</td><td>+20 por fruto nuevo desprendido y libre de pinza, forma completa dentro de cesta y velocidad relativa &lt;0,05 m/s durante 1 s.</td><td>N3/M3</td></tr><tr><td>Progreso de skill</td><td>+0,5 una vez por agarre físico estable; +2 una vez por desprendimiento retenido al menos 0,2 s. Solo para objetos reales, no por elegir un evento.</td><td>M3</td></tr><tr><td>Pérdida / spill</td><td>−25 una vez por fruto perdido antes de almacenar o derramado después. Eventos separados y sin doble pago al tocar el suelo tras un spill.</td><td>N3/M3; spills también G1</td></tr><tr><td>Daño proxy</td><td>−5·ΣΔdamage sobre todos los frutos activos; guardar separado de spills y medir fuerzas aunque el proxy se sature.</td><td>Todos</td></tr><tr><td>Caída</td><td>−100 y terminated. Umbral inicial existente: altura &lt;0,25 m o inclinación &gt;1 rad. NaN/overflow es fallo numérico aparte.</td><td>Todos</td></tr><tr><td>Tiempo / suavidad</td><td>−0,05·dt por tarea; −0,01·mean((a_t−a_prev)²) por decisión continua activa.</td><td>N3/M3; suavidad también G1</td></tr><tr><td>Fin prematuro</td><td>−2 cuando se cierra un intento declarado completo sin el resultado físico requerido por su goal. No conceder recompensa por FINISH.</td><td>M3; retorno de tarea N3</td></tr><tr><td>Marcha</td><td>dt·[7 exp(−||v_xy−cmd_xy||²/0,25) + 3,5 exp(−(w_z−cmd_z)²/0,25) − 7||gravity_xy||² − 1e−5||τ_legs||²].</td><td>G1</td></tr>
+      </tbody></table></div><p><strong>Shaping de M3:</strong> Φ=exp(−d/0,25 m). Antes de agarre, d es distancia TCP al fruto de referencia del evaluador; tras agarrar y separar, d es distancia de fruto al volumen interior de cesta. Usar <code>2(γΦ_next−Φ_current)</code> solo mientras referencia y modo físico sean iguales. Cambiar referencia o modo reinicia baseline sin premio de salto. Esa clasificación existe solo en reward/critic, no en Context14.</p><p><strong>Shaping de N3:</strong> distancia a una postura cosechable de referencia calculada por el evaluador de entrenamiento, entre candidatos de fruta visible por cámara. La postura no se entrega al actor. Primera observación de un fruto puede dar +0,2 una sola vez por episodio, no por cada frame. Eliminar estas ayudas en la métrica principal de éxito; medir también rendimiento cuando su peso se reduce al final del curriculum.</p><p><strong>Ledger:</strong> ATTACHED, FREE/HELD y STORED son estados físicos del evaluador, con <code>deposit_paid</code>, <code>lost_once</code>, <code>spilled_once</code> y daño irreversibles. La precarga se registra STORED tras asentarse, sin premio. Reentrada no limpia spill; los cuerpos cosechados mantienen identidad física. El árbitro solo lleva intentos declarados, nunca recibe ese ledger verdadero.</p><p>Todos los pesos y el shaping son hipótesis iniciales de ingeniería. La rotación hasta 60° no recibe un premio principal. Penalizar contacto persistente de torso/brazo no-pinza con obstáculos a −1·dt; registrar impactos y esfuerzo de pinza para inspeccionar explotación del modelo de daño.</p></div>
+      <div class="spec-block"><h3>6.5 Semillas, observabilidad y randomización</h3><p>Separar RNG de escena, carga, sensor, reset y acción: <code>SeedSequence([training_seed,split_code,scene_id,stream_id])</code>. Train=0, validation=1, test=2. Entrenar con semillas 11,22,33; validación selecciona bundles, test se reserva. No repartir frames de la misma escena entre splits.</p><p>Randomización sensorial inicial progresiva: brillo/contraste ±20%, profundidad σ=2 mm, hasta 5% de píxeles perdidos, latencia 0–100 ms, error extrínseco hasta 2 mm/0,5°. Son hipótesis de simulación. Cultivar, masa/tamaño/fricción y desprendimiento usan presets con fuente y condiciones; no mezclar extremos de fuentes distintas como una distribución medida.</p><p>En skills, iniciar cerca del éxito y aleatorizar progresivamente. En evaluación incluir mismo robot/propiocepción con fruto en lugares distintos; el actor debe usar la imagen. No entrenar contra máscaras GT ni usar su bounding box para centrar la cámara o recortar la observación. Se permiten condiciones de reset elegidas por el simulador, siempre declaradas y sin correlaciones que resuelvan la tarea por sí solas.</p></div>
+    </section>
+
+    <section id="implementacion" aria-labelledby="implementation-title">
+      <div class="section-heading"><div><p class="eyebrow">07 / Handoff a ingeniería</p><h2 id="implementation-title">Entregables e integración.</h2><p class="description">El HTML especifica trabajo pendiente. Preservar los flujos de manzana, el runtime físico probado y las licencias. Las rutas siguientes son propuestas de implementación.</p></div></div>
+      <div class="spec-block"><h3>7.1 Módulos</h3><div class="table-wrap" tabindex="0" role="region" aria-label="Módulos a implementar"><table><thead><tr><th scope="col">Ruta propuesta</th><th scope="col">Responsabilidad</th></tr></thead><tbody>
+        <tr><td><code>treesim/kiwi_rl/schemas.py</code></td><td>SensorBatch/v3, Obs/v3, Action/v3, fases, dtypes, unidades, escalas y hashes.</td></tr><tr><td><code>sensors.py</code> / <code>geometry.py</code></td><td>Cámaras originales headless, timestamps, RGB/ToF, mapa y Basket16. Sin detector de kiwi.</td></tr><tr><td><code>models.py</code></td><td>V3, G1, N3, M3, críticos, distribuciones híbridas e importación de pesos RELIC.</td></tr><tr><td><code>controller.py</code> / <code>coordinator.py</code></td><td>IK Spot, PD, árbitro de eventos, límites, gates medidos y memoria.</td></tr><tr><td><code>env.py</code></td><td>VecEnv multirrate, grupos tarea/auxiliar, resets independientes y actores/critic separados.</td></tr><tr><td><code>rewards.py</code> / <code>metrics.py</code></td><td>Ledger físico, eventos únicos, shaping, datos por episodio y evaluación independiente.</td></tr><tr><td><code>training.py</code></td><td>Adaptador rsl-rl, PPO continuo+categórico, optimizadores, curriculum y actualización conjunta de G1.</td></tr><tr><td><code>scripts/train_kiwi.py</code> / <code>evaluate_kiwi.py</code></td><td>Perfiles por configuración, seeds, reanudación y bundles; documentar CLI cuando exista.</td></tr><tr><td><code>tests/test_kiwi_rl_*.py</code></td><td>Paridad, esquemas, gradientes, ausencia de fugas, eventos, resets y tiempo.</td></tr>
+      </tbody></table></div><p>Runtime probado: Python 3.12, Newton 1.3.0, Warp 1.14.0 y MuJoCo/MuJoCo-Warp 3.8.1. No actualizarlos independientemente. El lock nuevo de PyTorch/torchvision/rsl-rl se fija tras comprobar compatibilidad CUDA. RELIC permanece externo en el commit <code>27f8033c5064d32f049a17accb71cd1091422878</code>; no se necesita Isaac Sim para ejecutar el entorno propuesto.</p></div>
+      <div class="spec-block"><h3>7.2 API, buffers y checkpoint</h3><pre class="spec-code">reset(env_ids, seeds, stage, group) → ActorObs, CriticObs, ResetInfo
+step(ActionBatch) → ActorObs, CriticObs, reward_terms,
+                    terminated, truncated, StepInfo
+
+StepInfo: final_actor_obs, final_critic_obs, phase, active_policy_mask,
+          task_group_mask, requested_action/event, applied_action/event,
+          ik_error, frame_id, numerical_failure, schema_version
+
+Checkpoint: V3/G1/N3/M3/critics + G1_reference, optimizadores y AMP,
+            RNG, curriculum, contadores, learning rates, métricas,
+            esquema/config/reward hashes, commits, training lock y splits.</pre><p><strong>ENV-01:</strong> batch GPU persistente. El step de tarea avanza 40 ms y contiene dos transiciones G1 de 20 ms. El buffer G1 guarda ambas, con sus propias recompensas/terminales. Evitar descargas .numpy por entorno/paso; verificar sincronización y ownership en interop Warp/PyTorch.</p><p><strong>ENV-02:</strong> reset de un entorno restaura ambos state buffers, estado interno de solver/contactos, fuerzas, objetivos PD/IK, acciones/eventos previos, timers, memoria de imágenes/mapa, GRU y ledger. No modificar otros entornos. Validar buffer swaps y substeps pares bajo CUDA graphs.</p><p><strong>ENV-03:</strong> topología homogénea por lote con pool fijo de hasta 128 frutos. Slots inactivos fuera de escena, fuerzas/colisiones/render deshabilitados; activar solo en reset. Un fruto mantiene el mismo cuerpo al pasar de rama a mano y cesta. No representarlo como ballast visual ni sumarlo artificialmente al chasis.</p><p><strong>ENV-04:</strong> reanudar entrenamiento restaura optimizadores/RNG y comienza episodios nuevos documentados. Continuidad física exacta requiere además snapshot de solver/control/sensores; distinguir resume_training de restore_episode. No prometer determinismo bit a bit entre GPUs.</p><p><strong>Export:</strong> bundle de V3/G1/N3/M3, esquemas, calibración, límites de acción, FSM y control. Los críticos y el ledger de reward no son necesarios para acciones de ejecución. Conservar un evaluador independiente para medir éxito. Checkpoint de G1 con hash inicial igual y pesos finales distintos demuestra actualización, pero no demuestra mejora: hace falta benchmark.</p></div>
+      <div class="spec-block"><h3>7.3 Dependencias físicas, fuera del curriculum</h3><div class="spec-grid"><article class="spec-card"><h3>Actuación y sensores</h3><p>Comprobar alcance de mano a pérgola/cesta, pinza original, límites y frames. Integrar cámaras corporales estéreo y RGB/ToF de pinza, con intrínsecos/extrínsecos y rango útil documentados. El sensor Franka del repo no se puede reutilizar sin adaptar montaje.</p></article><article class="spec-card"><h3>Desprendimiento angular</h3><p>El umbral actual no depende explícitamente del ángulo. Reproducir el ensayo Hayward del paper y ajustar una aproximación angular cargada en el sitio real, con fuerzas/momentos iguales y opuestos. Derivar rigidez de pedúnculo por separado de abscisión.</p></article><article class="spec-card"><h3>Fruta y cesta</h3><p>Contactos de pinza, retención estacionaria, caída libre, suelo y derrames adversariales. ContactDamage sigue siendo un proxy en cuerpos rígidos GPU. Extender SpillTracker a fruta recién almacenada y conservar irreversibilidad.</p></article><article class="spec-card"><h3>Batch y rendimiento</h3><p>Spot admite actualmente un entorno. Integrar batch y perfilar memoria/steps/s con 1, 20 y lotes mayores antes de ampliarlos. En jp, revisar GPU, SSD y procesos; usar el despliegue existente y preservar otras cargas.</p></article></div><p><strong>Paper de Fang et al., 2023:</strong> Hayward reporta 5,98 N a ángulo fruto–pedúnculo de 60°, ensayos de tracción a 9 mm/s y seis frutos por variedad/ángulo. No es fuerza segura de cierre ni rotación de muñeca. Digitalizar puntos 60–180° con error; interpolar sin borrar el máximo Hayward a 160°. Registrar fuera de dominio. Torsión, velocidad y daño real siguen sin ley completamente calibrada.</p><p>Responsables de integración deben cerrar perfiles de cámara, endpoints/par de pinza, curva angular y contacto. No inventar esas constantes. Las regresiones físicas del README siguen siendo condiciones de entrega, aunque ya no sean una etapa de curriculum.</p></div>
+      <div class="spec-block"><h3>7.4 Artefactos y observabilidad del entrenamiento</h3><p>Runs en SSD fuera de Git: <code>runs/&lt;experiment&gt;/&lt;seed&gt;/{config,checkpoints,metrics,videos}</code>. Registrar KL por actor, LR efectivo, normas de gradiente V3/G1, entropías continuas/categóricas, mezcla de entornos, tasas de eventos solicitados/aceptados, tiempo por fase, saturaciones, error IK, pérdidas físicas, daño, spills, velocidad de separación y throughput.</p><p>Ante NaN/Inf o overflow de contactos, conservar diagnóstico y detener el run: no eliminar esos episodios del denominador. Etiquetar barridos y movimientos auxiliares como programados; RELIC como pretrained inicial y adaptado solo después de optimización. No redistribuir pesos/assets restringidos de RELIC.</p></div>
+    </section>
+
+    <section id="validacion" aria-labelledby="validation-title">
+      <div class="section-heading"><div><p class="eyebrow">08 / Criterios de aceptación</p><h2 id="validation-title">Éxito físico y dependencia de la cámara.</h2><p class="description">Ya no hay un gate de precisión/recall de detector. Se evalúa cosecha desde imágenes, calidad de control y mejora de marcha bajo carga.</p></div></div>
+      <div class="milestone"><p class="eyebrow">Primer hito integrado</p><h3>Un kiwi recogido y almacenado con políticas visuales, sin coordenadas de fruta en sus observaciones.</h3><p>La misma ejecución debe mantener equilibrio con cesta y brazo móvil. Declarar FINISH no basta: el evaluador mide liberación, asentamiento y retención posterior.</p></div>
+      <div class="spec-block"><h3>8.1 Tests de contrato</h3><ol>
+        <li><strong>Dimensiones:</strong> R84=84, P85=85, Context14=14, Basket16=16, N3=488, M3=382 y crítico=463. Casos B=1/20, profundidad inválida, vista vacía, latencia y pool de fruta vacío.</li>
+        <li><strong>Sin fugas:</strong> cambiar verdad privilegiada sin modificar sensores deja idénticos logits, acciones deterministas y fases del árbitro. No hay máscaras GT, centros de fruta, éxito previo verdadero ni crop de target en actor_obs.</li>
+        <li><strong>Visión RL:</strong> parámetros V3 aleatorios al arranque, sin pérdidas supervisadas; en un minibatch no degenerado el gradiente PPO sobre V3 es finito y no nulo. Desconectar V3 de la acción debe hacer fallar ese test.</li>
+        <li><strong>RELIC actualizado:</strong> paridad inicial ONNX/PyTorch ≤1e−5 en 10.000 observaciones. Verificar que G1 recibe gradiente, optimizer.step a LR configurado y acciones con pesos actualizados, no una sesión ONNX congelada.</li>
+        <li><strong>Acciones híbridas:</strong> logπ suma término continuo con jacobiano y categórico. Enmascarar fases inactivas. Un evento bloqueado por estabilidad no se sustituye al calcular logπ.</li>
+        <li><strong>Tiempo y memoria:</strong> dos transiciones G1 por cada transición de tarea; ningún frame futuro. h se restaura por secuencias y se reinicia al activar/resetear según contrato. Timeout usa final_obs para bootstrap.</li>
+        <li><strong>Eventos físicos:</strong> FINISH falso no cobra, premios y pérdidas son únicos por fruto, reentrada no borra spill ni daño. Nuevos frutos almacenados se incorporan al ledger.</li>
+        <li><strong>Reset y control:</strong> entornos aislados, ambos buffers, solver, timers y GRU. Pruebas de xyzw/frames, IK inalcanzable, límites de pinza, substeps pares y timestep 1 ms/0,5 ms.</li>
+      </ol></div>
+      <div class="spec-block"><h3>8.2 Gates de promoción y de marcha</h3><p>Objetivos iniciales de ingeniería, no resultados ya obtenidos. Evaluar cada 50 actualizaciones; promover tras dos evaluaciones consecutivas aprobadas. Al menos 200 episodios por skill/semilla, 500 episodios nominales para marcha. Informar Wilson 95% y variación entre semillas; mantener 500 episodios/misiones de test final separados.</p><div class="table-wrap" tabindex="0" role="region" aria-label="Gates de aceptación"><table><thead><tr><th scope="col">Componente / etapa</th><th scope="col">Objetivo inicial</th><th scope="col">Qué reportar</th></tr></thead><tbody>
+        <tr><td>01 · Depósito</td><td>≥90% almacenado, asentado y retenido tras una maniobra posterior de 2 s.</td><td>Ocupación de cesta, apertura, impactos, FINISH falsos.</td></tr><tr><td>02 · Desprendimiento</td><td>≥85% separación retenida por contacto real.</td><td>Fuerza/ángulo/velocidad en separación y daño proxy.</td></tr><tr><td>03 · Cosecha estacionaria</td><td>≥80% almacenado en ≤180 s con perfil lento.</td><td>Frutos perdidos, reintentos y dependencia de imagen.</td></tr><tr><td>04 · Aproximación</td><td>≥75% termina en fruto almacenado en ≤240 s.</td><td>Solicitudes ATTEMPT, fracasos por colocación y colisiones.</td></tr><tr><td>05 · Multifruta</td><td>≥75% de intentos completados en almacenamiento.</td><td>Censo inicial retenido, frutos/min, fruta no encontrada y cesta llena.</td></tr><tr><td>06 · Generalización</td><td>Mayor cobertura o frutos/min sin perder &gt;5 puntos porcentuales de éxito respecto al bundle aceptado.</td><td>Resultados por oclusión, layout, apariencia, ruido y seed.</td></tr><tr><td>G1 · en todas las etapas</td><td>RMSE XY ≤0,10 m/s, giro ≤0,20 rad/s; cero caídas y cero spills en el lote nominal 0–6 kg.</td><td>Comparación emparejada con RELIC inicial, cargas vacías/llenas, brazo móvil, tilt, daño y fuerzas.</td></tr>
+      </tbody></table></div><p>Estos checks de G1 son gates transversales, no una fase de entrenamiento de marcha. El benchmark incluye comandos idénticos, mismos resets, distribución de carga y brazo; no basta con mostrar que cambiaron los pesos. Un LR pequeño puede dejar G1 prácticamente sin adaptar, y eso debe aparecer en las métricas.</p></div>
+      <div class="spec-block"><h3>8.3 Ablaciones y paquete de entrega</h3><ul><li><strong>Uso de visión:</strong> evaluar cámara enmascarada, imágenes retardadas y cambio de posición de fruta manteniendo el estado inicial del robot. Reportar pérdida de éxito y adaptación espacial, sin usar estas ablaciones como datos de optimización del test.</li><li><strong>Adaptación locomotora:</strong> mismo actor de cosecha con G1 inicial y G1 adaptado. Además benchmark aislado de comandos para separar cambios del plan de aproximación de cambios de marcha.</li><li><strong>Física:</strong> checks del README de retención, desprendimiento, caída/suelo, derrame adversarial y sensibilidad al timestep. Los contactos GPU rígidos y daño proxy se etiquetan como tales.</li><li><strong>Vídeos:</strong> cámaras del robot y vista externa de éxitos y fallos. Un mapa de activación de V3 es diagnóstico de red, no una máscara de kiwi validada.</li><li><strong>Entrega:</strong> bundle, hashes de código/pesos/configuración, métricas por episodio, comparaciones, resultados de tests y clips. Las limitaciones de calibración quedan documentadas.</li></ul></div>
+      <div class="sources" aria-label="Fuentes"><a href="https://doi.org/10.1016/j.compag.2023.108225">Fang et al. · Desprendimiento angular ↗</a><a href="kiwi-material-evidence.md">Evidencia física y calibración pendiente ↗</a><a href="https://github.com/rai-opensource/relic/blob/27f8033c5064d32f049a17accb71cd1091422878/source/relic/relic/tasks/loco_manipulation/config/spot/agents/rsl_rl_cfg.py">RELIC fijado · Arquitectura original ↗</a><a href="https://github.com/rai-opensource/relic/blob/27f8033c5064d32f049a17accb71cd1091422878/source/relic/relic/tasks/loco_manipulation/mdp/commands/arm_command.py">RELIC fijado · Comandos interlimb ↗</a><a href="https://github.com/boston-dynamics/spot-sdk/blob/master/docs/concepts/arm/arm_specification.md">Spot Arm · Sensores originales ↗</a><a href="../README.md">Estado y checks del repositorio ↗</a></div>
+    </section>
+    <footer><p><strong>Thekenyos · TK-RL-003 v3.0</strong> · Septiembre 2026<br>Especificación propuesta. Proyecto basado en OrchardBench.</p><p>HTML autónomo · Sin dependencias de red<br><a href="#contenido">Volver al principio ↑</a></p></footer>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+      document.documentElement.classList.add("js");
+      const nodes = {
+        sensors: {kind:"Hardware original", title:"Sensores de Spot", description:"RGB/ToF de mano, profundidad corporal y estado propio; la cámara debe observar la escena física, incluidas hojas y autooclusiones.", inputs:["5 pares estéreo del cuerpo; referencia original monocroma.","RGB y ToF de pinza con calibración y timestamp.","Encoders, IMU, cargas y fuerza estimada."], output:"SensorBatch/v3, estado estimado y máscaras de validez de profundidad (no de kiwi).", method:"Modelado y validación", training:"No se entrenan sensores. Ruido, latencia y disponibilidad se incluyen en los rollouts.", caveat:"No producir recortes o montajes de cámara usando posiciones verdaderas de frutos."},
+        perception: {kind:"V3 / ResNet-18-GN · PPO", title:"Visión end-to-end", description:"Encoder de 5 canales, inicializado desde cero. ResNet-18-GN → pool espacial 4×4 → proyección a 256. No es un detector de instancias.", inputs:["RGB-D de mano [B,5,240,320]: RGB, profundidad y validez.","Imagen completa, sin máscaras ni cajas de fruto.","Gradiente PPO de N3 y M3 al entrenar."], output:"z_visual [B,256], representación interna para decidir acciones.", method:"Solo RL, sin supervisión visual", training:"V3 recibe gradiente de las pérdidas PPO de cosecha desde el primer skill. Un optimizador compartido posee sus parámetros.", caveat:"No se garantiza que una dimensión de z represente un kiwi, su centro o su eje. No hay loss de segmentación, pose ni BC."},
+        geometry: {kind:"Geometría clásica / profundidad", title:"Mapa y cesta", description:"Ayudas geométricas obtenibles con cámaras y montaje conocido. No identifican ni siguen cada kiwi.", inputs:["Profundidad corporal y de mano con validez.","Calibración y pose estimada al capturar.","Geometría del robot y cesta montada en chasis."], output:"Mapa local [B,3,64,64] y Basket16: posición conocida, hueco/ocupación observados y validez.", method:"Sin entrenamiento", training:"Validar reproyección, oclusiones y regiones desconocidas. La ocupación de cesta no requiere contar frutas.", caveat:"No existe Target24 ni un tracker de kiwis que suministre poses al actor. La geometría conocida de cesta sí es admisible."},
+        approach: {kind:"N3 / CNN + GRU-256 · PPO", title:"Aproximación visual", description:"Fusión de 488 valores → GRU-256 → heads de 3 medias continuas y 2 logits de evento. Aprende a explorar y decidir dónde intentar cosechar.", inputs:["z_visual 256 y mapa codificado a 128.","P85 + Context14.","Acción/evento previos y memoria."], output:"vx, vy, giro + evento CONTINUE o ATTEMPT.", method:"PPO recurrente", training:"Se incorpora al curriculum de aproximación. El depósito posterior asigna crédito al acercamiento; G1 sigue adaptándose con LR reducido.", caveat:"No recibe posiciones de kiwi ni waypoint derivado de verdad oculta. Sus 3 comandos continuos ocupan R84[9:12]."},
+        gait: {kind:"G1 / MLP RELIC · LR 5e−6", title:"Marcha adaptativa", description:"Actor 84→512→256→128→12, ELU y salida lineal. Conserva el contrato original, pero sus pesos se actualizan durante la cosecha.", inputs:["R84 y comandos de N3 o del grupo auxiliar.","Estado del cuerpo y articulaciones.","Objetivos de brazo/pinza y acción previa."], output:"12 acciones → home + 0,2×acción → objetivos de patas.", method:"PPO concurrente a LR reducido", training:"Una época por rollout, sobre entornos de tarea y 20% de apoyo locomotor. Reward de tracking, estabilidad, esfuerzo, daño y spills; referencia inicial para limitar deriva.", caveat:"Un LR pequeño no crea experiencia ni garantiza mejora. Verificar gradiente, pesos aplicados y benchmark emparejado. No seguir ejecutando el ONNX congelado mientras se optimiza otra red."},
+        manipulation: {kind:"M3 / GRU-256 · PPO", title:"Manipulación visual", description:"Aprende agarre, inclinación, tracción y depósito directamente desde RGB-D y propiocepción. No recibe coordenadas de fruta.", inputs:["z_visual [256] de la imagen RGB-D completa.","P85, Context14 y Basket16.","Acción/evento anterior y estado GRU."], output:"8 acciones continuas + un evento categórico: continuar, finalizar o recuperar.", method:"PPO recurrente desde cero", training:"Depósito → agarre/desprendimiento → ciclo completo. V3 y RELIC también se actualizan durante estos rollouts.", caveat:"El árbitro no lee detached, held o stored verdaderos. La recompensa y la evaluación física sí pueden utilizarlos."},
+        ik: {kind:"Solver clásico / newton.ik", title:"Cinemática y pinza", description:"Transforma incrementos de mano en objetivos de articulaciones originales con límites y realimentación.", inputs:["Δposición/Δrotación de M3 en mano actual.","Apertura y límite de par.","Cinemática actual, URDF y geometría observada."], output:"Objetivos del brazo/pinza y error IK observable.", method:"Sin entrenamiento", training:"Integrar side-model Spot y validar precisión, límites, recuperación y ausencia de penetración. Reutilizar el enfoque newton.ik existente para Franka, adaptándolo.", caveat:"No planificar contra poses verdaderas de kiwi ni fijar el fruto a la mano."},
+        coordinator: {kind:"Árbitro sensorial / eventos aprendidos", title:"Coordinación sin detector", description:"La política pide intentar, finalizar o recuperar; el árbitro aplica gates de estabilidad y disponibilidad. No selecciona fruta por coordenadas.", inputs:["Eventos categóricos N3/M3.","Estado medido, mapa/cesta observados y timers.","Apertura, carga y score de contacto no semántico."], output:"Phase de 6 estados, actor activo y comandos aceptados.", method:"Reglas; eventos aprendidos con PPO", training:"Los logits de evento se optimizan junto con las acciones. El árbitro es el mismo durante entrenamiento y misión.", caveat:"FINISH es una declaración de intento, no éxito. Solo el evaluador físico puede conceder reward de almacenamiento."},
+        pd: {kind:"Control de motores", title:"Controladores PD", description:"Ejecutan objetivos a cada substep de física aplicando esfuerzos limitados.", inputs:["Objetivos de patas, brazo y pinza.","Posiciones y velocidades actuales.","Ganancias y límites originales; par de pinza solicitado."], output:"Pares articulares para el robot físico simulado.", method:"Ganancias configuradas", training:"Reutilizar _pd de spot.py y añadir el límite variable de pinza como buffer persistente. La decisión de RL se renueva a menor frecuencia.", caveat:"No imponer velocidad o pose al chasis para simular que camina. El movimiento viene de patas y contactos."},
+        physics: {kind:"Newton + MuJoCo-Warp", title:"Física y evaluación", description:"Fruto libre, pedúnculo con carga en su sitio y cesta montada. El estado real solo alimenta reward, críticos y métricas.", inputs:["Esfuerzos, gravedad y contactos.","Ley angular informada por evidencia.","Cuerpos de fruta con masa e inercia propias."], output:"Nuevas imágenes/estado propio; eventos físicos en un canal separado.", method:"Validación física, fuera del curriculum", training:"Verificar retención, desprendimiento, caída/suelo, spills y timestep. La ley angular y la pinza necesitan integración específica.", caveat:"Fruto GPU rígido y daño proxy no equivalen a tejido deformable ni predicción validada de magulladuras."}
+      };
+      const nodeButtons = Array.from(document.querySelectorAll("[data-node]"));
+      function selectNode(key) {
+        const item = nodes[key];
+        if (!item) return;
+        nodeButtons.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.node === key)));
+        for (const [id, value] of Object.entries({"node-kind":item.kind,"node-title":item.title,"node-description":item.description,"node-output":item.output,"node-method":item.method,"node-training":item.training,"node-caveat":item.caveat})) document.getElementById(id).textContent = value;
+        document.getElementById("node-inputs").replaceChildren(...item.inputs.map(text => {const li=document.createElement("li");li.textContent=text;return li;}));
+      }
+      nodeButtons.forEach(button => button.addEventListener("click", () => selectNode(button.dataset.node)));
+      const execution = document.getElementById("execution-mode"), training = document.getElementById("training-mode");
+      function setMode(enabled) {
+        execution.setAttribute("aria-pressed", String(!enabled)); training.setAttribute("aria-pressed", String(enabled));
+        document.getElementById("training-branch").hidden = !enabled;
+        document.getElementById("mode-explanation").textContent = enabled ? "Entrenamiento: estado real → recompensas y críticos. V3 aprende exclusivamente mediante PPO de N3/M3; G1 se adapta en paralelo con LR reducido." : "Ejecución: cámaras, propiocepción, geometría conocida y memoria. Ninguna etiqueta de kiwi entra en los actores.";
+      }
+      execution.addEventListener("click", () => setMode(false)); training.addEventListener("click", () => setMode(true));
+      const stageButtons=Array.from(document.querySelectorAll("[data-stage]")), panels=Array.from(document.querySelectorAll(".stage-panel"));
+      const previous=document.getElementById("previous-stage"), next=document.getElementById("next-stage");
+      let current=0;
+      function selectStage(index) {
+        current=Math.max(0,Math.min(panels.length-1,index));
+        stageButtons.forEach((button,i)=>button.setAttribute("aria-pressed",String(i===current)));
+        panels.forEach((panel,i)=>{panel.hidden=i!==current;});
+        previous.disabled=current===0; next.disabled=current===panels.length-1;
+        document.getElementById("stage-counter").textContent=`${String(current+1).padStart(2,"0")} / ${String(panels.length).padStart(2,"0")}`;
+      }
+      stageButtons.forEach((button,i)=>button.addEventListener("click",()=>selectStage(i)));
+      previous.addEventListener("click",()=>selectStage(current-1));next.addEventListener("click",()=>selectStage(current+1));selectStage(0);
+      const links=Array.from(document.querySelectorAll(".navigation a"));
+      if ("IntersectionObserver" in window) {
+        const observer=new IntersectionObserver(entries=>entries.forEach(entry=>{if(entry.isIntersecting) links.forEach(link=>{if(link.getAttribute("href")===`#${entry.target.id}`)link.setAttribute("aria-current","location");else link.removeAttribute("aria-current");});}),{rootMargin:"-10% 0px -65% 0px",threshold:0});
+        document.querySelectorAll("main>section").forEach(section=>observer.observe(section));
+      }
+      const details=Array.from(document.querySelectorAll("details"));let savedDetails=null;
+      window.addEventListener("beforeprint",()=>{if(savedDetails===null)savedDetails=details.map(item=>item.open);details.forEach(item=>{item.open=true;});});
+      window.addEventListener("afterprint",()=>{if(savedDetails!==null)details.forEach((item,i)=>{item.open=savedDetails[i];});savedDetails=null;});
+      document.getElementById("print-button").addEventListener("click",()=>window.print());
+    })();
+  </script>
+</body>
+</html>

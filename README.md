@@ -23,7 +23,7 @@ not approval of the basket geometry or loaded workspace.
 | Component | Current implementation |
 |---|---|
 | Pergola | Seeded configurable commercial plantation, 4.5–5 m structural grid, continuous rows, tied canes, compliant tips and hanging fruit |
-| Orchard floor | Optional seeded heightfield: grassed pasillos, bare surcos, slope, noise and friction; posts and Spot sit on the sampled surface |
+| Terrain | Optional procedural noise heightfield by default; explicit `--terrain-kind orchard` retains grassed aisles, furrows, slope and terrain-aligned posts/Spot |
 | Spot | External RELIC robot assets and pretrained ONNX gait; scripted velocity route |
 | Basket | Rear chassis-mounted yellow panels, vents, black frame, handles and mounting feet; open-top collision liner |
 | Basket payload | Separate free, collidable fruit; 0–6 kg; gravity, rotation, packing and spills |
@@ -49,6 +49,16 @@ Neither model is a validated predictor of bruising. Layered skin/core,
 viscoelastic/plastic constitutive laws, calibrated wet friction and
 calibrated angle/torque-dependent abscission remain open work. Research ranges are not
 interchangeable across cultivars and test conditions.
+
+
+The current graph teacher uses [continuous progress and control-loss graph v5](docs/reward-graph.md).
+Use `--reward-graph --role teacher --continue-from /path/to/checkpoint.pt
+--learning-rate .0001` to preserve actor, critic and factual Adam state under the
+new objective. Add `--cti --cti-time-fraction .2 --cti-worlds 32` only for the
+matched CTI arm. Both arms share the same source checkpoint and time budget.
+There is no explicit curriculum, stage practice or checkpoint rollback. Archived
+v1–v4 profiles retain their original scoring. `--resume-from` is only for the same
+reward profile and run; `--initialize-from` resets critic/optimizers instead.
 
 ## Install
 
@@ -93,10 +103,10 @@ python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
-Plant the same bay on the orchard floor:
+Select the retained grassed orchard-floor generator explicitly:
 
 ```bash
-python scripts/grow_tree.py --preset pergola --foliage --terrain --seed 42 \
+python scripts/grow_tree.py --preset pergola --foliage --terrain --terrain-kind orchard --seed 42 \
   --collisions --substeps 40 --viewer gl
 ```
 
@@ -106,9 +116,9 @@ XML. The default pergola is 40 posts along 45 rows at 5 m centres, about
 `--pergola-spacing` (4.5–5.0 m) to scale the field; render-only foliage is
 enabled by default for this preset, while `--foliage-density 0` disables it.
 Use `--fruit-count` to cap the independent kiwi bodies (the default is 600 for
-the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` to
-plant the grid on a kiwi orchard floor (grassed aisles, bare planting strips,
-sampled slope and noise). The native compression bench writes its own generated
+the plantation). Change geometry in `treesim/pergola.py`. Add `--terrain` for
+the procedural noise floor, or `--terrain --terrain-kind orchard` for the
+retained orchard floor (grassed aisles, planting strips, slope and noise). The native compression bench writes its own generated
 MuJoCo XML to its output directory.
 
 On a 4 GB GTX 1650, record the full 45×40 block with MuJoCo EGL (no
@@ -125,9 +135,59 @@ grid; a larger NVIDIA GPU can keep the commercial default:
 
 ```bash
 python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
-  --preset pergola --terrain --foliage --seed 42 --frames 600 \
+  --preset pergola --terrain --terrain-kind orchard --foliage --seed 42 --frames 600 \
   --pergola-rows 5 --pergola-columns 4
 ```
+
+#### Continuous leaf roof (render-only)
+
+For a continuous **visual leaf roof**, `--canopy-spacing .08` adds overlapping
+leaf blades across the entire post footprint, rather than only along the sparse
+fruiting canes. The spacing is in metres; zero (the default) keeps the original
+foliage. This is a seeded artistic canopy approximation, not a measured crop or
+additional physical branches. The extra leaves are massless, non-colliding,
+attached to supported cane bodies, and follow the canopy slope. The option is
+pergola-only and cannot be combined with `--foliage-physics` or disabled foliage.
+Use cropped plots: the additional layer is capped at 100,000 leaves, and increases
+rendering/build cost even though it adds no physical bodies or degrees of freedom.
+
+A single local frame, with the same camera and terrain as the visual experiments:
+
+```bash
+.venv/bin/python -B scripts/grow_tree.py --preset pergola --foliage --leaves 32 \
+  --canopy-spacing .08 --seed 42 --pergola-rows 3 --pergola-columns 3 \
+  --fruit-count 40 --terrain --terrain-seed 202 --terrain-amplitude .05 \
+  --terrain-wavelength 1.8 --terrain-extent 6 --device cpu --substeps 40 \
+  --viewer gl --headless --frames 1 --snapshot output/kiwi-canopy-roof.png
+```
+
+This recipe produces a 1920x1080 PNG after one simulation frame. Its 3x3 posts
+at 5 m centres enclose 100 m²: 15,625 infill leaves plus 1,152 twig leaves, or
+16,777 leaves total. The 40 kiwis remain separate physical fruit (0.4 fruit/m²);
+adding the visual roof does not add fruit or fruit attachment sites.
+
+How the roof is generated:
+
+- `scripts/grow_tree.py` maps `--canopy-spacing` to
+  `cfg.foliage.canopy_spacing_m`. **This is the control that closes the gaps**;
+  `--leaves 32` alone only thickens the existing cane lines. Zero disables infill;
+  nonzero spacing must be finite and at least 0.03 m. Larger spacing reduces
+  coverage and cost; leaf count scales approximately with `1 / spacing²`.
+- `treesim/foliage.py::place_canopy_leaves` fills the horizontal skeleton bounds
+  with `ceil(width / spacing) * ceil(length / spacing)` cells, one leaf per cell.
+  A separate RNG (`scene seed + 1777`) jitters leaf centres within their cells,
+  so the arrangement is reproducible without perturbing fruit sampling.
+- Leaf centres sit 4–18 cm above a plane fitted to the supported canes, following
+  the canopy slope. Random heading, tilt and roll break up the flat-grid look;
+  overlapping blades, rather than a solid opaque sheet, form the roof.
+- `treesim/builder.py` attaches each placement to the supported cane with the
+  nearest midpoint and reuses three leaf-size mesh classes. The CLI's nominal
+  kiwi blade is 22x17 cm; the size classes scale it by 0.72, 1.0 and 1.35.
+  No extra physical branches, joints, leaf mass or leaf contacts are introduced.
+
+Geometry, CLI and unchanged-mass/contact/one-step regressions are included in
+`python -B -m unittest tests.test_pergola -v`. This preview is neither PBR
+postprocessing nor a learned rollout; it changes only the rendered foliage.
 
 The trellis has fixed transverse support wires. Main cane sections are tied
 rigidly to this frame; only the final 0.35 m tips bend. This is an ideal-support
@@ -135,6 +195,251 @@ assumption, not calibrated wire tension or tie compliance. It replaces the
 unsupported 2.3 m cantilevers that sagged into the robot's workspace. Fruit
 stems are drawn between the actual force attachment sites and disappear on
 rupture; fruit remains an independent physical body.
+
+### Uneven kiwi terrain for future RL episodes
+
+`--terrain` uses a **physical collision heightfield**, not just a visual mesh.
+For the kiwi pergola, three octaves of **smooth value noise** (quintic
+interpolation, decreasing octave amplitudes) generate continuous rolling ground.
+There are no post-centred masks, flat pads or artificial mounds. Posts remain
+embedded below the surface, rather than reshaping the ground around them; the
+canopy stays at its world-space height. Kiwi terrain gets a **fresh random seed
+each launch**, even with a fixed canopy `--seed`. Flat ground remains the default,
+and the apple terrain retains its flat trunk area and original seed behaviour.
+The noise generator takes priority for `--terrain`; select `--terrain-kind
+orchard` (Python: `cfg.physics.terrain_kind = "orchard"`) only for the retained
+slope/furrow generator. Noise amplitude/wavelength/extent controls do not tune
+that alternative; it uses the `orchard_*` parameters. Both modes support an
+explicit `terrain_seed`; orchard mode otherwise inherits the scene seed.
+
+The CPU examples crop the newer plantation geometry to **3 × 3 posts**, retaining
+supported canes and compliant tips. This fits a 12 m terrain patch and supports
+40 fruit without instantiating the default commercial field.
+
+```bash
+python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+  --terrain --terrain-amplitude .24 \
+  --terrain-wavelength 1.8 --terrain-extent 6 \
+  --device cpu --substeps 40 --viewer gl --headless --frames 360 \
+  --camera-orbit 20 --snapshot output/kiwi-uneven-terrain.png \
+  --video output/kiwi-uneven-terrain.mp4 --metrics output/kiwi-uneven-terrain.json
+```
+
+Use `.venv/bin/python` instead of `python` with the local virtual environment.
+Remove `--headless` for an interactive window; remove recording options and use
+`--viewer null` for display-free physics. CPU rendering still needs working
+OpenGL. The MP4 records every second physics frame at 30 fps, matching the
+60 Hz simulation clock. `--snapshot` saves the last frame. The orbit is a
+scripted camera motion, not robot motion or learned behaviour.
+
+Terrain controls (engineering assumptions, **not measured orchard soil**):
+
+- `--terrain-amplitude`: nonnegative height range in metres above a 4 mm offset;
+  default 0.05 m. The 0.24 m preview deliberately makes relief easier to see;
+  start with 0.03–0.05 m for robot experiments. Traversability is not validated.
+- `--terrain-wavelength`: positive dominant bump spacing in metres; default 1.8.
+  Three noise scales share a finite-resolution grid, so very small wavelengths
+  cannot create arbitrarily fine geometry.
+- `--terrain-extent`: ground half-extent in metres; 6 gives a 12 × 12 m patch.
+  If omitted (`terrain_extent=None` in Python), it fits the plantation with a
+  0.5 m post margin and a minimum half-extent of 14 m. An explicit value must
+  cover the posts plus that margin. Outside the patch, ground is flat; constrain
+  training episodes to the patch (the edge may have a step).
+- `--terrain-seed`: specify a nonnegative integer (for example,
+  `--terrain-seed 7`) to reproduce exactly the same ground. **Omit it for new
+  random kiwi ground on every launch**, independently of the canopy and fruit.
+  The chosen seed is printed at startup and saved in metrics. Rebuild at episode
+  reset with a new seed or amplitude for curriculum/domain randomization.
+  Batched worlds share one terrain; independent per-world terrain generation
+  and terrain-aware RL integration are not implemented here. The existing
+  fixed-base harvesting interface is documented separately below.
+
+Programmatic use: set `cfg.physics.terrain = True`, `terrain_seed`,
+`terrain_amplitude`, `terrain_wavelength`, and `terrain_extent` before calling
+`builder.generate_and_build(cfg)`. For deterministic programmatic builds,
+`terrain_seed=None` still inherits `cfg.seed`; sample a new `terrain_seed` at
+each episode reset for independent ground. The demo launcher handles that
+sampling automatically. `tree.terrain_height(x, y)` provides a
+bilinear height estimate for spawn/planning; actual contact follows the
+heightfield triangles. Robot spawning and policy observations are not adapted
+here—avoid spawning feet inside bumps when integrating a legged RL task.
+Metrics save the scene and terrain seeds and terrain dimensions.
+Kiwi terrain uses a 2 ms, critically damped MuJoCo contact reference with higher
+contact priority than fruit (`ke=250000`, `kd=1000` in Newton's numerical
+mapping). These are rigid-ground solver settings, not measured soil or fruit
+stiffness. The old 20 ms blended response let a sustained 20 N pull drive a
+small kiwi through the heightfield. Use the demonstrated 40 substeps at 60 Hz;
+larger timesteps and GPU execution still need separate validation.
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/check_kiwi_physics.py --device cpu --terrain
+```
+
+CPU scene stepping retains main's native MuJoCo contact adapter and collision
+coverage fixes. GPU scene stepping uses MuJoCo-Warp. The isolated fast-impact
+unit test additionally exercises MuJoCo-Warp on CPU. These are different
+backends; passing the CPU checks does not establish GPU equivalence.
+
+The terrain check verifies attachment at rest, physical pull detachment, falling,
+settling on the elevated ground and measured contact force. The suite also
+checks high-speed forced impacts against the collision heightfield.
+These checks do not establish rough-terrain Spot locomotion or harvesting success.
+
+#### Three reproducible terrain examples
+
+Use terrain seeds **101**, **202**, and **303** to compare three different
+surfaces. All three use canopy/fruit seed **42**, a 3 × 3 post layout, the same
+camera path, a 12 × 12 m patch, 0.24 m height range, 1.8 m dominant wavelength,
+and 40 kiwis. These commands use the integrated supported-cane geometry;
+pre-integration render files must be regenerated to match it.
+Only the terrain seed changes. Each video covers 3 simulated seconds
+(180 physics frames, encoded as 90 frames at 30 fps); the PNG is the final view.
+
+Run from the repository root with the pinned environment installed:
+
+```bash
+for terrain_seed in 101 202 303; do
+  .venv/bin/python scripts/grow_tree.py \
+    --preset pergola --foliage --seed 42 \
+    --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+    --terrain --terrain-seed "$terrain_seed" \
+    --terrain-amplitude .24 --terrain-wavelength 1.8 --terrain-extent 6 \
+    --device cpu --substeps 40 --viewer gl --headless --frames 180 \
+    --camera-orbit 20 --progress-every 60 \
+    --snapshot "output/kiwi-terrain-${terrain_seed}.png" \
+    --video "output/kiwi-terrain-${terrain_seed}.mp4" \
+    --metrics "output/kiwi-terrain-${terrain_seed}.json" || break
+done
+```
+
+Use `python` instead of `.venv/bin/python` if the conda environment is active.
+The loop is sequential to avoid competing render jobs on a small CPU machine.
+It overwrites the corresponding generated files when rerun.
+
+| Terrain seed | Snapshot | Video | Metrics |
+|---|---|---|---|
+| 101 | [PNG](output/kiwi-terrain-101.png) | [MP4](output/kiwi-terrain-101.mp4) | [JSON](output/kiwi-terrain-101.json) |
+| 202 | [PNG](output/kiwi-terrain-202.png) | [MP4](output/kiwi-terrain-202.mp4) | [JSON](output/kiwi-terrain-202.json) |
+| 303 | [PNG](output/kiwi-terrain-303.png) | [MP4](output/kiwi-terrain-303.mp4) | [JSON](output/kiwi-terrain-303.json) |
+
+These are local generated artifacts, intentionally excluded from Git. The
+links work after generating them; a fresh clone or GitHub's README view will
+not contain the files. This is a scripted camera preview, not robot navigation.
+
+For interactive viewing of one example:
+
+```bash
+.venv/bin/python scripts/grow_tree.py --preset pergola --foliage --seed 42 \
+  --pergola-rows 3 --pergola-columns 3 --fruit-count 40 \
+  --terrain --terrain-seed 202 --terrain-amplitude .24 \
+  --terrain-wavelength 1.8 --terrain-extent 6 \
+  --device cpu --substeps 40 --viewer gl
+```
+
+For display-free simulation, use `--viewer null --frames 60` instead of GL,
+and omit `--snapshot`, `--video`, `--headless`, and `--camera-orbit`.
+To obtain a different random terrain each launch, omit `--terrain-seed`.
+
+#### How generation works (agent handoff)
+
+The implementation is `treesim/builder.py::_add_terrain`; the public scene
+entry point is `builder.generate_and_build(cfg)`. For the kiwi path:
+
+1. The terrain seed initializes a local NumPy random generator, separate from
+   canopy and fruit sampling. Random lattice values are normally distributed.
+2. Three periodic noise layers use target wavelengths `w`, `w/2`, `w/4` and
+   weights `1.0`, `0.35`, `0.12`. Integer lattice dimensions make the exact
+   wavelength approximate. Quintic interpolation, `6t^5 - 15t^4 + 10t^3`,
+   smooths transitions between lattice values.
+3. The combined field is normalized to `[0, 1]`, then mapped to world heights
+   `0.004 + terrain_amplitude * noise` in metres. Amplitude is the full height
+   range, not a standard deviation and not a plus/minus offset.
+4. Grid spacing targets 0.08 m, with 48–384 cells per axis; extreme extents or
+   tiny wavelengths are resolution-limited. The 12 m examples have 150 cells
+   per axis (151 × 151 height samples, including the repeated boundary).
+5. The same Newton heightfield supplies rendering and collision geometry.
+   Posts are fixed below the surface; there is **no terrain deformation around
+   posts**. This models rigid ground, not deformable soil.
+
+Preserve the seed **and** terrain settings, scene geometry, environment count,
+code revision and pinned dependency versions to reproduce an experiment.
+Metrics record `summary.scene_seed` and `summary.terrain` (seed, amplitude,
+wavelength, half-extent, noise algorithm and octave count). Record the code
+revision separately with `git rev-parse HEAD`, and note any uncommitted edits.
+
+#### Programmatic episode generation for other agents
+
+This lightweight example builds three fresh CPU episodes with eight kiwis and
+no foliage or rendering. It samples a reproducible **sequence** of terrain
+seeds from a master seed, suitable for matched-seed comparisons. It does not
+implement an RL environment, policy, observation space, action space or reward.
+
+```python
+import numpy as np
+
+from treesim import builder
+from treesim.config import TreeConfig
+from treesim.metrics import Metrics
+from treesim.sim import Sim
+
+terrain_rng = np.random.default_rng(2026)
+for episode in range(3):
+    cfg = TreeConfig.compliant("pergola")
+    cfg.device = "cpu"
+    cfg.seed = 42
+    cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+    cfg.physics.terrain = True
+    cfg.physics.terrain_kind = "noise"
+    cfg.physics.terrain_seed = int(terrain_rng.integers(0, 2**31))
+    cfg.physics.terrain_amplitude = 0.05
+    cfg.physics.terrain_wavelength = 1.8
+    cfg.physics.terrain_extent = 6.0
+    cfg.fruit.enabled = True
+    cfg.fruit.max_count = 8
+    cfg.fruit.joint = "free"
+    cfg.fruit.colors = ((0.39, 0.27, 0.12), (0.48, 0.34, 0.17))
+
+    tree = builder.generate_and_build(cfg)
+    sim = Sim(tree, fps=60, substeps=40, collisions=True)
+    metrics = Metrics(f"output/terrain-episode-{episode:03d}.json")
+    for frame in range(10):
+        sim.step()
+        metrics.frame()
+    metrics.save(sim)
+    print(episode, cfg.physics.terrain_seed, tree.terrain_height(0.0, 0.0))
+```
+
+Agent integration rules:
+
+- **CLI versus Python:** the kiwi launcher chooses a random terrain seed when
+  omitted. In direct Python builds, `terrain_seed=None` inherits `cfg.seed`;
+  it does not sample a new seed. Set an explicit sampled seed per episode.
+- **Reset:** rebuild the model and `Sim` for a new terrain, as above. Changing
+  `cfg.physics.terrain_seed` after construction does not replace the existing
+  heightfield. Recreate controllers, state and any CUDA graph tied to that model;
+  this is not an in-place vectorized reset implementation.
+- **Spawn and clearance:** use `tree.terrain_height(x, y)` for an approximate
+  bilinear height query; collision uses triangles. Check all foot/wheel contact
+  positions, robot orientation, canopy clearance and post clearance before
+  starting an episode. Existing robot spawns do not automatically follow terrain.
+- **Batching:** worlds currently share one periodic heightfield; changing
+  `num_envs` changes the display tiling and may change the generated field.
+  Use separate single-environment builds for different terrain seeds today.
+  The retained native CPU contact adapter supports one world only; do not use
+  `--num-envs` greater than 1 for CPU kiwi physics.
+- **Curriculum:** start around 0.03–0.05 m amplitude, then increase deliberately.
+  The 0.24 m renders exaggerate relief for inspection; they are not validated
+  traversability targets. Keep evaluation seeds fixed and separate from training
+  seeds, and stay away from the finite patch boundary.
+- **Validation:** run the suite and terrain pull/drop check above after changes.
+  Inspect renders as well as metrics. No detachments at rest is only a stability
+  check; it is not harvesting success. GPU stepping, terrain-aware Spot control
+  and end-to-end RL training still require their own validation.
+- **Artifacts:** save unique output names and seeds per episode. Keep generated
+  images, videos, metrics and external robot assets out of Git. Do not change
+  the pinned physics dependencies to make a run pass.
 
 ### Spot with a loaded basket
 
@@ -144,15 +449,16 @@ python scripts/walk_spot.py --relic ../relic --basket --payload 6 \
   --metrics output/spot-basket.json
 ```
 
-Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add `--terrain` to walk
-the same scripted oval on the orchard floor; sampled slope, rut, noise and
+Omit `--payload` to sample 0–6 kg using `--payload-seed`. Add
+`--terrain --terrain-kind orchard` to walk the same scripted oval on the
+retained orchard floor; sampled slope, rut, noise and
 friction are written into the metrics JSON. The pretrained gait was not trained
 on this surface. The arm holds its ready pose; random arm poses and payload-aware
 locomotion retraining are not complete. For a numerical run, replace the video
 options with `--no-render`.
 
 ```bash
-python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain \
+python scripts/walk_spot.py --relic ../relic --basket --payload 6 --terrain --terrain-kind orchard \
   --frames 600 --video output/spot-orchard.mp4 --metrics output/spot-orchard.json
 ```
 
@@ -253,7 +559,7 @@ known source inconsistencies and missing measurements.
   collision path allowed a fruit to escape a stationary basket. Planar Spot
   lower-leg collision hulls receive 1 mm thickness for native compatibility;
   the original body inertia is retained.
-- **Orchard floor:** `--terrain` on a pergola scene samples an assumed domain-
+- **Orchard floor:** `--terrain --terrain-kind orchard` samples an assumed domain-
   randomization heightfield (2 m vine rows, grassed pasillos, ~0.64 m bare
   surcos, slope ±4°, noise 0–4 cm, ruts 0–8 cm deep and 20–60 cm wide,
   friction 0.6–1.3). It is an assumed compact layout, not a measured
@@ -373,7 +679,426 @@ one-pose bench results, not an optimal grip or evidence of bruise-free fruit.
 The differing rigid/flex outcomes mean the rigid model cannot yet stand in for
 the flex benchmark without further contact and mesh-resolution checks.
 
+## Experimental learning and deformable-backend foundations
+
+The shared-belief student in `treesim/kiwi_rl/models_torch.py` has registered
+RGB-D, map, recurrent memory, intent, and action/event modules. The separate
+privileged teacher in `teacher.py` can provide confidence-masked supervision
+without sharing its hidden state or gradients with the student. These model
+components are unit-tested, including CUDA updates and checkpoint round-trips;
+they are **not yet an integrated harvesting trainer**.
+
+The isolated deformable investigation uses MuJoCo/MuJoCo-Warp 3.13.0 and Warp
+1.15.0. It does not upgrade the legacy `environment.yml` runtime. The CUDA
+learning stack and Optuna are pinned with hashes under `.devin/training/`.
+Use a separate Python 3.12 environment and scope the CUDA package index to Torch:
+
+```bash
+uv pip sync --python /path/to/isolated-env/bin/python --torch-backend cu128 \
+  --require-hashes .devin/training/requirements-gpu.lock
+python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v
+```
+
+W&B logging is available in `scripts/train_physical_smoke.py`. Add
+`--wandb-mode online --wandb-project Thekenyos --wandb-entity juampab`
+to the training command after authenticating with `wandb login` on the host.
+Logs include losses, rewards, policy transitions per second, evaluation distance,
+and fall fraction. Every run also appends local `training.jsonl`; `offline`
+queues W&B data locally, and `disabled` needs no W&B connection. Checkpoint
+uploads require `--upload-checkpoints`. Run outputs and W&B caches stay under
+`--output`; credentials are never stored in the repository.
+
+The approved fast hackathon profile uses rigid fruit with compliant contacts
+and a load-triggered point connection. It retains the robot, basket, cameras,
+collisions and gravity from a base scene, with static canopy supports. It omits
+volumetric fruit deformation; the 8 N stem threshold and 15 N force-based damage
+limit are explicit engineering assumptions. It currently supports one target
+fruit per independent world.
+
+```bash
+python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
+  --output /path/to/fast-scene --timestep .005
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/new-run \
+  --worlds 4096 --steps 64 --updates 10 --minibatch-worlds 512 \
+  --wandb-mode online --wandb-project Thekenyos --wandb-entity juampab
+FAST_SCENE=/path/to/fast-scene python -B -m unittest \
+  tests.test_fast_scene tests.test_fast_task tests.test_fast_runtime \
+  tests.test_fast_ppo tests.test_training_log -v
+```
+
+`--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
+weights with a fresh optimizer. Fast CLI exports solve a collision-free arm
+starting pose with the first fruit in the fixed gripper camera;
+`--keep-base-arm-pose` preserves the source pose for diagnostics. The pose is
+recorded in the scene and motor targets, not supplied to the actor as a target.
+Each run saves `policy-camera-start.png` from the actual GPU observation.
+The GPU runtime captures each 50 Hz control
+interval and evaluates contact/release outcomes at every physics substep. The
+CLIs share a non-default Torch/Warp stream; use that same stream contract when
+embedding the runtime. PPO accumulates gradients across all world minibatches
+before updating, and resets recurrent memory only in terminated worlds.
+`--eval-every 10` records deterministic baseline and periodic evaluations.
+Average closest distance per world avoids selecting a batch just because its
+single best sample is closer. Initial and subsequent checkpoints are preserved;
+`best_reach_checkpoint` identifies the lowest average closest-distance checkpoint,
+which is a reaching metric, not proof of harvesting success.
+
+`benchmark_fast.py` accepts the same scene/gait/output arguments plus `--worlds`
+and `--camera`. It reports policy transitions/s separately from physics steps/s.
+Training reports also include optimizer time and optimized sample count. A
+transition is one policy action in one world, not a complete harvesting episode.
+W&B losses, rewards and throughput are not proof of improved harvesting.
+
+For harvesting, use the persistent-episode launcher below. The older
+`train_fast.py` is a short reaching benchmark and resets at buffer boundaries.
+The harvesting launcher carries physics and GRU state across 64-step optimizer
+buffers. An episode ends on success, physical failure, or four simulated seconds
+without new progress. New best approach/carry distance (5 mm), a first sustained
+bilateral grasp, increasing stem load while still touching (0.5 N), or detachment
+reset the stall timer. Repeated motion does not. A 30-second fallback cap is a
+truncation with a value bootstrap from the final observation.
+
+```bash
+python scripts/export_fast_scene.py --base-scene /path/to/base-scene \
+  --output /path/to/near-scene --camera-distance .15
+python scripts/train_harvest_fast.py --scene /path/to/near-scene \
+  --eval-scene /path/to/fast-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --initialize-from /path/to/student.pt --output /path/to/new-harvest-run \
+  --worlds 4096 --minibatch-worlds 512 --steps 64 --train-seconds 3600 \
+  --stall-seconds 4 --max-episode-seconds 30 --wandb-mode online
+FAST_SCENE=/path/to/near-scene GAIT_CHECKPOINT=/path/to/verified-gait.pt \
+  python -m unittest tests.test_harvest_training tests.test_fast_ppo \
+  tests.test_fast_task tests.test_fast_start_pose
+```
+
+The closer pose changes only the six arm joints and their initial motor targets.
+The `potential-harvest/v1` reward uses `gamma * Phi(next) - Phi(current)`
+with gamma 0.999, matching PPO. Phi is bounded from 0 to 8: attached reach
+credit (0–1 within 25 cm), current sustained grasp (2), and retained detachment
+(4 plus 0–2 for proximity to the basket within 1 m). These scales are engineering
+choices. Losing the grasp removes its credit; unheld falling fruit earns no
+carry credit. True terminals (including stalls) set the next potential to zero;
+hard timeouts retain it and bootstrap. There are no permanent event bonuses.
+The fixed guidance scale stays constant during training. The physical objective
+remains +20 collection, -5 failure, -0.5 stall and -0.001 per control step.
+Task and shaping means are logged separately. Evaluation uses guidance zero.
+This closes reward-accounting loopholes; successful learning is not yet proven.
+Checkpoint selection
+prioritizes success, then fewer physical failures, grasp rate, and approach
+distance; raw detachment rate cannot select a destructive policy. Bilateral contact requires
+more than 0.2 N on both actual finger/jaw bodies. This is a contact proxy, not
+proof of secure retention. Physical success still requires detached fruit settled
+inside the basket without hand contact. Evaluations complete one unguided episode
+per world from the separate, farther scene; identical starts do not establish
+generalization. Up to three PPO epochs reuse each buffer, with a KL stop and
+discount 0.999 at 50 Hz. W&B and local JSONL report complete-episode outcomes.
+The wall-time training budget excludes startup compilation and initial evaluation;
+the final evaluation can add a few seconds. No successful harvest is claimed by
+the launcher itself.
+
+The fast profile now uses a 1 N·m jaw torque cap. The previous 0.3 N·m cap failed
+the actual-mesh rigid-fruit hold fixture at both 200 and 500 Hz. The 1 N·m native
+fixture held within 7.6 mm; the GPU fixture held within 7.4 mm with bilateral
+contact throughout the hold and released on opening at both rates. The GPU
+matrix latched no numerical failures. Reproduce it with
+`python scripts/check_fast_grip.py --relic /path/to/relic --output /path/to/new-grip-report.json`.
+The matrix deliberately retains the failing 0.3 N·m cases. This is a grip
+bench result, not a full harvesting demonstration. The 15 N engineering limit
+applies separately to each jaw and to the non-pad robot-contact group. Previously
+the combined load from both jaws was compared against this per-jaw limit.
+Legacy controller defaults remain unchanged. The checkpoint records the fast
+torque and force-limit profile.
+
+Harvest training limits joint-target increments to 0.5 rad/s by default
+(`--arm-speed-rad-s`), compared with 2.5 rad/s in the historical reaching
+benchmark. This reduces abrupt approaches without changing the robot's collision
+geometry, torque limits or the damage threshold. The rollout renderer reads this
+control rate from the checkpoint. A six-second deterministic probe of the earlier
+destructive policy avoided its original 0.54-second impact at the lower rate;
+it also made no contact, so this is not a demonstrated grasp. Failed runs write
+`failure.json` as well as their log and failed W&B status.
+
+The first sustained run stopped after 960 seconds because the contact solver
+reached its 20-iteration limit, not because a contact buffer filled. `FastRuntime`
+now permits up to 100 solver iterations with the existing early-convergence
+tolerance. Backend failure bits are latched across resets and decoded in a compact
+error report. Nonfinite state, capacity overflow and solver-limit failures still
+stop training. Checkpoints record this runtime solver override; older video replays
+retain their original 20-iteration setting.
+
+The later retry exhausted MJWarp 3.13.0's 24-edge EPA horizon scratch buffer.
+The fast runtime increases only that pinned convex-collision allocation to 48;
+it does not suppress overflow or change collision surfaces. The original failing
+state was not saved, so passing short checks does not prove long-run stability.
+New training failures preserve up to eight flagged worlds at detection before
+episode reset; these are diagnostic states, not exact first-failure substeps.
+
+Camera audit after the retry found a dynamic-rendering bug: the GPU sensor did
+not refit its scene BVH after motion, so moved fingers or fruit could be missed.
+`WarpRGBDRig.capture` now refits before each render. The moving-occluder regression
+fails on the old implementation and passes with the fix. Earlier RGB-D training
+runs therefore do not validate realistic moving occlusion. At replay frame 23
+(0.92 s), the native view has 77% moving-finger coverage; the old GPU view incorrectly
+sees the fruit through it. The corrected GPU view restores the occlusion. This
+does not validate the imported finger mesh against physical camera footage.
+
+The historical fast harvesting runs trained the sensor-only reaching architecture
+directly with PPO. Privileged simulator state supplied rewards and evaluation,
+not teacher actions or distillation targets. Those runs were not the planned
+teacher-to-student pipeline. The new explicit teacher role trains a privileged
+recurrent actor and critic with the same seven actions and physical evaluator.
+Student distillation uses a frozen learned teacher on states visited by the
+sensor-only student. It requires successful evaluation evidence for the exact
+teacher checkpoint; an unverified scripted controller is not a substitute.
+
+The `--curriculum` teacher profile uses bounded, non-potential milestone credit
+for best-so-far reaching, sustained grasp, held detachment, carrying and physical
+basket settling. Credit is paid once per episode/progress increment and capped
+at four; it is not erased by a later stall. These are learning rewards, not full
+harvest success. All skills remain rewarded in every stage. Stage weights advance
+only after unguided evaluation demonstrates grasping and safe held detachment.
+The task still requires physically settled fruit in the basket for success.
+
+The production curriculum run initializes the actor from checkpoint 205, resets
+the critic head and uses fresh independent PPO/CTI Adam optimizers. It uses
+`--steps 128 --minibatch-worlds 256 --gae-lambda .99 --entropy-coef .001`
+with 4096 worlds. PPO remains on-policy with independent action samples; coherent
+multi-step action exploration occurs in CTI. CTI has `--cti-time-fraction .2`.
+Both optimizers are saved for exact resume. CTI updates must reduce target error
+as well as meet the factual KL limit, otherwise model and auxiliary Adam roll back.
+This is not proof of convergence; unguided physical evaluations determine progress.
+
+Selective counterfactual training v5 uses actual PPO rollout decision points.
+`--cti --cti-worlds 16 --cti-every-seconds 0` continuously collects one selected
+16-world root batch per PPO buffer, mixing nearest-fruit and rotating worlds.
+The bounded queue retains up to eight batches and expires old policy versions.
+Each root records source world/episode/tick, controller and physics state, GRU
+memory, task progress, RNG metadata, frozen policy weights and actual actions.
+Contact/failure/stall events in the recorded segment raise its search priority.
+No independent CTI pilot episodes are generated.
+
+A separate small runtime executes the selected PPO states. It replays recorded
+actions and gait commands for the factual prefix (64 steps / 1.28 seconds in the
+main profile), then continues with that root's frozen policy. Every factual
+step checks joint state, controller targets, physical task flags and episode
+termination; mismatched roots cannot teach. The first replay step uses strict
+physical-unit tolerances; later contact drift permits 2 mm base, 10 mm fruit-center
+and 0.01 rad joint error, while discrete task outcomes and task rewards must match.
+Twelve two-second alternatives sample all seven controls without scripted skills,
+using seeded Gaussian residuals with 0.5/1/2 scales and 8/32/100-step blocks.
+Broad proposals retain a generic variance floor when policy variance collapses.
+Four-second searches use matched continuation noise and a second confirmation.
+Source identities, replay failures, queue counts and applied updates are logged.
+This is bounded sampling from each PPO buffer, not branching every transition.
+
+Scores combine discounted task reward with a bounded progress estimate retained
+through the final half-second. Partial improvements require continuation after
+the intervention and progress over both the root and baseline. Physical failures,
+lost fruit and unheld detachment cannot win. True terminal stalls have no leaf
+bonus. This short-horizon curriculum is a deliberate heuristic, not evidence of
+successful harvesting or an invariant reward transformation.
+
+Confirmed sampled actions feed a separate imitation update after factual PPO;
+branch rows never enter PPO. A factual-policy KL check rolls back both model and
+Adam state above 0.01 or on nonfinite updates. W&B separates selected candidates,
+applied updates and rejected updates. `cti-branches.jsonl` records branch scores
+and rejection reasons, sampled-plan seeds/scales/durations, and score differences
+against the factual path. Auxiliary updates report target error before and after
+the retained update (after rollback if rejected). CTI targets 10% amortized wall time; one round can overshoot.
+The one-hour budget includes CTI work. A matched-compute control remains necessary
+to measure learning benefit. Student observations and distillation gates are unchanged.
+
+To resume, use the same output directory and arguments plus `--resume-from` and
+`--wandb-run-id` for online W&B. The checkpoint must match the latest logged
+update. Weights, Adam, RNG and counters resume; physical episodes reset. The total
+`--train-seconds` budget includes prior logged training time, excluding the pause.
+The dashboard marks `phase-events.jsonl` boundaries. Create `pause-request.json`
+in the run directory to request a checkpoint and clean stop after the next update.
+
+Train the privileged recurrent teacher on a training scene and evaluate it on a
+distinct held-out scene. The report includes the exact checkpoint hash, episode
+count and unguided physical success. Student DAgger requires that report to show
+at least 32 held-out episodes, at least 50% success and no numerical failures;
+it does not start automatically.
+The current farther-pose evaluation scene has the same orchard layout; passing
+that screen alone does not establish generalization to new orchard geometry.
+
+```bash
+python scripts/train_harvest_fast.py --role teacher --scene /path/to/train-scene \
+  --eval-scene /path/to/held-out-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --output /path/to/teacher-run --eval-worlds 32 --teacher-min-eval-episodes 32
+python scripts/train_harvest_fast.py --role student --scene /path/to/train-scene \
+  --eval-scene /path/to/held-out-scene --gait-checkpoint /path/to/verified-gait.pt \
+  --teacher-checkpoint /path/to/teacher-run/checkpoint-000123.pt \
+  --teacher-report /path/to/teacher-run/report.json --output /path/to/student-run
+```
+
+`scripts/probe_fast_harvest.py` tests privileged scripted IK waypoints through
+the actual fast runtime. It never changes fruit poses or adds a hand attachment.
+Its reports distinguish sustained grasp, detachment and physical success; its
+recorded states are diagnostic evidence, not accepted imitation demonstrations.
+
+On the JP RTX 5090, the 4096-world / 512-world optimizer batch profile measured
+about 157,000 policy transitions/s including PPO updates (three-update screen,
+64 steps per rollout, 200 Hz physics, 25 Hz 64x64 RGBD). All collected samples
+were used for optimization. This is a single-fruit approximate reaching workload;
+more fruit, higher camera resolution or longer episodes can change throughput.
+The numerical checks passed, but no successful harvest was observed. A ten-update
+screen also showed worse reaching distance despite lower loss; do not select a
+policy by loss alone. Live experiment metrics are in
+[W&B](https://wandb.ai/juampab/Thekenyos).
+
+`scripts/check_deformable_backend.py` checks real flex contact against ground,
+other flex fruit, and the original Spot hand meshes. Its `grip` case closes the
+jaw, applies gravity, holds, opens, and checks release. Device-side checks latch
+solver overflow, nonfinite state, element inversion, jaw/palm loads and the
+first ground contact across physics substeps. Native CPU reports provide an
+independent comparison.
+
+```bash
+python scripts/check_deformable_backend.py --relic /path/to/relic \
+  --case grip --backend gpu --count 9 --seconds 4 --iterations 1000 \
+  --contact-time .002 --normalize-meshes --output /path/to/new-report.json
+```
+
+This command is a development screen and may fail. Reports explicitly contain
+`training_ready: false`; passing a contact screen does not prove full robot
+balance, safe fruit handling, backend equivalence, or an overnight-ready trainer.
+The current numerical profiles still need complete validation, including force
+spikes, release behavior and timestep sensitivity. Failed reports are retained.
+
+Full-scene bring-up is separate from those hand fixtures. The legacy exporter
+can now retain a floating base and compliant canopy, restore visual foliage,
+and record attachment markers plus the imported joint/effort contract. The
+isolated assembler replaces the rigid fruit with independent full-DOF flex
+meshes and collidable segmented stalks. Stem point connections attach to the
+canopy and fruit material nodes, never to the hand. Asset hashes and initial
+body-frame comparisons guard scene transfer.
+
+Export with the unchanged legacy simulation environment:
+
+```bash
+python scripts/export_training_scene.py --relic /path/to/relic \
+  --output /path/to/new-base-scene --fruit-count 1
+```
+
+Assemble and check with the isolated deformable environment:
+
+```bash
+python scripts/export_training_scene.py --base-scene /path/to/new-base-scene \
+  --output /path/to/new-flex-scene
+python scripts/check_training_scene.py --scene /path/to/new-flex-scene \
+  --output /path/to/new-diagnostic --backend gpu --worlds 2 --seconds .1 --render
+```
+
+These are bring-up commands, not the overnight launcher. `--gait-checkpoint`
+accepts a checksum-verified CPU RELIC import for pretrained inference. Both
+native and device torque controllers preserve the original raw R84 units,
+absolute arm targets, and knee effort/speed limits. The initial gait precision
+profile uses CPU FP32 inference; GPU physics and sensing remain batched.
+
+### Compact physical reaching experiment
+
+`scripts/train_physical_smoke.py` connects the GPU deformable scene to a compact
+RGB-D/R84 recurrent actor and critic. It applies seven bounded arm/jaw target
+increments, learns from measured TCP-to-fruit progress, and saves both policy
+and optimizer state. Fruit geometry supplies training rewards and optional teacher labels; the actor
+receives camera pixels and robot measurements. This is a reaching experiment,
+not a completed grasp, detachment, basket-deposit or multi-fruit policy.
+
+```bash
+python scripts/train_physical_smoke.py --scene /path/to/flex-scene \
+  --contact-gate /path/to/gpu-grip-report.json \
+  --gait-checkpoint /path/to/verified-g1-cpu.pt \
+  --output /path/to/new-reach-run --worlds 1 --steps 8 --updates 2
+```
+
+For a short imitation warm start, add `--algorithm imitation
+--imitation-epochs 100 --steps 32`. A scripted Jacobian teacher generates motor
+targets through the same controller and physical scene. Its simulator state is
+used for training labels only. The student still receives RGB-D and R84, and
+the before/after evaluations run without the teacher. `teacher_improved` checks
+measured progress and absence of a fall; a lower imitation loss alone does not
+prove a useful reach. One seed and one fruit do not establish generalization.
+Changing algorithms on resume requires `--allow-algorithm-change`.
+For a new scene, `--initialize-from /path/to/checkpoint.pt` transfers only student
+weights and starts a fresh optimizer. It records the source model hash; it is
+not a resume of the old scene.
+
+Use the isolated GPU environment. Start with one GPU world. Repeated episodes
+have produced nonfinite states after cached resets, including single-world runs;
+the trainer therefore creates a fresh simulation for each episode. The tested
+hackathon profile also uses `--static-canopy`, a count-5 fruit mesh, the Newton
+solver, 20 microsecond physics steps and 2 ms contact response. Use
+`--stem-segments 1` when assembling the hackathon scene. The four-segment stem
+failed near-fruit motion even after increasing collision buffers; the one-segment
+replay completed 32 control steps with no numerical failure or fall. It preserves
+stalk length and total mass. The robot, fruit and stalk remain dynamic. The contact report must match the scene's
+solver, timestep, contact settings and fruit mesh count. The explicit hackathon
+screen permits up to 2 mm sampled hand/fruit overlap, retaining the original
+strict result and any sampling limits. It still rejects numerical failures,
+failed retention and failed release. This is an engineering approximation,
+not fruit-material calibration.
+
+Each update checks changed vision and action weights without an entropy bonus,
+then verifies exact checkpoint reload. `--resume /path/to/checkpoint-NNNN.pt`
+restores optimizer and RNG state and starts a fresh episode in a new output
+directory. Mid-contact replay is not implemented. The final `report.json`
+contains deterministic sensor-only evaluation and `policy-camera.png` shows
+the actual policy input. New exports use the integrated Spot gripper RGB camera
+on the wrist, from the pinned RELIC nominal sensor frame and published
+60.2° horizontal × 46.4° vertical FOV. The invented mast camera is removed.
+Fast training samples this view at 64 × 48. This is nominal geometry, not
+per-robot calibration; depth remains ideal registered geometric depth, not
+a calibrated ToF sensor. The wrist visual mesh has a local camera aperture; the rest of the housing,
+fingers and scene occlude RGB and depth normally. Collision meshes stay intact. Historical mast-camera checkpoints are incompatible
+with the new training camera. The legacy `train_kiwi.py` remains a separate scaffold.
+
+Verified JP experiment: `physical-imitation-001/checkpoint-0001.pt` learned from
+one physical teacher rollout with 100 supervised passes. On the one-segment
+stem scene, `physical-imitation-eval-stem1-001` replayed that student without a
+teacher: mean TCP-to-fruit-vertex distance fell from about 0.82 m to 0.061 m,
+then rose to 0.507 m. This is an approach with overshoot, not a grasp or a held
+reach. Minimum element-volume ratio was 0.922 and the robot did not fall.
+The old four-segment evaluations remain archived as numerical failures.
+`scripts/diagnose_physical_reach.py` saves actual GPU states for rendering and
+records both checkpoint and evaluated scene hashes when transferring weights.
+
+The GPU RGB-D rig reads metric planar depth directly. The renderer's public
+`get_depth` utility is display-normalized and clipped, so it must not be used as
+metric sensor depth. Tests cover a plane beyond one metre, inactive camera-ID
+mapping, range masks, and frame-buffer ownership. Camera mounts and range
+parameters remain virtual engineering assumptions, not hardware calibration.
+
+MJWarp's mesh/flex rejection test can apply an imported mesh center twice and
+miss fixed-jaw contacts. `scene.normalize_collision_meshes` avoids this by
+normalizing mesh coordinates while verifying unchanged world-space surfaces,
+body mass, center of mass and inertia tensors. It neither simplifies colliders
+nor edits external RELIC assets. Valid geom IDs also take precedence over stale
+flex IDs when interpreting mixed rigid/flex GPU contacts, matching the solver.
+
+The RELIC import checks all 10,000 observations, identical copied weights, and
+finite outputs. Its approved numerical comparison uses
+`abs(error) <= 1e-5 + 2e-6 * abs(reference)` to account for floating-point rounding;
+this is separate from the physical gait benchmark. A CUDA parity failure still
+blocks that import rather than producing an accepted actor.
+
 ## Continue the project
+
+See the [RL implementation specification](docs/rl-blueprint.html) (Spanish) for
+the proposed end-to-end RGB-D policies, concurrent low-learning-rate RELIC
+adaptation, tensor contracts, task curriculum and acceptance criteria. Open the
+HTML locally in a browser; it works offline and includes a print/PDF layout.
+`treesim/kiwi_rl/` scaffolds its contracts (schemas, reward ledger, arbiter,
+model interfaces, single-env wrapper) with `scripts/train_kiwi.py --dry-run`;
+optimisation, cameras and RELIC retraining remain integration work.
+`scripts/check_relic_parity.py --relic ../relic` gates the pinned ONNX policy
+(contract [1,84]->[1,12], finiteness, determinism) against an external checkout.
+Torch actors/critics/PPO (`treesim/kiwi_rl/models_torch.py`, `ppo.py`), the Spot
+camera rig (`sensors.py`), arm IK (`arm_ik.py`) and the jp runbook
+(`docs/jp-runbook.md`) are ready for the training host; CPU-only machines run
+the numpy contracts and `--dry-run` only.
 
 The agreed sequence is: finish native physics checks; define the shared
 observation/action interface and recorder; check full-cycle reachability and
@@ -637,3 +1362,136 @@ available; see the [upstream documentation](docs/orchardbench-upstream.md) and
 [Apache-2.0 license](LICENSE). RELIC assets have separate terms. Do not copy
 external model weights, robot meshes or research PDFs into this repository
 without checking their licenses.
+
+### Live reward/CTI run dashboard
+
+For the fresh reward-graph and CTI v7 run, run locally:
+
+```bash
+python3 scripts/training_dashboard.py --run teacher-graph-cti-001 --cache output/graph-dashboard
+```
+
+Open `http://127.0.0.1:8765`. This standard-library server polls JP every five
+seconds and shows physical outcomes, reward components, throughput, CTI comparisons,
+and a cached rollout of the best evaluated checkpoint with the arm-camera inset.
+Changed best checkpoints render no more often than every three minutes. Video is
+recorded, not a live camera feed. Render errors retain the previous video. The
+server binds only to localhost; SSH access to `jp` is required. Use `--no-render`
+for metrics only. Run selection is explicit; the server reads the active PID and the renderer source from run metadata.
+Run `python3 -B -m unittest tests.test_training_dashboard -v` for the focused checks.
+
+### Temporal reward graph and all-branch CTI
+
+The current hackathon teacher uses `--reward-graph --cti`. See
+[the reward contract](docs/reward-graph.md) for the six stages, physical gates,
+partial ground-drop credit and two-second basket settling. The graph shapes
+training reward; it does not choose actions or become a sensor-student input.
+
+CTI v7 replicates 32 actual PPO roots into 416 GPU worlds, runs three refinement
+passes, and learns from all replay-valid branch transitions using a separate
+V-trace actor/critic optimizer. Worse outcomes and physical failures are included.
+The search samples all seven controls, keeps an unbiased comparison branch,
+and preserves broad mutations. It does not prescribe jaw closure or harvesting
+motions. A mean factual KL limit and rollback constrain auxiliary updates.
+
+```bash
+python scripts/train_harvest_fast.py --role teacher \
+  --scene "$FAST_SCENE" --eval-scene "$EVAL_SCENE" \
+  --gait-checkpoint "$GAIT_CHECKPOINT" --output training/runs/teacher-graph-cti-001 \
+  --reward-graph --worlds 4096 --steps 128 --minibatch-worlds 256 \
+  --gae-lambda .99 --entropy-coef .001 --cti --cti-worlds 32 \
+  --cti-alternatives 12 --cti-search-iterations 3 --cti-time-fraction .2 \
+  --train-seconds 3600 --wandb-mode online
+```
+
+Omitting initialization/resume flags starts fresh harvest actor and critic weights
+and both optimizers; the fixed gait checkpoint remains reused. Preserve old runs.
+The CTI time fraction is an amortized cap; an individual search can overshoot it.
+
+Focused checks: `tests.test_reward_graph`, `tests.test_cti_learning`,
+`tests.test_branch_cti`, `tests.test_counterfactual_replay`,
+`tests.test_harvest_training`, `tests.test_fast_task`, and
+`tests.test_training_dashboard`. Set `CTI_GPU_TEST=1`, `FAST_SCENE`, and
+`GAIT_CHECKPOINT` for the real PPO-to-CTI GPU test. The full-size integration
+check processed 249,600 branch transitions in 4.88 s including learning, used
+40 accepted optimizer steps, and rejected zero replay roots. That demonstrates
+working data flow and throughput, not improved harvesting.
+
+### Continuous graph v2 run
+
+`teacher-graph-cti-002` starts fresh harvesting weights and both optimizers,
+with the fixed gait reused. The corrected graph removes the approach plateau,
+settles the physical reset, recognizes accumulated progress and recovery, and
+records stage-level progress/reward and actual control behavior. CTI v8 uses
+six-second eligible PPO roots and bounded-action entropy. The previous run is
+preserved at checkpoint 338. See docs/reward-graph.md for the versioned contract.
+
+Use the graph command above with `--stall-seconds 8 --max-episode-seconds 30`
+and a new output directory. Validate with `scripts/check_graph_training.py`
+using FAST_SCENE and GAIT_CHECKPOINT, plus the documented graph and CTI tests.
+The dashboard now renders latest and best evaluations separately.
+
+### Progressive sequence curriculum (current run)
+
+`train_sequence_fast.py` starts a fresh privileged PPO policy with CTI disabled.
+Each episode starts from the ordinary settled pose, with small seeded arm-pose
+variation. The robot base is fixed at its authored home pose; legs hold their
+settled motor targets. Arm and fruit dynamics remain physical.
+There are no demonstrations, scripted harvesting actions, or stage-state resets.
+
+The objectives are: position the kiwi between the jaws; sustain bilateral loaded
+contact; detach while grasping; carry above the basket while holding; release and
+settle inside the basket for two seconds. A rollout must achieve every preceding
+checkpoint in order. Earlier events are remembered; grasp must remain valid during
+extraction and transport, and can end during a valid release. A drop elsewhere
+cannot become a successful harvest. Two fresh validation trials from the training distribution must each reach 90%
+prefix success in two consecutive evaluations before the next objective unlocks.
+Each trial uses 32 varied initial poses. A separate held-out scene measures
+generalization and does not control curriculum promotion.
+
+The old aperture-width closure score is replaced with distances between the
+actual convex jaw collision meshes and the fruit, computed by the pinned MJWarp
+GJK support maps. Sustained contact, slip, load, and the physical detachment event
+still decide validity. Sequence v2 pays one point immediately on each first valid
+unlocked checkpoint. These payments stay unchanged when the next objective unlocks.
+Dense feedback is the change in a separate live-quality balance capped at 0.25;
+grasp guidance retains insertion and opposing-jaw alignment. Failure clears that
+live balance and costs 0.25. The total time cost is at most 0.1 per episode.
+Stationary poses and repeated checkpoints pay nothing. Gamma is 1, and the finite
+30-second deadline is terminal without critic bootstrap. Safe quality remaining
+at the deadline is explicit partial credit, bounded by 0.25. Success clears live
+credit. This is curriculum guidance, not policy-invariant shaping or a guarantee
+that the policy cannot forget. Inactivity remains diagnostic.
+
+```bash
+python scripts/export_fixed_base_scene.py --scene /path/to/harvest-near-001 \
+  --output /path/to/sequence-near-001
+python scripts/export_fixed_base_scene.py --scene /path/to/fast-occlusion-001 \
+  --output /path/to/sequence-holdout-001
+python scripts/train_sequence_fast.py \
+  --scene /path/to/sequence-near-001 --eval-scene /path/to/sequence-holdout-001 \
+  --gait-checkpoint /path/to/g1-cpu.pt --output /path/to/teacher-sequence-002 \
+  --worlds 1024 --steps 128 --minibatch-worlds 128 --train-seconds 28800
+```
+
+Each 131,072-transition rollout receives up to 24 actual Adam steps across three
+shuffled recurrent minibatch epochs, subject to a 0.02 KL guard. Factual replay is
+verified before the first mutation. Observations include the current objective,
+checkpoint history and timers. Checkpoints save the curriculum, actor, critic,
+Adam, counters and RNG. `--resume-from` requires the latest logged checkpoint and,
+for online W&B, its `--wandb-run-id`; it keeps the original total time budget.
+After promotion, 20% of training worlds rehearse earlier objectives, each from
+the normal initial pose. Evaluation always tests the current objective alone.
+`current_objective/*` separates training outcomes from shorter rehearsal episodes.
+`stage_event/*` counts paid achievements per batch; `stage_live/*` shows current
+guidance. `stage_reward/*` includes event payments and live-quality changes.
+`stage_loss/*` measures negative guidance changes, not optimizer loss.
+
+W&B and the dashboard show `curriculum/level`, `evaluation/prefix_success`,
+`evaluation/completed/{position,grip,extract,carry,deposit}`, conditional completion,
+per-stage progress rewards, actual optimizer steps and joint motion. Prefix success
+is distinct from `evaluation/success`, which means a complete physical harvest.
+The renderer reads the saved objective and policy schema. Archived graph profiles
+retain their existing scorer and observation schema. The archived sequence-v1
+run uses its frozen `sequence-001` source release; v2 checkpoints use a new schema
+and cannot resume a v1 optimizer.

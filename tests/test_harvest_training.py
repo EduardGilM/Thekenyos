@@ -1,0 +1,354 @@
+import os
+import unittest
+from unittest.mock import patch
+import torch
+from treesim.kiwi_rl.harvest_training import EpisodeProgress
+
+
+def state(distance=.2,basket=.8,grasp=False,detached=False,force=0.):
+    return dict(distance=torch.tensor([distance]),basket_distance=torch.tensor([basket]),
+        grasp=torch.tensor([grasp]),holding=torch.tensor([grasp]),detached=torch.tensor([detached]),touching=torch.tensor([grasp]),
+        stem_force=torch.tensor([force]),success=torch.tensor([False]),failed=torch.tensor([False]))
+
+
+class ProgressTest(unittest.TestCase):
+    def test_stalls_on_no_new_best_even_if_it_oscillates(self):
+        progress=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+        for distance in (.21,.20):
+            _,term,_,_=progress.step(state(distance),torch.tensor([False]));self.assertFalse(term.item())
+        _,term,_,stall=progress.step(state(.201),torch.tensor([False]))
+        self.assertTrue(term.item());self.assertTrue(stall.item())
+
+    def test_new_grasp_pull_and_carry_extend_episode_without_repeat_bonus(self):
+        progress=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+        zero=torch.tensor([False])
+        progress.step(state(),zero); progress.step(state(),zero)
+        reward,term,_,_=progress.step(state(grasp=True),zero)
+        self.assertFalse(term.item());self.assertGreater(reward.item(),1.)
+        repeat,*_=progress.step(state(grasp=True),zero);self.assertLess(repeat.item(),.01)
+        progress.step(state(grasp=True,force=1.),zero);self.assertEqual(progress.stale.item(),0)
+        progress.step(state(grasp=True,detached=True),zero)
+        progress.step(state(grasp=True,detached=True,basket=.7),zero)
+        self.assertEqual(progress.stale.item(),0)
+        # Timeout is a truncation, not a physical or stalled terminal.
+        progress.max_steps=int(progress.age.item())+1
+        _,term,truncated,_=progress.step(state(grasp=True,detached=True,basket=.6),zero)
+        self.assertFalse(term.item());self.assertTrue(truncated.item())
+
+    def test_reset_clears_episode_history(self):
+        p=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+        p.step(state(grasp=True,detached=True),torch.tensor([False]))
+        p.reset(torch.tensor([True]),state())
+        self.assertFalse(p.ever_grasp.item());self.assertEqual(p.age.item(),0)
+
+    def test_past_grasp_does_not_make_unheld_stem_load_progress(self):
+        p=EpisodeProgress(state(grasp=True),stall_steps=3,max_steps=20)
+        zero=torch.tensor([False])
+        p.step(state(grasp=True),zero)
+        slipped=state(grasp=True,force=2.)
+        slipped['touching']=torch.tensor([False])
+        slipped['holding']=torch.tensor([False])
+        p.step(slipped,zero)
+        self.assertEqual(p.stale.item(),1)
+        self.assertEqual(p.best_force.item(),0)
+
+    def test_damaging_detachment_never_gets_positive_guidance(self):
+        for grasp in (False, True):
+            p=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+            hit=state(distance=.01,grasp=grasp,detached=True)
+            hit['touching']=torch.tensor([True])
+            hit['failed']=torch.tensor([True])
+            reward,term,_,_=p.step(hit,torch.tensor([True]))
+            self.assertTrue(term.item())
+            self.assertLessEqual(reward.item(),-5.)
+
+    def test_touching_without_current_grasp_does_not_earn_detachment_bonus(self):
+        p=EpisodeProgress(state(),stall_steps=3,max_steps=20)
+        hit=state(detached=True,grasp=True)
+        hit['holding']=torch.tensor([False])
+        # An earlier grasp can be logged, but it is not a retained detachment.
+        p.ever_grasp[:]=True
+        reward,*_=p.step(hit,torch.tensor([False]))
+        self.assertLess(reward.item(),0.)
+
+    def test_failed_sequence_cannot_keep_grasp_and_detachment_credit(self):
+        initial=state(distance=.1)
+        p=EpisodeProgress(initial,stall_steps=100)
+        sequence=[state(distance=.1,grasp=True),
+                  state(distance=.1,grasp=True,detached=True),
+                  state(distance=.1,grasp=True,detached=True)]
+        sequence[-1]['holding'][:]=False
+        sequence[-1]['failed'][:]=True
+        total=base=0.
+        for i,now in enumerate(sequence):
+            reward,*_=p.step(now,torch.tensor([i==2]))
+            total+=p.gamma**i*reward.item()
+            base+=p.gamma**i*p.task_reward.item()
+        self.assertLess(total,0.)
+        self.assertAlmostEqual(total,base-p.potential(initial).item(),places=5)
+
+    def test_terminal_shaping_telescopes_for_success_failure_and_stall(self):
+        # Different paths to the same terminal outcome cannot keep subgoal credit.
+        for outcome in ('success','failure','stall'):
+            for grasp in (False,True):
+                initial=state()
+                p=EpisodeProgress(initial,stall_steps=100)
+                total=base=0.
+                for i in range(5):
+                    now=state(distance=.02,grasp=grasp,detached=grasp,basket=.1)
+                    final=i==4
+                    if final and outcome=='stall': p.stall_steps=1
+                    now['success'][:]=final and outcome=='success'
+                    now['failed'][:]=final and outcome=='failure'
+                    reward,term,_,_=p.step(now,torch.tensor([final and outcome!='stall']))
+                    self.assertEqual(term.item(),final)
+                    total+=p.gamma**i*reward.item()
+                    base+=p.gamma**i*p.task_reward.item()
+                self.assertAlmostEqual(total,base-p.potential(initial).item(),places=5)
+
+    def test_unheld_fall_does_not_earn_credit_or_extend_stall(self):
+        initial=state(detached=True)
+        p=EpisodeProgress(initial,stall_steps=3)
+        for basket in (.6,.4,.2):
+            reward,_,_,stalled=p.step(state(detached=True,basket=basket),torch.tensor([False]))
+            self.assertLess(reward.item(),0.)
+            self.assertEqual(p.shaping_reward.item(),0.)
+        self.assertTrue(stalled.item())
+
+    def test_lost_grasp_removes_credit_and_regrasp_cannot_farm_it(self):
+        initial=state(grasp=True,detached=True)
+        p=EpisodeProgress(initial)
+        lost=state(grasp=True,detached=True);lost['holding'][:]=False
+        first,*_=p.step(lost,torch.tensor([False]))
+        self.assertLess(first.item(),-2.)
+        second,*_=p.step(initial,torch.tensor([False]))
+        self.assertLess((first+p.gamma*second).item(),0.)
+
+    def test_timeout_keeps_potential_for_bootstrap_and_reset_is_clean(self):
+        initial=state()
+        p=EpisodeProgress(initial,max_steps=1)
+        now=state(grasp=True)
+        reward,term,truncated,_=p.step(now,torch.tensor([False]))
+        self.assertFalse(term.item());self.assertTrue(truncated.item())
+        expected=p.gamma*p.potential(now)-p.potential(initial)-.001
+        torch.testing.assert_close(reward,expected)
+        p.reset(torch.tensor([True]),initial)
+        reward,*_=p.step(initial,torch.tensor([False]))
+        torch.testing.assert_close(reward,(p.gamma-1)*p.potential(initial)-.001)
+
+    def test_guidance_off_is_only_physical_objective(self):
+        p=EpisodeProgress(state(),guidance=0.)
+        reward,*_=p.step(state(grasp=True,detached=True),torch.tensor([False]))
+        self.assertAlmostEqual(reward.item(),-.001,places=6)
+        self.assertEqual(p.shaping_reward.item(),0.)
+
+    def test_checkpoint_selection_rejects_destructive_detachment(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+        from train_harvest_fast import evaluation_score
+        intact=dict(success=0.,physical_failure=0.,grasp=0.,closest_distance_m=.2)
+        destructive=dict(success=0.,physical_failure=1.,grasp=1.,closest_distance_m=.01)
+        self.assertGreater(evaluation_score(intact),evaluation_score(destructive))
+
+
+class CurriculumProgressTest(unittest.TestCase):
+    @staticmethod
+    def progress(initial=None, **kwargs):
+        from treesim.kiwi_rl.harvest_training import CURRICULUM_PROFILE
+        return EpisodeProgress(state() if initial is None else initial,
+                               reward_profile=CURRICULUM_PROFILE, **kwargs)
+
+    def test_milestone_survives_stall_and_does_not_repeat_after_regrasp(self):
+        p = self.progress(stall_steps=3)
+        no = torch.tensor([False])
+        p.step(state(grasp=True), no)
+        self.assertAlmostEqual(p.shaping_reward.item(), 1.5)
+        for now in (state(), state(grasp=True), state(grasp=True)):
+            _, _, _, stalled = p.step(now, no)
+            self.assertEqual(p.shaping_reward.item(), 0.)
+        self.assertTrue(stalled.item())
+        self.assertEqual(p.curriculum_credit.item(), 1.5)
+        self.assertFalse(p.previous['success'].item())
+
+    def test_best_reach_progress_cannot_be_farmed_by_oscillation(self):
+        p = self.progress()
+        bonuses = []
+        for distance in (.15, .2, .15, .1):
+            p.step(state(distance=distance), torch.tensor([False]))
+            bonuses.append(p.shaping_reward.item())
+        self.assertAlmostEqual(sum(bonuses), .2, places=6)
+        self.assertEqual(bonuses[1:3], [0., 0.])
+
+    def test_failures_and_unheld_falls_never_earn_guidance(self):
+        for failed in (False, True):
+            p = self.progress()
+            now = state(distance=.01, basket=.01, detached=True, grasp=failed)
+            now['failed'][:] = failed
+            p.step(now, torch.tensor([failed]))
+            self.assertEqual(p.shaping_reward.item(), 0.)
+            self.assertFalse(p.curriculum_detach_paid.item())
+            self.assertFalse(p.ever_held_detach.item())
+
+    def test_full_cycle_available_in_every_stage_and_total_credit_bounded(self):
+        for stage in (0, 1, 2):
+            p = self.progress(state(distance=.25, basket=1.), curriculum_stage=stage)
+            p.step(state(distance=0., basket=1., grasp=True), torch.tensor([False]))
+            self.assertTrue(p.curriculum_grasp_paid.item())
+            p.step(state(distance=0., basket=0., grasp=True, detached=True), torch.tensor([False]))
+            self.assertTrue(p.curriculum_detach_paid.item())
+            now = state(distance=0., basket=0., detached=True)
+            now['settle_time'] = torch.tensor([.5])
+            p.step(now, torch.tensor([False]))
+            self.assertAlmostEqual(p.curriculum_credit.item(), 4.)
+            self.assertGreater(p.shaping_reward.item(), 0.)
+            self.assertFalse(now['success'].item())
+            # Only the task oracle can set success and receive its task reward.
+            now['success'][:] = True
+            p.step(now, torch.tensor([True]))
+            self.assertAlmostEqual(p.task_reward.item(), 19.999, places=4)
+            self.assertLessEqual(p.curriculum_credit.item(), 4.)
+
+    def test_stage_change_only_applies_at_reset_and_clears_bonus_history(self):
+        p = self.progress()
+        p.step(state(grasp=True, detached=True), torch.tensor([False]))
+        p.curriculum_stage = 2
+        self.assertEqual(p.curriculum_stage_ids.item(), 0)
+        p.reset(torch.tensor([True]), state())
+        self.assertEqual(p.curriculum_stage_ids.item(), 2)
+        self.assertFalse(p.curriculum_grasp_paid.item())
+        self.assertFalse(p.curriculum_detach_paid.item())
+        self.assertFalse(p.ever_held_detach.item())
+        self.assertEqual(p.curriculum_credit.item(), 0.)
+
+    def test_guidance_off_preserves_task_only_reward(self):
+        p = self.progress(guidance=0.)
+        p.step(state(grasp=True, detached=True), torch.tensor([False]))
+        self.assertEqual(p.shaping_reward.item(), 0.)
+        self.assertAlmostEqual(p.task_reward.item(), -.001, places=6)
+
+    def test_safe_held_detach_metric_is_available_in_legacy_evaluation(self):
+        for held, failed, expected in ((True, False, True), (False, False, False), (True, True, False)):
+            p = EpisodeProgress(state(), guidance=0.)
+            now = state(detached=True, grasp=held)
+            now['failed'][:] = failed
+            p.step(now, torch.tensor([failed]))
+            self.assertEqual(p.ever_held_detach.item(), expected)
+
+
+class _CameraRuntime:
+    """Small CPU fake for collector camera delivery and reset semantics."""
+    def __init__(self, *, end_first_world=False):
+        self.worlds, self.device_name, self.control_dt = 2, 'cpu', .02
+        self.chassis, self.fruit_body = 0, 1
+        self.data = type('Data', (), {})()
+        self.data.xpos = torch.tensor([[[0., 0., 0.], [.2, 0., 0.]],
+                                       [[0., 0., 0.], [.2, 0., 0.]]])
+        self.data.xmat = torch.eye(3).repeat(2, 2, 1, 1)
+        self._distance = torch.tensor([.2, .2])
+        self.task = type('Task', (), {})()
+        for name in ('ever_grasped', 'stable_grasp', 'detached', 'hand_contact',
+                     'success', 'failed'):
+            setattr(self.task, name, torch.zeros(2, dtype=torch.bool))
+        self.task.stem_force = torch.zeros(2)
+        self.camera_frames = 0
+        self.step_count = 0
+        self.end_first_world = end_first_world
+
+    def reset(self, mask=None):
+        if mask is None:
+            mask = torch.ones(2, dtype=torch.bool)
+        self.task.success[mask] = False
+        self.task.failed[mask] = False
+
+    def observe(self):
+        return torch.zeros(2, 84)
+
+    def pixels(self):
+        self.camera_frames += 1
+        return torch.stack([torch.full((5, 2, 2), self.camera_frames * 10 + world)
+                            for world in range(self.worlds)])
+
+    def set_gait_actions(self, actions):
+        pass
+
+    def step(self, actions):
+        done = torch.zeros(2, dtype=torch.bool)
+        if self.end_first_world and self.step_count == 0:
+            self.task.success[0] = True
+            done[0] = True
+        self.step_count += 1
+        return None, None, done, {}
+
+    def check(self):
+        pass
+
+
+class _CameraPolicy:
+    def __init__(self):
+        self.inputs = []
+
+    def __call__(self, rgbd, obs, memory):
+        self.inputs.append(rgbd.clone())
+        return torch.zeros(2, 7), torch.zeros(7), torch.zeros(2), memory
+
+
+class CameraClockTest(unittest.TestCase):
+    def setUp(self):
+        import warp as wp
+        self.wp_patch = patch.object(wp, 'to_torch', side_effect=lambda value: value)
+        self.wp_patch.start()
+
+    def tearDown(self):
+        self.wp_patch.stop()
+
+    @staticmethod
+    def gait(obs):
+        return torch.zeros(2, 12)
+
+    def test_masked_episode_reset_keeps_other_world_camera_frame(self):
+        from treesim.kiwi_rl.harvest_training import HarvestCollector
+        runtime = _CameraRuntime(end_first_world=True)
+        policy = _CameraPolicy()
+        collector = HarvestCollector(runtime, role='student', stall_seconds=10., max_episode_seconds=20.)
+        collector.collect(policy, self.gait, 2, deterministic=True)
+        self.assertTrue(torch.equal(policy.inputs[0][1], policy.inputs[1][1]))
+        self.assertTrue(torch.all(policy.inputs[1][0] == 20))
+        self.assertTrue(torch.all(policy.inputs[1][1] == 11))
+
+    def test_odd_tick_bootstrap_uses_held_camera_frame(self):
+        from treesim.kiwi_rl.harvest_training import HarvestCollector
+        runtime = _CameraRuntime()
+        policy = _CameraPolicy()
+        collector = HarvestCollector(runtime, role='student', stall_seconds=10., max_episode_seconds=20.)
+        collector.collect(policy, self.gait, 1, deterministic=True)
+        self.assertEqual(runtime.camera_frames, 1)
+        self.assertTrue(torch.equal(policy.inputs[0], policy.inputs[1]))
+
+
+@unittest.skipUnless(os.environ.get('FAST_SCENE') and os.environ.get('GAIT_CHECKPOINT'),'JP scene and gait required')
+class PersistentGpuTest(unittest.TestCase):
+    def test_two_buffers_keep_physics_and_memory_and_replay_exactly(self):
+        import sys
+        from pathlib import Path
+        import warp as wp
+        from treesim.kiwi_rl.fast_runtime import FastRuntime
+        from treesim.kiwi_rl.harvest_training import HarvestCollector
+        from treesim.kiwi_rl.control import load_gait_artifact
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+        from train_fast import update
+        from train_physical_smoke import build_policy
+        wp.init();stream=torch.cuda.Stream()
+        with torch.cuda.stream(stream),wp.ScopedStream(wp.stream_from_torch(stream)):
+            rt=FastRuntime(os.environ['FAST_SCENE'],worlds=2,camera='hand_camera')
+            policy=build_policy().cuda(); gait=load_gait_artifact(os.environ['GAIT_CHECKPOINT']).cuda().eval()
+            c=HarvestCollector(rt,stall_seconds=4,max_episode_seconds=30)
+            c.collect(policy,gait,64,deterministic=True)
+            previous=c.memory.clone()
+            rows,bootstrap,episodes=c.collect(policy,gait,64,deterministic=True)
+            self.assertFalse(episodes)
+            torch.testing.assert_close(rows[0]['initial_memory'],previous)
+            self.assertFalse(rows[0]['reset'].any())
+            torch.testing.assert_close(wp.to_torch(rt.data.time),torch.full_like(wp.to_torch(rt.data.time),2.56),atol=1e-4,rtol=1e-4)
+            result=update(policy,torch.optim.Adam(policy.parameters(),lr=1e-4),rows,bootstrap,1)
+            self.assertLess(result['kl'],1e-6)

@@ -55,8 +55,9 @@ def main():
     p.add_argument('--closeup', action='store_true', help='Follow Spot for basket inspection')
     p.add_argument('--no-render', action='store_true')
     p.add_argument('--terrain', action='store_true',
-                   help='Place the pergola and Spot on a seeded kiwi orchard floor '
-                        '(slope, aisle/furrow profile, noise and friction).')
+                   help='Use seeded procedural terrain, selected by --terrain-kind.')
+    p.add_argument('--terrain-kind', choices=['noise', 'orchard'], default='noise',
+                   help='noise = continuous noise; orchard = legacy grassed aisles and slope')
     args = p.parse_args()
     if not np.isfinite(args.spill_torque) or args.frames <= 0 or args.substeps <= 0 or args.substeps % 2 or (args.video and args.no_render):
         p.error('Use positive --frames and enable rendering for --video')
@@ -78,6 +79,7 @@ def main():
     cfg.foliage.min_order_for_leaves = 2
     cfg.foliage.leaf_length, cfg.foliage.leaf_width = .22, .17
     cfg.physics.terrain = args.terrain
+    cfg.physics.terrain_kind = args.terrain_kind
     tree = builder.generate_and_build(cfg)
     sim = Sim(tree, fps=50, substeps=args.substeps, collisions=True)
     from treesim.basket import SpillTracker

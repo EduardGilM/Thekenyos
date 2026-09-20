@@ -127,3 +127,215 @@ Preserve other workloads. Keep caches and outputs on the SSD; the root disk is
 space constrained. Do not kill unrelated processes. First CUDA compilation can
 be slow; inspect the log before restarting a job. Desktop DISPLAY/XAUTHORITY
 values are session-specific, so verify them rather than hardcoding new scripts.
+
+## Isolated deformable training development
+
+The approved training work uses `training/envs/flex-gpu` under the existing SSD
+experiment root, separately from `conda/` and `pergola/`. Its candidate stack is
+MuJoCo/MuJoCo-Warp 3.13.0, Warp 1.15.0 and CUDA Torch 2.10.0. Do not upgrade the
+legacy environment to these versions. Dependency inputs are under
+`.devin/training/`; backend acceptance and the full training launcher are not yet complete.
+
+Run learning tests with `python -B -m unittest discover -s tests -p 'test_kiwi_rl_*.py' -v`.
+GPU monitor and mesh-frame tests require the isolated JP environment. A feature
+screen from `scripts/check_deformable_backend.py` is not a training-readiness report.
+
+MJWarp 3.13 flex contact filtering can reject offset jaw meshes because its
+mesh-convex bounding-sphere test adds the original mesh offset again. The
+`normalize_collision_meshes` helper normalizes authored mesh coordinates while
+checking world-space collision surfaces and mass/inertia invariance. Preserve
+its geometry-equivalence and actual GPU-contact regressions; do not substitute
+simpler gripper colliders or zero model fields without validation.
+
+In mixed rigid/flex GPU contacts, valid geom IDs take precedence over stale flex
+IDs, matching the solver. Use `contact_flex_ids` or the device observer rather
+than identifying fruit contact from `contact.flex` alone. Numerical overflow,
+nonfinite states and element inversion must remain latched across substeps.
+
+The isolated full-scene exporter has explicit options for floating-base and
+multi-fruit scene generation. Legacy fixed-base defaults remain unchanged.
+Preserve the initial-body-frame comparison and asset hashes. New assembled
+scenes use the supported native/GPU midphase path; do not change the legacy CPU
+contact-adapter bypass as part of this separate path.
+
+RELIC R84 values in `spot.py` are raw velocities and absolute arm targets:
+do not add Isaac-style scaling or subtract arm-home targets without evidence.
+MuJoCo spatial velocity is angular-first and COM-referenced differently from
+Newton. The native/device control tests compare the body COM velocity against
+an independent Jacobian and verify that optimizer changes reach motor commands.
+
+MJWarp `get_depth` produces clipped display-normalized values, not metric
+measurements. Use the raw planar-depth buffer and explicit range validity.
+Render-buffer camera indices refer to the active-camera list, not global model
+camera IDs. Preserve the non-square, inactive-camera, metric-plane and immutable
+frame tests. GPU scene/vision bring-up does not clear physical training gates.
+
+## Hackathon precision (user direction)
+
+Prioritize a working training demonstration over material calibration or fine
+mesh resolution. The current isolated profile uses coarse deformable fruit,
+static canopy supports, a one-segment collidable stalk, and a 2 mm sampled
+hand/fruit overlap screen. Keep the
+strict contact result visible, and keep failures for nonfinite state, overflow,
+inversion, retention and release. Do not reopen finer calibration as a blocker
+for this approved profile. Verify learned progress with the teacher disabled;
+one-fruit reaching is not a complete harvest or generalization result.
+
+## Fast hackathon training (approved approximation)
+
+The user explicitly approved a separate rigid-fruit bulk-training profile to
+maximize learning per GPU hour. Use `export_fast_scene.py`, `FastRuntime`, and
+`train_fast.py`: 200 Hz physics, 50 Hz policy/gait, and 25 Hz RGBD cameras by
+default. 500 Hz physics is also supported. Use CUDA FP32 pretrained gait in
+this profile. The existing detailed flex and legacy CPU profiles stay separate.
+Do not reopen tissue calibration or the older rigid/flex agreement gate as a
+blocker for this approved approximate profile. Do keep numerical failures,
+overflow, real collision loads, gravity, stem release, and world-local resets.
+The 8 N stem release and 15 N force-based damage limit are uncalibrated engineering
+assumptions, not biological measurements. Do not claim successful harvesting or
+policy improvement from throughput or lower optimizer loss. Evaluate the actor
+without privileged inputs and report physical outcomes separately.
+
+Use `train_harvest_fast.py` for sustained harvesting experiments. Its collector
+preserves physics and GRU memory across optimizer buffers; `train_fast.py` remains
+a short reaching benchmark. Keep best-so-far stall detection separate from the
+optimizer horizon and bootstrap hard timeouts from the final pre-reset state.
+Grasp metrics require sustained loaded contact on both actual finger/jaw bodies.
+Run `tests.test_harvest_training`, `tests.test_fast_ppo`, and `tests.test_fast_task`
+in the JP GPU environment with FAST_SCENE and GAIT_CHECKPOINT set after changes.
+
+The fast profile uses a 1 N·m jaw cap and a 15 N limit per jaw/non-pad contact
+group; legacy controller defaults remain separate. Teacher training uses the
+explicit `--role teacher` privileged actor/critic. Student distillation requires
+the exact teacher checkpoint and successful unguided evaluation report. Keep
+student observations RGB-D/R84 only and teacher parameters frozen during
+distillation. Run `tests.test_fast_teacher` for changes to this path.
+CTI requires replay acceptance and meaningful physical outcome comparisons, not
+a successful full harvest first. Early action-branch experiments may develop
+executor competence; keep their data separate from factual PPO. Process-local
+snapshots alone are not evidence of CTI policy training or benefit.
+CTI v5 roots must come from the actual PPO collector, with factual action replay
+and source episode/timestep/policy identifiers. Never substitute independently
+generated pilot trajectories. Reject targets when cross-runtime factual replay
+fails; preserve bounded queueing and frozen collection-policy continuations.
+Retained short-horizon progress remains an explicit curriculum heuristic.
+Keep matched-noise confirmation, real physical rejection, factual PPO separation,
+and policy plus optimizer rollback on auxiliary KL violations. Run
+`tests.test_selective_cti` with `CTI_GPU_TEST=1` and the scene/gait variables for
+CTI changes. Resume only at the latest logged checkpoint, preserve Adam and run
+identity, reset physical episodes explicitly, and keep the original time budget.
+
+## Continuous visual leaf roof
+
+The reproducible local capture and generation details are in README.md under
+"Continuous leaf roof (render-only)". Use `--canopy-spacing .08` for area-wide
+infill; increasing `--leaves` alone only thickens the existing sparse cane lines.
+The recipe uses a 3x3 post grid, scene seed 42, terrain seed 202 and 40 kiwis.
+`treesim/foliage.py::place_canopy_leaves` generates the seeded placements;
+`treesim/builder.py` attaches shared visual meshes to supported cane bodies.
+Keep this optional layer massless and non-colliding, with no extra bodies/DOFs;
+it is neither physical shoot growth nor PBR postprocessing. Default spacing zero
+preserves the original foliage, and apple placement must remain unaffected.
+The layer is capped at 100,000 leaves; use cropped plots rather than enabling it
+blindly over the commercial field. Run `python -B -m unittest tests.test_pergola -v`
+after changing it, and inspect a newly generated image as well.
+
+## Full-cycle teacher curriculum
+
+`--curriculum` explicitly selects bounded non-potential milestone guidance. Keep
+full harvest success tied to physical basket settling. Pay progress only once per
+episode and reject failed/unheld-detachment credit. Stage promotion uses unguided
+grasp and safe `held_detach`, never raw detachment alone. Snapshot all curriculum
+and held-detachment state for PPO-rooted CTI replay. PPO and CTI have separate Adam
+states; checkpoint both. CTI must decrease selected-target error as well as pass
+its KL guard. Preserve the prior completed run when warm-starting a new reward
+profile. Longer GAE and entropy settings must be explicit in run configuration.
+
+## Temporal graph and CTI v7
+
+The current approved run uses `--reward-graph --cti`; read docs/reward-graph.md.
+Preserve the 0.5 m approach saturation, physical jaw enclosure and sustained
+grip, reversible regressions, graded intact ground drops, and two-second basket
+settling. No graph stage may prescribe an action. Training, evaluation, CTI and
+rendering must select the same task profile. Sensor-student observations remain
+unchanged. The fixed gait may be reused when harvest policy training starts over.
+
+CTI v7 branches actual PPO states in parallel and uses all valid branch
+transitions for separate V-trace actor/critic learning. Physical failure is
+negative experience, not an exclusion condition. Reject replay-invalid roots
+and numerical corruption. Log the actual conditional Gaussian proposal density;
+never reuse noise after selecting a proposal based on that same noise. Keep a
+fresh matched-policy branch and generic mutations of every control. Preserve
+current-target bootstrap, terminal/truncation distinction, trajectory masks,
+and policy plus optimizer rollback under excessive factual KL. Stored detached
+GRU states are an explicit truncated recurrent approximation.
+
+Run tests.test_cti_learning and tests.test_branch_cti (CTI_GPU_TEST=1) after
+changes. Count branch transitions as used for learning only after an accepted
+optimizer update. Keep failed physical outcomes and importance weights visible;
+optimizer activity is not evidence of harvesting improvement.
+
+## Continuous graph v2 and CTI v8
+
+The user's corrected objective supersedes the v1 0.5 m saturation above. Use
+continuous geometric positioning, settled physical resets and recovery-aware
+stall timing. Read docs/reward-graph.md. Preserve archived v1 rendering/scoring.
+The sustained v2 profile uses an eight-second inactivity limit, thirty-second
+hard episode limit, and PPO roots with six seconds of remaining CTI evaluation
+budget. Do not change factual and alternative termination rules independently.
+Both learners regularize bounded actions; report saturation and measured motor
+movement separately from Gaussian noise. Run scripts/check_graph_training.py
+and the reward, replay, branch-learning and full-size smoke checks before launch.
+
+## Prerequisite graph v3
+
+The user's prerequisite contract supersedes v1/v2 graded unheld detachment.
+Read the current section of docs/reward-graph.md. Keep archived profile replay.
+Extraction requires secure control at detachment; downstream scores depend on
+maintained prerequisites, except valid release into the basket. True terminals
+have zero shaping potential. Keep stage practice separate from full-task metrics.
+Accepted-checkpoint selection and rollback must preserve earlier demonstrated
+skills on both training and held-out scenes. Preserve candidate evidence, source
+checkpoint provenance, and both optimizers when rolling back. Do not claim the
+acceptance tolerances prove monotonic learning or broad generalization.
+
+## Weighted regression graph v4
+
+The user's current direction supersedes v3 acceptance/rollback and stage practice.
+Use PPO only, without CTI or explicit curriculum. New runs start with a random
+harvesting actor and critic. Keep physical success prerequisites and archived
+profiles, but replace rollback with weighted progress-loss penalties. Read
+`docs/reward-graph.md`; run `tests.test_soft_graph` and the affected archived/GPU
+checks. A best display checkpoint never replaces the active learner.
+
+## Continuous graph v5 comparison
+
+The user approved restoring continuous approach feedback and learning rate 1e-4,
+with penalties for losing sustained physical control, and a matched CTI on/off
+comparison continued from the current checkpoint. Preserve actor, critic and
+factual Adam state via `--continue-from`; reset physical episodes explicitly.
+No curriculum or evaluation rollback. Keep archived v4 replay. Read the v5
+section of docs/reward-graph.md and run its reward and CTI replay checks.
+
+## Progressive sequence curriculum
+
+The user's newest request supersedes v4/v5: start a fresh PPO teacher without CTI,
+progressively unlocking longer valid sequences from the initial pose. Read the
+sequence section of README.md and docs/reward-graph.md. Use
+`scripts/train_sequence_fast.py`; preserve physical event validity and per-episode
+checkpoint history. Promotion requires repeated varied-pose evaluation, not
+individual frames. Prefix completion must never be reported as a full harvest.
+Run `tests.test_sequence_curriculum`, affected PPO/task/teacher tests, and a
+full-size GPU smoke before launch. `FAST_STATES` supplies the recorded checkpoint
+111 qpos fixture for native/GPU surface-distance regression. Surface measurement
+changes must not change actual collision meshes. Rendering must read the saved
+sequence schema and objective. No CTI, demonstrations or stage-state resets.
+
+The current sequence-v2 contract supersedes earlier timeout/bootstrap and reward
+instructions for this profile only. Use fixed +1 event payments, separate live
+credit bounded by 0.25, gamma 1, time cost bounded by 0.1 per episode, and 0.25
+failure cost. A 30-second deadline is terminal; report timeout separately. Keep
+20% of training worlds on earlier objectives after unlock; evaluation remains on
+the current objective. Preserve the frozen sequence-001 release for v1 replay.
+The user has established grasp feasibility: do not repeat physical feasibility
+tests for reward changes. Validate reward ordering and the learner integration.

@@ -93,6 +93,301 @@ class PergolaTest(unittest.TestCase):
             joint = list(tree.model.joint_child.numpy()).index(body)
             self.assertEqual(tree.model.joint_type.numpy()[joint], newton.JointType.FREE)
 
+    def test_smooth_noise_seed_post_heights_and_bounds(self):
+        import newton
+        from treesim.builder import _add_terrain
+        from treesim.config import PhysicsParams
+        ph = PhysicsParams(terrain=True, terrain_amplitude=.24,
+                           terrain_wavelength=1.3, terrain_extent=6., terrain_seed=7)
+        pads = [(-1.5, -2.), (-1.5, 2.), (1.5, -2.), (1.5, 2.)]
+
+        def terrain(seed):
+            b = newton.ModelBuilder()
+            sample = _add_terrain(b, ph, seed, kiwi=True)
+            return b.shape_source[-1], sample
+
+        a, sample = terrain(42)
+        b, _ = terrain(43)
+        np.testing.assert_array_equal(a.data, b.data)
+        ph.terrain_seed = 8
+        c, _ = terrain(42)
+        self.assertFalse(np.array_equal(a.data, c.data))
+        self.assertAlmostEqual(a.min_z, .004)
+        self.assertAlmostEqual(a.max_z, .244)
+        for x, y in pads:
+            self.assertGreater(sample(x, y), .02)
+        elevation = a.data * (a.max_z-a.min_z) + a.min_z
+        self.assertLess(np.abs(np.diff(elevation, axis=0)).max(), .04)
+        self.assertLess(np.abs(np.diff(elevation, axis=1)).max(), .04)
+        heights = [sample(x, y) for x in np.linspace(-.7, .7, 15)
+                   for y in np.linspace(-.7, .7, 15)]
+        self.assertGreater(np.ptp(heights), .02)
+        self.assertGreater(min(heights), .004)
+        for row, col in ((0, 0), (12, 23), (a.nrow-1, a.ncol-1)):
+            x = -a.hx + 2*a.hx*col/(a.ncol-1)
+            y = -a.hy + 2*a.hy*row/(a.nrow-1)
+            self.assertAlmostEqual(sample(x, y), a.min_z + a.data[row, col]*(a.max_z-a.min_z), places=6)
+        self.assertEqual(sample(6.01, 0), 0.)
+        ph.terrain_amplitude = 0.
+        _, flat = terrain(42)
+        self.assertAlmostEqual(flat(.5, .5), .004)
+        ph.terrain_amplitude = .24
+        ph.terrain_seed = None
+        a, _ = terrain(42)
+        b, _ = terrain(43)
+        self.assertFalse(np.array_equal(a.data, b.data))
+        tiled = newton.ModelBuilder()
+        sample = _add_terrain(tiled, ph, 42, pitch=(6., 8.), grid=(2, 2), kiwi=True)
+        for x, y in ((.3, .7), (2.9, 3.9), (-3., -4.)):
+            self.assertAlmostEqual(sample(x, y), sample(x+6., y+8.))
+        apple = _add_terrain(newton.ModelBuilder(), ph, 42)
+        self.assertAlmostEqual(apple(0., 0.), .004)
+
+    def test_terrain_resists_fast_forced_fruit_impact(self):
+        import newton
+        import warp as wp
+        from treesim.builder import _add_terrain
+        from treesim.config import PhysicsParams
+        params = preset('pergola')
+        params.pergola_rows = params.pergola_columns = 2
+        fruit = place_fruit(generate(params, seed=42),
+                            FruitParams(max_count=1), seed=42)[0]
+        b = newton.ModelBuilder()
+        ph = PhysicsParams(terrain_amplitude=.24, terrain_extent=6.,
+                           terrain_wavelength=1.3, terrain_seed=7)
+        height = _add_terrain(b, ph, 42, kiwi=True)
+        b.add_ground_plane()
+        body = b.add_body(xform=wp.transform(wp.vec3(*(fruit.attach-[0., 0., .1])),
+                                             wp.quat_identity()))
+        density = float(fruit.mass/(4*np.pi*np.prod(fruit.radii)/3))
+        b.add_shape_ellipsoid(body, rx=float(fruit.radii[0]), ry=float(fruit.radii[1]),
+                             rz=float(fruit.radii[2]), cfg=b.ShapeConfig(density=density))
+        model = b.finalize(device='cpu')
+        s0, s1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s1)
+        solver = newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=True,
+                                            nconmax=256, njmax=1024, solver=1)
+        control, contacts = model.control(), model.contacts()
+        minimum_clearance = float('inf')
+        for step in range(2000):
+            s0.clear_forces()
+            if step < 1000:
+                s0.body_f.assign(np.array([[0., 0., -20., 0., 0., 0.]], dtype=np.float32))
+            solver.step(s0, s1, control, contacts, .0005)
+            s0, s1 = s1, s0
+            x, y, z = s0.body_q.numpy()[body, :3]
+            minimum_clearance = min(minimum_clearance, z-height(x, y))
+        self.assertTrue(np.isfinite(s0.body_q.numpy()).all())
+        self.assertGreater(minimum_clearance, .0)
+        self.assertGreater(z-height(x, y), .01)
+        self.assertLess(z-height(x, y), .07)
+
+    def test_terrain_invalid_inputs(self):
+        import newton
+        from treesim.builder import _add_terrain
+        from treesim.config import PhysicsParams
+        for name, values in (
+            ('terrain_amplitude', (-.1, float('nan'), float('inf'))),
+            ('terrain_wavelength', (0., -.1, float('nan'), float('inf'))),
+            ('terrain_extent', (0., -1., float('nan'), float('inf'))),
+            ('terrain_seed', (-1, 1.5, float('nan'))),
+        ):
+            for value in values:
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    ph = PhysicsParams()
+                    setattr(ph, name, value)
+                    _add_terrain(newton.ModelBuilder(), ph, 42)
+
+    def test_pergola_terrain_integration(self):
+        import newton
+        from treesim import builder
+        from treesim.config import TreeConfig
+        cfg = TreeConfig(lsystem=preset('pergola'), device='cpu', seed=42)
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+        cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        flat = builder.generate_and_build(cfg)
+        self.assertIsNone(flat.terrain_height)
+        cfg.physics.terrain = True
+        cfg.physics.terrain_amplitude = .24
+        cfg.physics.terrain_extent = 6.
+        uneven = builder.generate_and_build(cfg)
+        np.testing.assert_array_equal(flat.model.body_mass.numpy(), uneven.model.body_mass.numpy())
+        self.assertEqual(uneven.model.body_count, flat.model.body_count)
+        self.assertEqual(sum(t == newton.GeoType.HFIELD for t in uneven.model.shape_type.numpy()), 1)
+        self.assertGreater(uneven.terrain_height(0., 0.), .01)
+        for s in uneven.skeleton:
+            for p in (s.start, s.end):
+                if p[2] == 0:
+                    self.assertGreater(uneven.terrain_height(*p[:2]), p[2])
+                    self.assertLess(uneven.terrain_height(*p[:2]), cfg.lsystem.target_height)
+        np.testing.assert_array_equal([s.end for s in flat.skeleton],
+                                      [s.end for s in uneven.skeleton])
+
+    def test_noise_priority_and_explicit_orchard_mode(self):
+        from treesim import builder
+        from treesim.config import TreeConfig
+        from treesim.metrics import Metrics
+        from treesim.sim import Sim
+        cfg = TreeConfig.compliant('pergola')
+        cfg.device, cfg.seed = 'cpu', 42
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+        cfg.fruit.enabled, cfg.fruit.max_count = True, 1
+        cfg.physics.terrain = True
+        cfg.physics.terrain_seed = 101
+        cfg.physics.terrain_extent = 6.
+        for kind in ('noise', 'orchard'):
+            cfg.physics.terrain_kind = kind
+            tree = builder.generate_and_build(cfg)
+            self.assertEqual(tree.terrain_params['kind'],
+                             'kiwi_noise' if kind == 'noise' else 'kiwi_orchard_floor')
+            self.assertEqual(tree.terrain_params['seed'], 101)
+            sim = Sim(tree, substeps=40)
+            sim.step()
+            self.assertTrue(np.isfinite(sim.state_0.body_q.numpy()).all())
+            self.assertEqual(sim.apples.broken_count, 0)
+            self.assertEqual(Metrics().summary(sim)['terrain']['kind'], tree.terrain_params['kind'])
+        cfg.physics.terrain_kind = 'noise'
+        cfg.physics.terrain_extent = None
+        cfg.lsystem.pergola_columns = 8
+        tree = builder.generate_and_build(cfg)
+        self.assertGreaterEqual(tree.terrain_params['half_extent_m'], 18.)
+        cfg.physics.terrain_extent = 6.
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+
+    def test_cli_terrain_random_by_default_and_replayable(self):
+        from unittest.mock import patch
+        from scripts.grow_tree import make_config, parse_args
+        command = ['grow_tree.py', '--preset', 'pergola', '--terrain', '--seed', '42']
+        with patch('sys.argv', command):
+            args = parse_args()
+        with patch('random.SystemRandom.randrange', side_effect=[101, 102]) as random_seed:
+            a, b = make_config(args), make_config(args)
+            self.assertEqual(random_seed.call_count, 2)
+        self.assertEqual(a.seed, b.seed)
+        self.assertEqual((a.physics.terrain_seed, b.physics.terrain_seed), (101, 102))
+        with patch('sys.argv', command + ['--terrain-seed', '7']):
+            args = parse_args()
+        with patch('random.SystemRandom.randrange') as random_seed:
+            a, b = make_config(args), make_config(args)
+            random_seed.assert_not_called()
+        self.assertEqual((a.physics.terrain_seed, b.physics.terrain_seed), (7, 7))
+        self.assertEqual(a.physics.terrain_kind, 'noise')
+        with patch('sys.argv', command + ['--terrain-kind', 'orchard']):
+            args = parse_args()
+        with patch('random.SystemRandom.randrange') as random_seed:
+            cfg = make_config(args)
+            random_seed.assert_not_called()
+        self.assertEqual(cfg.physics.terrain_kind, 'orchard')
+        self.assertIsNone(cfg.physics.terrain_seed)
+
+    def test_canopy_infill_is_seeded_and_spans_gaps(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_canopy_leaves
+        from treesim.pergola import generate as pergola
+        from treesim.builder import _qrot
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           canopy_spacing_m=.10)
+        skel = pergola(rows=2, columns=2, seed=42)
+        before = np.array([s.end.copy() for s in skel])
+        a = place_canopy_leaves(skel, fp, seed=42)
+        b = place_canopy_leaves(skel, fp, seed=42)
+        c = place_canopy_leaves(skel, fp, seed=43)
+        np.testing.assert_array_equal([p.attach for p in a], [p.attach for p in b])
+        np.testing.assert_array_equal([p.frame for p in a], [p.frame for p in b])
+        self.assertFalse(np.array_equal([p.attach for p in a], [p.attach for p in c]))
+        np.testing.assert_array_equal(before, [s.end for s in skel])
+        self.assertEqual(len(a), 2500)
+        centers = np.array([p.attach + _qrot(p.frame, np.array([0., 0., .11]))
+                            for p in a])
+        counts, _, _ = np.histogram2d(centers[:, 0], centers[:, 1], bins=20,
+                                      range=[[-2.5, 2.5], [-2.5, 2.5]])
+        self.assertTrue((counts > 0).all())
+        self.assertTrue(((centers[:, 2] > 1.63) & (centers[:, 2] < 1.79)).all())
+        np.testing.assert_allclose(np.linalg.norm([p.frame for p in a], axis=1), 1.)
+        self.assertTrue(all(skel[p.parent_seg].supported for p in a))
+        self.assertTrue(all(skel[p.parent_seg].order == 2 for p in a))
+        for spacing in (-.1, .001, float('nan'), float('inf')):
+            fp.canopy_spacing_m = spacing
+            with self.subTest(spacing=spacing), self.assertRaises(ValueError):
+                place_canopy_leaves(skel, fp)
+        fp.canopy_spacing_m = .1
+        with self.assertRaisesRegex(ValueError, '100000'):
+            place_canopy_leaves(pergola(rows=10, columns=10), fp)
+
+    def test_canopy_infill_follows_sloped_canopy(self):
+        from treesim.config import FoliageParams
+        from treesim.foliage import place_canopy_leaves
+        from treesim.pergola import generate as pergola
+        from treesim.builder import _qrot
+        fp = FoliageParams(enabled=True, leaf_length=.22, leaf_width=.17,
+                           canopy_spacing_m=.2)
+        skel = pergola(rows=2, columns=2, canopy_z=lambda x, y: 1.6+.03*x-.02*y)
+        for leaf in place_canopy_leaves(skel, fp, seed=42):
+            center = leaf.attach + _qrot(leaf.frame, np.array([0., 0., .11]))
+            offset = center[2] - (1.6 + .03*center[0] - .02*center[1])
+            self.assertGreater(offset, .03)
+            self.assertLess(offset, .19)
+
+    def test_canopy_infill_preserves_physics(self):
+        import newton
+        from treesim import builder
+        from treesim.config import TreeConfig
+        from treesim.sim import Sim
+        cfg = TreeConfig.compliant('pergola')
+        cfg.device, cfg.seed = 'cpu', 42
+        cfg.lsystem.pergola_rows = cfg.lsystem.pergola_columns = 2
+        cfg.fruit.enabled, cfg.fruit.max_count = True, 2
+        cfg.foliage.enabled = True
+        cfg.foliage.leaf_length, cfg.foliage.leaf_width = .22, .17
+        baseline = builder.generate_and_build(cfg)
+        cfg.foliage.canopy_spacing_m = .16
+        covered = builder.generate_and_build(cfg)
+        for name in ('body_mass', 'body_inertia', 'body_com', 'body_q',
+                     'joint_q', 'joint_qd', 'joint_type', 'joint_parent', 'joint_child'):
+            np.testing.assert_array_equal(getattr(baseline.model, name).numpy(),
+                                          getattr(covered.model, name).numpy(), err_msg=name)
+        self.assertEqual(covered.model.body_count, baseline.model.body_count)
+        self.assertEqual(covered.leaf_bodies, [])
+        masks = [(tree.model.shape_flags.numpy() & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0
+                 for tree in (baseline, covered)]
+        for name in ('shape_type', 'shape_transform', 'shape_scale', 'shape_body'):
+            np.testing.assert_array_equal(getattr(baseline.model, name).numpy()[masks[0]],
+                                          getattr(covered.model, name).numpy()[masks[1]])
+        states = []
+        for tree in (baseline, covered):
+            sim = Sim(tree, substeps=40, collisions=True)
+            sim.step()
+            self.assertEqual(sim.apples.broken_count, 0)
+            states.append(sim.state_0.body_q.numpy())
+        np.testing.assert_allclose(*states, rtol=0, atol=1e-7)
+        cfg.foliage.physics = True
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+        cfg.foliage.physics = False
+        cfg.lsystem = preset('apple')
+        with self.assertRaises(ValueError):
+            builder.generate_and_build(cfg)
+
+    def test_cli_canopy_infill_is_opt_in_and_visual_only(self):
+        import io
+        from unittest.mock import patch
+        from scripts.grow_tree import make_config, parse_args
+        command = ['grow_tree.py', '--preset', 'pergola']
+        with patch('sys.argv', command):
+            self.assertEqual(make_config(parse_args()).foliage.canopy_spacing_m, 0.)
+        with patch('sys.argv', command + ['--canopy-spacing', '.08']):
+            self.assertEqual(make_config(parse_args()).foliage.canopy_spacing_m, .08)
+        for extra in (['--canopy-spacing', '-.1'], ['--canopy-spacing', 'nan'],
+                      ['--canopy-spacing', '.001'],
+                      ['--canopy-spacing', '.08', '--foliage-physics'],
+                      ['--canopy-spacing', '.08', '--foliage-density', '0'],
+                      ['--canopy-spacing', '.08', '--preset', 'apple']):
+            with self.subTest(extra=extra), patch('sys.argv', command + extra), \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+                parse_args()
+
     def test_height_and_existing_presets(self):
         params = preset("pergola")
         params.target_height = 1.8

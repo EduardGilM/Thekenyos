@@ -562,4 +562,5 @@ def add_to_builder(builder, floor: OrchardFloor):
 
 def uses_orchard_floor(config) -> bool:
     return (getattr(config.lsystem, "kind", None) == "pergola"
-            and bool(getattr(config.physics, "terrain", False)))
+            and bool(getattr(config.physics, "terrain", False))
+            and getattr(config.physics, "terrain_kind", "noise") == "orchard")
