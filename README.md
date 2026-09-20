@@ -842,13 +842,16 @@ hanging COM by more than ~3 cm are discarded. The floating base is pinned so
 gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 10 updates on 512 worlds
 × 256 steps, then teacher-off PPO. `--initialize-from` with `--ik-harvest`
-skips IK (`demo_updates=0`) and runs 40 teacher-off PPO updates on the
-same hanging-fruit catalog. A held pick (`grasped`, 0.12 s hand
+skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates on the
+same hanging-fruit catalog, with higher entropy (0.008), learning rate
+`5e-4`, four PPO epochs and unclipped positive advantages so a held pick
+can move the actor. A held pick (`grasped`, 0.12 s hand
 contact) pays a one-shot `+100` during RL; eval keeps `guidance_weight=0`
 so that jackpot stays off the score. A slam-detach without the hold does
 not pay. During those RL
 updates only, the first detach latches a straight 8-point line from the fruit
-COM to the opening (not the liner floor); each unpaid point pays `+8` once
+COM to the opening (not the liner floor); each unpaid point pays `+8` on a
+fresh run and `+12` when continuing from a checkpoint, once
 when the held COM first enters a 10 cm radius. The origin is never paid, a
 dropped fruit cannot collect crumbs while falling, and evaluation keeps
 `teacher_mix=0` and `guidance_weight=0` so the line stays off the score.

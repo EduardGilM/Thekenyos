@@ -279,7 +279,14 @@ IK_HARVEST_PRESET = {
     'rl_updates': 26,
     'updates': 36,
     # Fine-tune from a harvest checkpoint: skip IK, keep hanging-fruit starts.
-    'rl_continue_updates': 40,
+    # Harvest3 sat after slams (entropy 0.001); continue explores more.
+    'rl_continue_updates': 48,
+    'rl_continue_entropy_coef': 0.008,
+    'rl_continue_ppo_epochs': 4,
+    'rl_continue_ppo_lr': 5e-4,
+    'rl_continue_ppo_unclip_positive': True,
+    'rl_continue_shaping_coef': 15.0,
+    'rl_continue_carry_line_bonus': 12.0,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -615,6 +622,39 @@ def apply_ik_harvest_preset(values: dict) -> dict:
         raise TypeError('values must be a dict')
     out = dict(values)
     out.update(IK_HARVEST_PRESET)
+    return out
+
+
+def harvest_run_knobs(*, continuing: bool) -> dict:
+    """Fresh IK+RL stays conservative. Checkpoint continue explores more.
+
+    Eval still keeps teacher_mix=0 and guidance_weight=0. Not a weld.
+    """
+    out = dict(IK_HARVEST_PRESET)
+    if not continuing:
+        return out
+    entropy = float(out['rl_continue_entropy_coef'])
+    lr = float(out['rl_continue_ppo_lr'])
+    epochs = int(out['rl_continue_ppo_epochs'])
+    shaping = float(out['rl_continue_shaping_coef'])
+    line = float(out['rl_continue_carry_line_bonus'])
+    if not np.isfinite(entropy) or not 0.0 <= entropy <= 0.1:
+        raise ValueError('rl_continue_entropy_coef must be finite in [0, 0.1]')
+    if not np.isfinite(lr) or not 1e-5 <= lr <= 1e-2:
+        raise ValueError('rl_continue_ppo_lr must be finite in [1e-5, 1e-2]')
+    if epochs < 1 or epochs > 32:
+        raise ValueError('rl_continue_ppo_epochs must be in [1, 32]')
+    if not np.isfinite(shaping) or not 0.0 <= shaping <= 50.0:
+        raise ValueError('rl_continue_shaping_coef must be finite in [0, 50]')
+    if not np.isfinite(line) or not 0.0 < line <= 20.0:
+        raise ValueError('rl_continue_carry_line_bonus must be finite in (0, 20]')
+    out['entropy_coef'] = entropy
+    out['ppo_lr'] = lr
+    out['ppo_epochs'] = epochs
+    out['ppo_unclip_positive'] = bool(out['rl_continue_ppo_unclip_positive'])
+    out['shaping_coef'] = shaping
+    out['carry_line_bonus'] = line
+    out['updates'] = int(out['rl_continue_updates'])
     return out
 
 

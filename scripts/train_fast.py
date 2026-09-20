@@ -13,6 +13,7 @@ from treesim.kiwi_rl.curriculum import (
     EASY_PRESET, IK_DEMO_PRESET, IK_GRASP_PRESET, IK_HARVEST_PRESET,
     RESET_PREGRASP, apply_easy_preset, apply_ik_demo_preset,
     apply_ik_grasp_preset, apply_ik_harvest_preset, apply_speedrun_preset,
+    harvest_run_knobs,
     easy_start_far_frac, easy_teacher_mix, evaluate_skills,
     evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask,
     next_stage, promotion_ready, sample_world_skills, stage_named,
@@ -94,18 +95,19 @@ def apply_ik_harvest_cli(args):
     args.demo_updates = int(demo_updates)
     if getattr(args, 'teacher_mix', None) is None:
         args.teacher_mix = 1.0 if int(args.demo_updates) > 0 else 0.0
+    knobs = harvest_run_knobs(continuing=continuing and int(args.demo_updates) == 0)
     if getattr(args, 'shaping_coef', None) is None:
-        args.shaping_coef = float(preset['shaping_coef'])
+        args.shaping_coef = float(knobs['shaping_coef'])
     if continuing and int(args.demo_updates) == 0:
-        args.updates = int(preset['rl_continue_updates'])
+        args.updates = int(knobs['updates'])
         args.eval_every = min(int(preset['eval_every']), 8)
         args.checkpoint_every = min(int(preset['checkpoint_every']), 4)
     else:
         args.updates = int(preset['updates'])
         args.eval_every = int(preset['eval_every'])
         args.checkpoint_every = int(preset['checkpoint_every'])
-    args.entropy_coef = float(preset['entropy_coef'])
-    args.ppo_epochs = int(preset['ppo_epochs'])
+    args.entropy_coef = float(knobs['entropy_coef'])
+    args.ppo_epochs = int(knobs['ppo_epochs'])
     if int(getattr(args, 'worlds', 4096)) == 4096:
         args.worlds = int(preset['worlds'])
     if int(getattr(args, 'steps', 64)) == 64:
@@ -844,7 +846,7 @@ def run(args):
     shaping_coef = float(getattr(args, 'shaping_coef', EASY_PRESET['default_shaping_coef']))
     demo_updates = int(getattr(args, 'demo_updates', 0) or 0) if (ik_demo or ik_grasp or ik_harvest) else 0
     if ik_harvest:
-        knobs = IK_HARVEST_PRESET
+        knobs = harvest_run_knobs(continuing=demo_updates == 0)
     elif ik_grasp:
         knobs = IK_GRASP_PRESET
     elif ik_demo:
@@ -962,7 +964,7 @@ def run(args):
                 json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
                            indent=2, default=str) + '\n')
         elif ik_harvest:
-            harvest_info = runtime.enable_ik_harvest(True, shaping_coef=shaping_coef)
+            harvest_info = runtime.enable_ik_harvest(True, shaping_coef=shaping_coef, knobs=knobs)
             runtime.set_carry_progress(numpy_rng)
             config['ik_harvest'] = True
             config['ik_grasp'] = False
@@ -982,6 +984,8 @@ def run(args):
             config['catalog_fruit_world_m'] = harvest_info.get('catalog_fruit_world_m')
             config['jaw_close_radius_m'] = float(IK_HARVEST_PRESET['jaw_close_radius_m'])
             config['pick_reward'] = harvest_info.get('pick_reward')
+            config['carry_line_bonus'] = harvest_info.get('carry_line_bonus')
+            config['ppo_unclip_positive'] = bool(knobs['ppo_unclip_positive'])
             config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])

@@ -2150,7 +2150,7 @@ class FastRuntime:
             **catalog,
         }
 
-    def enable_ik_harvest(self, enabled=True, *, shaping_coef=None):
+    def enable_ik_harvest(self, enabled=True, *, shaping_coef=None, knobs=None):
         """Hanging fruit, IK pick/hold, then crate-clearing carry to the liner.
 
         Does not enable ``--easy`` or weld the fruit. The scripted jaw closes
@@ -2160,7 +2160,7 @@ class FastRuntime:
         self._ik_grasp = False
         self._easy = False
         self._ik_demo = False
-        knobs = IK_HARVEST_PRESET
+        knobs = IK_HARVEST_PRESET if knobs is None else knobs
         self._easy_pin.assign(np.array([1 if self._ik_harvest else 0], dtype=np.int32))
         self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
         self._release_at_center.assign(np.array([1 if knobs['release_at_center'] else 0], dtype=np.int32))

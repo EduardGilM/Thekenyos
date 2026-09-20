@@ -286,6 +286,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _build_grasp_catalog', src)
         self.assertIn('def enable_ik_grasp', src)
         self.assertIn('def enable_ik_harvest', src)
+        self.assertIn('knobs=None', src)
+        self.assertIn('def harvest_run_knobs', (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'curriculum.py').read_text(encoding='utf-8'))
         self.assertIn('def _privileged_harvest_action', src)
         self.assertIn('def _build_harvest_catalog', src)
         self.assertIn('def _pay_carry_line', src)
@@ -505,13 +507,32 @@ class CurriculumTest(unittest.TestCase):
 
     def test_ik_harvest_preset_picks_then_carries_to_liner(self):
         from treesim.kiwi_rl.curriculum import (
-            IK_HARVEST_PRESET, apply_ik_harvest_preset, sample_world_skills,
+            IK_HARVEST_PRESET, apply_ik_harvest_preset, harvest_run_knobs,
+            sample_world_skills,
         )
         preset = apply_ik_harvest_preset({'gate_success_rate': 0.80})
         self.assertEqual(preset['demo_updates'], 10)
         self.assertEqual(preset['rl_updates'], 26)
         self.assertEqual(preset['updates'], 36)
-        self.assertEqual(preset['rl_continue_updates'], 40)
+        self.assertEqual(preset['rl_continue_updates'], 48)
+        self.assertAlmostEqual(preset['rl_continue_entropy_coef'], 0.008)
+        self.assertEqual(preset['rl_continue_ppo_epochs'], 4)
+        self.assertAlmostEqual(preset['rl_continue_ppo_lr'], 5e-4)
+        self.assertTrue(preset['rl_continue_ppo_unclip_positive'])
+        self.assertAlmostEqual(preset['rl_continue_shaping_coef'], 15.0)
+        self.assertAlmostEqual(preset['rl_continue_carry_line_bonus'], 12.0)
+        continued = harvest_run_knobs(continuing=True)
+        self.assertAlmostEqual(continued['entropy_coef'], 0.008)
+        self.assertAlmostEqual(continued['ppo_lr'], 5e-4)
+        self.assertEqual(continued['ppo_epochs'], 4)
+        self.assertTrue(continued['ppo_unclip_positive'])
+        self.assertAlmostEqual(continued['carry_line_bonus'], 12.0)
+        fresh = harvest_run_knobs(continuing=False)
+        self.assertAlmostEqual(fresh['entropy_coef'], 0.001)
+        self.assertAlmostEqual(fresh['ppo_lr'], 3e-4)
+        self.assertEqual(fresh['ppo_epochs'], 2)
+        self.assertFalse(fresh['ppo_unclip_positive'])
+        self.assertAlmostEqual(fresh['carry_line_bonus'], 8.0)
         self.assertEqual(preset['worlds'], 512)
         self.assertEqual(preset['steps'], 256)
         self.assertEqual(preset['n_start_poses'], 48)

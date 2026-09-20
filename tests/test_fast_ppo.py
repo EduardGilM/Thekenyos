@@ -184,6 +184,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn("row['carry_line_hits']", collect_src)
         self.assertIn('carry_line_hits', run_src)
         self.assertIn('pick_reward', run_src)
+        self.assertIn('harvest_run_knobs', run_src)
+        self.assertIn('knobs=knobs', inspect.getsource(train_fast.run))
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
@@ -206,9 +208,12 @@ class FastTrainerCLITest(unittest.TestCase):
             ik_demo=True, ik_grasp=True, worlds=4096, steps=64,
             minibatch_worlds=512, stage='deposit_pixels'))
         self.assertEqual(continued_harvest.demo_updates, 0)
-        self.assertEqual(continued_harvest.updates, 40)
+        self.assertEqual(continued_harvest.updates, 48)
         self.assertEqual(continued_harvest.teacher_mix, 0.0)
         self.assertEqual(continued_harvest.eval_every, 8)
+        self.assertAlmostEqual(continued_harvest.entropy_coef, 0.008)
+        self.assertEqual(continued_harvest.ppo_epochs, 4)
+        self.assertAlmostEqual(continued_harvest.shaping_coef, 15.0)
         self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
         self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)
