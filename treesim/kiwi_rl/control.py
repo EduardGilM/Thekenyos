@@ -9,18 +9,42 @@ def body_com_velocity(model, data, body):
     return rotation.T @ linear, rotation.T @ angular
 
 
-def load_gait_artifact(path):
+def load_gait_artifact(path, *, precision_profile='cpu'):
     import hashlib
     import json
     from pathlib import Path
     from .models_torch import load_trainable_relic_actor
     path = Path(path)
     metadata = json.loads(path.with_suffix('.json').read_text())
-    if not metadata.get('passed') or metadata.get('device') != 'cpu' or metadata.get('samples', 0) < 10000:
-        raise ValueError('Use a verified CPU RELIC import artifact')
-    if hashlib.sha256(path.read_bytes()).hexdigest() != metadata.get('exported_sha256'):
-        raise ValueError('Gait artifact checksum mismatch')
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    validate_gait_metadata(metadata, precision_profile=precision_profile, digest=digest)
     return load_trainable_relic_actor(path)
+
+
+def validate_gait_metadata(metadata, *, precision_profile='cpu', digest=None):
+    """Check a RELIC import sidecar. CPU keeps the scaled gate; CUDA FP32 does not."""
+    if not isinstance(metadata, dict) or metadata.get('samples', 0) < 10000:
+        raise ValueError('Use a verified RELIC import artifact with at least 10000 samples')
+    if digest is not None and digest != metadata.get('exported_sha256'):
+        raise ValueError('Gait artifact checksum mismatch')
+    if not metadata.get('weights_identical'):
+        raise ValueError('Imported RELIC weights must be identical to the TorchScript actor')
+    if precision_profile == 'cpu':
+        if not metadata.get('passed') or metadata.get('device') != 'cpu':
+            raise ValueError('Use a verified CPU RELIC import artifact')
+        return metadata
+    if precision_profile != 'cuda-fp32':
+        raise ValueError(f'Unknown gait precision profile {precision_profile!r}')
+    # Approved fast-training profile: run the pretrained actor in CUDA FP32.
+    # Keep a failed CPU scaled gate visible; do not treat it as CPU-verified.
+    if metadata.get('precision_profile') == 'cuda-fp32':
+        abs_err = metadata.get('jit_vs_onnx_max_abs_diff')
+        if not isinstance(abs_err, (int, float)) or not np.isfinite(abs_err) or abs_err > 1e-3:
+            raise ValueError('CUDA FP32 gait abs error is missing or too large')
+        return metadata
+    if metadata.get('passed') is True and metadata.get('device') == 'cpu':
+        return metadata
+    raise ValueError('CUDA FP32 gait requires a cuda-fp32 import or a CPU-verified artifact')
 
 
 def gait_cpu_inference(actor, observations):

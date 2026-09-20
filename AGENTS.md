@@ -181,6 +181,22 @@ inversion, retention and release. Do not reopen finer calibration as a blocker
 for this approved profile. Verify learned progress with the teacher disabled;
 one-fruit reaching is not a complete harvest or generalization result.
 
+## Fast hackathon training (approved approximation)
+
+The user explicitly approved a separate rigid-fruit bulk-training profile to
+maximize learning per GPU hour. Use `export_fast_scene.py`, `FastRuntime`, and
+`train_fast.py`: 200 Hz physics, 50 Hz policy/gait, and 25 Hz RGBD cameras by
+default. 500 Hz physics is also supported. Use CUDA FP32 pretrained gait in
+this profile. Training cameras are the nominal RELIC gripper RGB/ToF frames;
+do not invent a body mast. The existing detailed flex and legacy CPU profiles stay separate.
+Do not reopen tissue calibration or the older rigid/flex agreement gate as a
+blocker for this approved approximate profile. Do keep numerical failures,
+overflow, real collision loads, gravity, stem release, and world-local resets.
+The 8 N stem release and 15 N force-based damage limit are uncalibrated engineering
+assumptions, not biological measurements. Do not claim successful harvesting or
+policy improvement from throughput or lower optimizer loss. Evaluate the actor
+without privileged inputs and report physical outcomes separately.
+
 ## Continuous visual leaf roof
 
 The reproducible local capture and generation details are in README.md under

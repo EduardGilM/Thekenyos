@@ -1,0 +1,309 @@
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+
+@unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+class FastPPOTest(unittest.TestCase):
+    def test_recurrent_replay_resets_individual_world(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import build_policy, update
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        torch.manual_seed(42)
+        torch.set_num_threads(1)
+        policy = build_policy()
+        memory = torch.zeros(2,64)
+        rows = []
+        with torch.no_grad():
+            for t in range(4):
+                reset = torch.tensor([t in (0,2), t == 0])
+                memory *= (~reset)[:,None]
+                rgbd, r84 = torch.randn(2,5,16,16), torch.randn(2,84)
+                mean, logstd, value, memory = policy(rgbd,r84,memory)
+                raw = mean + .1 * torch.randn_like(mean)
+                rows.append(dict(rgbd=rgbd, r84=r84, raw=raw,
+                    logp=tanh_logprob(raw,mean,logstd), value=value,
+                    reward=torch.tensor([t/10.,-t/10.]),
+                    terminated=torch.tensor([t==1,False]), reset=reset))
+        before = policy.mean.weight.detach().clone()
+        result = update(policy, torch.optim.Adam(policy.parameters(),lr=3e-4), rows, torch.zeros(2), minibatch_worlds=1)
+        self.assertLess(result['kl'], 1e-6)
+        self.assertEqual(result['optimized_transitions'], 8)
+        self.assertEqual(result['minibatches'], 2)
+        self.assertFalse(torch.equal(before,policy.mean.weight))
+        self.assertIn('entropy_per_dim', result)
+        self.assertIn('entropy_gaussian', result)
+        self.assertEqual(result['entropy_kind'], 'tanh_gaussian_differential_nats')
+
+    def test_evaluation_reports_mean_of_world_minima(self):
+        import torch
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import evaluate
+        rows = [dict(distance=torch.tensor(values), terminated=torch.tensor([False, False]),
+                     success=torch.tensor([0, 0])) for values in ([.4, .8], [.1, .5])]
+        with patch('train_fast.collect', return_value=(rows, None, {})):
+            result = evaluate(None, None, None, 2, 2)
+        self.assertAlmostEqual(result['evaluation/closest_distance_m'], .1)
+        self.assertAlmostEqual(result['evaluation/mean_closest_distance_m'], .3)
+
+
+class FastTrainerCLITest(unittest.TestCase):
+    def test_single_cli_defaults_to_deposit_pixels(self):
+        import inspect
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        import train_fast
+        source = inspect.getsource(train_fast)
+        self.assertEqual(source.count('\ndef main('), 1)
+        self.assertEqual(source.count('\ndef run('), 1)
+        self.assertIn("default='deposit_pixels'", source)
+        self.assertIn('curriculum_stage', inspect.getsource(train_fast.run))
+        self.assertIn('evaluate_mission', source)
+        self.assertIn('drain_faults', source)
+        self.assertIn('easy_teacher_mix', source)
+        self.assertIn('--speedrun', source)
+        self.assertIn('--easy', source)
+        self.assertIn('should_persist_checkpoint', source)
+        run_src = inspect.getsource(train_fast.run)
+        self.assertIn('fruit-count', run_src)
+        self.assertIn('curriculum_blocked', run_src)
+        self.assertIn('eval_profile', run_src)
+        self.assertNotIn('remaining curriculum through stage 6 needs', run_src)
+
+    def test_speedrun_checkpoint_stride_skips_idle_updates(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import should_persist_checkpoint
+        kw = dict(updates=2000, eval_every=100, checkpoint_every=50, video_every=50)
+        self.assertFalse(should_persist_checkpoint(1, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(50, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(100, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(7, promoted=True, **kw))
+        self.assertTrue(should_persist_checkpoint(2000, promoted=False, **kw))
+        self.assertTrue(should_persist_checkpoint(1, updates=2000, eval_every=50,
+                                                 checkpoint_every=1, video_every=10, promoted=False))
+
+    def test_speedrun_keeps_explicit_zero_video_every(self):
+        import argparse
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import apply_speedrun_cli
+        kept = apply_speedrun_cli(argparse.Namespace(
+            speedrun=True, video_every=0, eval_every=50, checkpoint_every=1,
+            entropy_coef=0.005, eval_profile='default', mask_idle_locomotion=True))
+        self.assertEqual(kept.eval_every, 100)
+        self.assertEqual(kept.checkpoint_every, 50)
+        self.assertEqual(kept.entropy_coef, 0.01)
+        self.assertEqual(kept.eval_profile, 'speedrun')
+        self.assertEqual(kept.video_every, 0)
+        filled = apply_speedrun_cli(argparse.Namespace(
+            speedrun=True, video_every=10, eval_every=50, checkpoint_every=1,
+            entropy_coef=0.005, eval_profile='default', mask_idle_locomotion=True))
+        self.assertEqual(filled.video_every, 50)
+
+    def test_easy_cli_fills_teacher_mix_but_keeps_explicit_zero(self):
+        import argparse
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import apply_easy_cli
+        filled = apply_easy_cli(argparse.Namespace(
+            easy=True, teacher_mix=None, shaping_coef=None, entropy_coef=0.01, ppo_epochs=2))
+        self.assertEqual(filled.teacher_mix, 1.0)
+        self.assertEqual(filled.shaping_coef, 25.0)
+        self.assertEqual(filled.updates, 15)
+        self.assertEqual(filled.entropy_coef, 0.001)
+        self.assertEqual(filled.ppo_epochs, 4)
+        kept = apply_easy_cli(argparse.Namespace(
+            easy=True, teacher_mix=0.0, shaping_coef=2.0))
+        self.assertEqual(kept.teacher_mix, 0.0)
+        self.assertEqual(kept.shaping_coef, 2.0)
+        off = apply_easy_cli(argparse.Namespace(
+            easy=False, teacher_mix=None, shaping_coef=None))
+        self.assertEqual(off.teacher_mix, 0.0)
+        self.assertEqual(off.shaping_coef, 2.0)
+        import inspect
+        import train_fast
+        self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
+        collect_src = inspect.getsource(train_fast.collect)
+        self.assertIn("row['ground_contact']", collect_src)
+        self.assertIn("row['fallen']", collect_src)
+        self.assertIn("row['hand_load_N']", collect_src)
+        run_src = inspect.getsource(train_fast.run)
+        self.assertIn('ground_contact_worlds', run_src)
+        self.assertIn('basket_distance_mean_m', run_src)
+        self.assertIn('easy_far_frac', run_src)
+        self.assertIn('easy_teacher_mix', run_src)
+        self.assertIn('teacher_anneal_after', run_src)
+        self.assertIn('teacher_mask', collect_src)
+        self.assertIn('easy_hold_close_mean', run_src)
+        self.assertIn('hold_close_frac', run_src)
+        runtime_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('def _scripted_jaw_hold', runtime_src)
+        self.assertIn('def _pin_scripted_jaw', runtime_src)
+        self.assertIn('def _in_release_zone', runtime_src)
+        self.assertIn('self._shaping_length', runtime_src)
+        self.assertIn('self._deposit_w', runtime_src)
+        self.assertIn('self._fail_w', runtime_src)
+        self.assertIn('fail_paid', runtime_src)
+        self.assertIn('timed_out[world] != 0 and success[world] == 0', runtime_src)
+        self.assertIn('_prefer_hover_after_success', runtime_src)
+        self.assertIn('_hover_start_index', runtime_src)
+        self.assertIn('_easy_catalog_n', runtime_src)
+        self.assertIn('_easy_hover_cohort', runtime_src)
+        self.assertIn('clear_easy_hover_starts', runtime_src)
+        self.assertIn('hover_start_index', run_src)
+        self.assertIn('easy_hover_cohort_worlds', run_src)
+        eval_src = inspect.getsource(train_fast.evaluate_mission)
+        self.assertIn('clear_easy_hover_starts', eval_src)
+        self.assertIn('restore_easy_hover', eval_src)
+        self.assertIn('HOLD_SWEEP_CLEARANCE_M', runtime_src)
+        self.assertIn('start_over_opening', runtime_src)
+        self.assertIn('easy_over_opening_local_m', runtime_src)
+        self.assertIn('shape_hand_fruit', runtime_src)
+        self.assertIn('release_at_center', runtime_src)
+        self.assertIn('release_over_opening', runtime_src)
+        self.assertIn('open_max_above_rim_m', runtime_src)
+        self.assertIn('open_half_xy', runtime_src)
+        self.assertIn('hover_offset', runtime_src)
+        self.assertIn('shape_to_hover', runtime_src)
+        self.assertIn('shape_to_hover', run_src)
+        self.assertIn('release_over_opening', run_src)
+        self.assertIn('release_max_above_rim_m', run_src)
+        self.assertIn('far_frac_cap', run_src)
+        self.assertIn('ppo_clip', run_src)
+        self.assertIn('ppo_lr', run_src)
+        self.assertIn('fail_reward', run_src)
+        self.assertIn('fail_return_sum', inspect.getsource(train_fast))
+        self.assertIn('ppo_adv_std_cap', run_src)
+        self.assertIn('ppo_unclip_positive', run_src)
+        self.assertIn('ppo_success_repeat', run_src)
+        self.assertIn('ppo_imitation_coef', run_src)
+        self.assertIn('deposit_return_sum', inspect.getsource(train_fast))
+        self.assertIn('harvest_jackpot_sum', run_src)
+        self.assertIn('reward_transition_mean', inspect.getsource(train_fast))
+        self.assertIn('success_window_return_mean', inspect.getsource(train_fast))
+        self.assertIn('reward_window_mean', inspect.getsource(train_fast))
+        self.assertIn('reward_mean = success_window if n_success else transition_mean',
+                      inspect.getsource(train_fast))
+        self.assertIn('normalize_advantages', inspect.getsource(train_fast))
+        self.assertIn('success_world_order', inspect.getsource(train_fast))
+        self.assertIn('ppo_actor_surrogate', inspect.getsource(train_fast))
+        self.assertIn('adv_std_cap', inspect.getsource(train_fast.update))
+        self.assertIn('grasp_local_m', run_src)
+        self.assertIn('hold_sweep_rows', run_src)
+        self.assertIn('set_easy_progress', run_src)
+        self.assertIn('hand_load_max_N', run_src)
+        self.assertIn('latest.pt', run_src)
+        self.assertIn('nonfinite_worlds', run_src)
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_advantage_std_cap_keeps_jackpot_large(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import (
+            causal_success_mask, normalize_advantages, policy_dim_mask,
+            ppo_actor_surrogate, success_world_order,
+        )
+        from treesim.kiwi_rl.curriculum import stage_named
+        adv = torch.zeros(1000)
+        adv[0] = 10000.0
+        full = normalize_advantages(adv)
+        capped = normalize_advantages(adv, std_cap=1.0)
+        self.assertGreater(float(capped[0]), float(full[0]) * 5.0)
+        with self.assertRaises(ValueError):
+            normalize_advantages(adv, std_cap=0.0)
+        flag = torch.tensor([True, False, True])
+        order = success_world_order(flag, repeat=3)
+        self.assertEqual(int(order.numel()), 7)
+        self.assertEqual(int((order == 0).sum()), 3)
+        self.assertEqual(int((order == 2).sum()), 3)
+        self.assertEqual(int((order == 1).sum()), 1)
+        none = success_world_order(torch.zeros(4, dtype=torch.bool), repeat=24)
+        self.assertEqual(list(none.tolist()), [0, 1, 2, 3])
+        ratio = torch.tensor([2.0])
+        pos = torch.tensor([1.0])
+        clipped = float(ppo_actor_surrogate(ratio, pos, clip=0.2, unclip_positive=False))
+        pulled = float(ppo_actor_surrogate(ratio, pos, clip=0.2, unclip_positive=True))
+        self.assertAlmostEqual(clipped, -1.2, places=5)
+        self.assertAlmostEqual(pulled, -2.0, places=5)
+        neg = torch.tensor([-1.0])
+        self.assertAlmostEqual(
+            float(ppo_actor_surrogate(ratio, neg, clip=0.2, unclip_positive=True)),
+            float(ppo_actor_surrogate(ratio, neg, clip=0.2, unclip_positive=False)))
+        with self.assertRaises(ValueError):
+            success_world_order(flag, repeat=0)
+        mask = policy_dim_mask(
+            stage_named('deposit_pixels'), 'cpu', enabled=True, scripted_jaw=True)
+        self.assertEqual(list(mask.tolist()), [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+        rows = []
+        for step in range(6):
+            rows.append({
+                'success': torch.tensor([step == 3, False]),
+                'reset': torch.tensor([step in (0, 4), step == 0]),
+            })
+        causal = causal_success_mask(rows)
+        self.assertEqual(causal[:, 0].tolist(), [True, True, True, True, False, False])
+        self.assertFalse(bool(causal[:, 1].any()))
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_reward_mean_shows_harvest_jackpot(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import build_policy, update
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        torch.manual_seed(0)
+        torch.set_num_threads(1)
+        policy = build_policy()
+        memory = torch.zeros(2, 64)
+        rows = []
+        jackpot = torch.tensor([10000.0, 1.0])
+        with torch.no_grad():
+            for t in range(4):
+                reset = torch.tensor([t == 0, t == 0])
+                memory *= (~reset)[:, None]
+                rgbd, r84 = torch.randn(2, 5, 16, 16), torch.randn(2, 84)
+                mean, logstd, value, memory = policy(rgbd, r84, memory)
+                raw = mean + 0.05 * torch.randn_like(mean)
+                reward = jackpot if t == 0 else torch.zeros(2)
+                success = torch.tensor([1, 0]) if t == 0 else torch.zeros(2, dtype=torch.int64)
+                rows.append(dict(
+                    rgbd=rgbd, r84=r84, raw=raw, logp=tanh_logprob(raw, mean, logstd),
+                    value=value, reward=reward, success=success,
+                    terminated=torch.tensor([t == 0, False]), reset=reset))
+        result = update(policy, torch.optim.Adam(policy.parameters(), lr=3e-4),
+                        rows, torch.zeros(2), minibatch_worlds=2)
+        self.assertAlmostEqual(result['reward_mean'], 10000.0, places=3)
+        self.assertAlmostEqual(result['reward_window_mean'], 5000.5, places=4)
+        self.assertAlmostEqual(result['reward_transition_mean'], 1250.125, places=4)
+        self.assertAlmostEqual(result['success_window_return_mean'], 10000.0, places=3)
+        self.assertAlmostEqual(result['deposit_return_sum'], 10000.0, places=3)
+        self.assertEqual(result['ppo_success_worlds'], 1)
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_privileged_mix_uses_atanh_of_teacher_action(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import mix_privileged_actions
+        raw = torch.zeros(2, 7)
+        teacher = torch.full((2, 7), 0.5)
+        mixed = mix_privileged_actions(raw, teacher, torch.tensor([True, False]))
+        self.assertAlmostEqual(float(mixed[0, 0]), float(torch.atanh(torch.tensor(0.5))), places=5)
+        self.assertEqual(float(mixed[1, 0]), 0.0)
+        raw10 = torch.zeros(2, 10)
+        raw10[:, :3] = 0.25
+        mixed10 = mix_privileged_actions(raw10, teacher, torch.tensor([True, False]))
+        self.assertEqual(float(mixed10[0, 0]), 0.25)
+        self.assertAlmostEqual(float(mixed10[0, 3]), float(torch.atanh(torch.tensor(0.5))), places=5)
+        self.assertEqual(float(mixed10[1, 3]), 0.0)
+
+
+class FastRuntimeFaultTest(unittest.TestCase):
+    def test_drain_faults_recovers_sparse_nonfinite(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('FLAG_NONFINITE | FLAG_OVERFLOW | FLAG_BAD_ACTION', src)
+        self.assertIn('NONFINITE_ABORT_FRACTION', src)
+        self.assertIn('nonfinite_worlds', src)
+        self.assertNotIn('flags={self._flags.numpy().tolist()}', src)
+
+
+if __name__ == '__main__':
+    unittest.main()

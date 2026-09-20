@@ -1,8 +1,10 @@
 """Reward/v3 ledger: once-per-fruit, damage separate from spill."""
 import unittest
 
+import numpy as np
+
 from treesim.kiwi_rl.rewards import (
-    RewardEvaluator, RewardState, shaping_step,
+    RewardEvaluator, RewardState, approach_center_potential, shaping_step,
 )
 
 
@@ -49,6 +51,20 @@ class LedgerTest(unittest.TestCase):
         self.assertGreater(r2, 0.0)
         r3, _ = shaping_step(st, 0.5, 0.99, "b")
         self.assertEqual(r3, 0.0)
+
+    def test_approach_center_pays_fruit_and_hand(self):
+        far = approach_center_potential([1.0, 0.0, 0.2], [1.0, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        near = approach_center_potential([0.05, 0.0, 0.2], [0.04, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        self.assertGreater(near, far)
+        hand_only = approach_center_potential([1.0, 0.0, 0.2], [0.04, 0.0, 0.5], [0.0, 0.0, 0.15], 0.60)
+        self.assertGreater(hand_only, far)
+        from treesim.basket import CENTER, SIZE
+        hover = np.asarray(CENTER, dtype=np.float64) + np.array([0.0, 0.0, float(SIZE[2]) + 0.28])
+        at_hover = approach_center_potential(hover, hover, hover, 0.60)
+        dive = approach_center_potential(CENTER, CENTER + np.array([0.0, 0.0, 0.10]), hover, 0.60)
+        self.assertGreater(at_hover, dive)
+        with self.assertRaises(ValueError):
+            approach_center_potential([np.nan, 0, 0], [0, 0, 0], [0, 0, 0])
 
 
 if __name__ == "__main__":

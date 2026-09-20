@@ -108,7 +108,8 @@ def main():
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--worlds", type=int, default=2)
     parser.add_argument("--control-dt", type=float, default=.04)
-    parser.add_argument("--camera", choices=("hand_camera", "body_camera"), default="body_camera")
+    parser.add_argument("--camera", choices=("hand_color_sensor", "hand_depth_sensor"),
+                        default="hand_color_sensor")
     args = parser.parse_args()
     if args.steps < 1 or args.worlds < 1:
         parser.error("steps and worlds must be positive")

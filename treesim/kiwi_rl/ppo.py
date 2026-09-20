@@ -30,15 +30,57 @@ def _torch():
     return torch
 
 
-def tanh_logprob(u, mu, logstd) -> "tensor":
-    """Log-prob of a=tanh(u) under N(mu, sigma) with Jacobian correction."""
+def _action_dim_mask(u, dim_mask):
+    """Broadcast a [dim] or matching mask onto the last axis of ``u``."""
+    torch = _torch()
+    if dim_mask is None:
+        return None
+    mask = dim_mask if torch.is_tensor(dim_mask) else torch.as_tensor(dim_mask, device=u.device)
+    mask = mask.to(dtype=u.dtype, device=u.device)
+    if mask.shape != u.shape[-1:] and mask.shape != u.shape:
+        raise ValueError('dim_mask must be [action_dim] or match the pre-tanh sample')
+    if not torch.isfinite(mask).all() or (mask < 0).any() or (mask > 1).any():
+        raise ValueError('dim_mask must be finite in [0, 1]')
+    return mask
+
+
+def tanh_logprob(u, mu, logstd, dim_mask=None) -> "tensor":
+    """Log-prob of a=tanh(u) under N(mu, sigma) with Jacobian correction.
+
+    ``dim_mask`` zeros idle action dimensions (speedrun: N3 while the chassis
+    is held). Unmasked behaviour matches the transformed-Gaussian reference.
+    """
     torch = _torch()
     ls = torch.clamp(logstd, -5.0, 1.0)
     var = torch.exp(2.0 * ls)
     logp = -0.5 * (((u - mu) ** 2) / var + 2.0 * ls + float(np.log(2 * np.pi)))
-    logp = logp.sum(-1)
-    jacob = (2.0 * (float(np.log(2.0)) - u - torch.nn.functional.softplus(-2.0 * u))).sum(-1)
-    return logp - jacob
+    jacob = 2.0 * (float(np.log(2.0)) - u - torch.nn.functional.softplus(-2.0 * u))
+    total = logp - jacob
+    mask = _action_dim_mask(u, dim_mask)
+    if mask is None:
+        return total.sum(-1)
+    return (total * mask).sum(-1)
+
+
+def gaussian_entropy(logstd, dim_mask=None):
+    """Analytic differential entropy of N(μ, σ), nats. Peaked σ can make H < 0."""
+    torch = _torch()
+    ls = torch.clamp(logstd, -5.0, 1.0)
+    entropy = 0.5 * (1.0 + float(np.log(2.0 * np.pi))) + ls
+    mask = _action_dim_mask(entropy, dim_mask)
+    if mask is None:
+        return entropy.sum(-1)
+    return (entropy * mask).sum(-1)
+
+
+def tanh_gaussian_entropy(logstd, *, raw, mu, dim_mask=None):
+    """Monte-Carlo differential entropy of a=tanh(u), u~N(μ, σ).
+
+    This is −log π(a) for a freshly drawn pre-tanh sample. It is not Shannon
+    entropy of a discrete action and is allowed to be negative when the
+    squashed Gaussian is peaked (small σ).
+    """
+    return -tanh_logprob(raw, mu, logstd, dim_mask=dim_mask)
 
 
 def compute_gae(rewards, values, terminated, truncated, gamma, lam,
@@ -219,12 +261,16 @@ def ppo_epoch_loss(new_logp_c, new_logp_e, old_logp, adv, ret, val,
 
 
 def save_checkpoint(path, models: dict, optimizers: dict, rng_state: dict,
-                    meta: dict):
+                    meta: dict, *, replace=False):
     """Atomic checkpoint: state_dicts + RNG + schema/config hashes."""
     torch = _torch()
     path = Path(path)
     sidecar_path = Path(str(path) + '.json')
-    if path.exists() or sidecar_path.exists():
+    if replace:
+        for existing in (path, sidecar_path):
+            if existing.exists():
+                existing.unlink()
+    elif path.exists() or sidecar_path.exists():
         raise FileExistsError(f'Preserve existing checkpoint: {path}')
     buf = {
         'format': 'kiwi-checkpoint/v1',
