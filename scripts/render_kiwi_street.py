@@ -169,7 +169,13 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
     rgb = _appearance_rgb(
         v, u, yy, xx, max(4.0 * half, 40.0), 0.0, 0.40, half, look,
     )
-    rgb = np.clip((rgb - 0.5) * 1.18 + 0.48, 0.0, 1.0)
+    mottle = _value_field(rng, (n, n), ((90, 1.0), (32, 0.55), (12, 0.30)))
+    rgb = np.clip((rgb - 0.5) * 1.22 + 0.46, 0.0, 1.0)
+    rgb = rgb * (0.78 + 0.40 * mottle[..., None])
+    dry = np.clip((mottle - 0.72) / 0.22, 0.0, 1.0)
+    rgb = rgb * (1.0 - 0.40 * dry)[..., None] + dry[..., None] * np.array(
+        [0.42, 0.36, 0.14]
+    )
     soil_w = np.zeros((n, n))
     for y in ys:
         edge = 0.16 + 0.22 * (wander - 0.5)
