@@ -45,7 +45,9 @@ a separate short PPO pilot is implemented in `scripts/train_reach_grasp.py`.
 
 `TaskDefinition(guidance_weight=1.)` enables bounded reach-potential shaping and
 one-time stable-grasp / retained-detachment bonuses. The GPU harvest trainer
-may also pay a large one-shot held-pick bonus (`grasped`) during RL, and
+may also pay a large one-shot held-pick bonus (`grasped`) during RL, shape
+the stem load toward the 8 N release while the fruit is held and still
+attached (a removable pull cue, not a required angle), and
 arm an optional straight detach→opening breadcrumb line: eight one-shot
 COM spheres from the detach position to the crate opening, paid at most
 once each while the fruit is still held. A slam that breaks the stem

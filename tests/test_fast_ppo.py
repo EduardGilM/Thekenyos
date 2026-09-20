@@ -186,6 +186,11 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('pick_reward', run_src)
         self.assertIn('harvest_run_knobs', run_src)
         self.assertIn('knobs=knobs', inspect.getsource(train_fast.run))
+        self.assertIn('retained_detach_events', run_src)
+        self.assertIn('train_timeout_s=train_timeout_s', run_src)
+        stage_src = inspect.getsource(train_fast.apply_stage)
+        self.assertIn('train_timeout_s', stage_src)
+        self.assertIn('not evaluate_only', stage_src)
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,

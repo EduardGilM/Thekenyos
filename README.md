@@ -845,7 +845,15 @@ gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates on the
 same hanging-fruit catalog, with higher entropy (0.008), learning rate
 `5e-4`, four PPO epochs and unclipped positive advantages so a held pick
-can move the actor. A held pick (`grasped`, 0.12 s hand
+can move the actor. Harvest3/4 grasped (eval 49–87 %) but never deposited:
+the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
+no signal once held, and 180 s episodes let a frozen hold run ~35 updates.
+The continue therefore uses a **30 s training timeout** (eval keeps its own
+horizon), shapes the **stem load toward 8 N** while the fruit is held and
+still attached (guidance-gated, `potential_ref=4`), and reuses the `--easy`
+slip guard so the pin tightens toward at most `0.40` only when the fruit is
+leaving the mouth; the 15 N jaw fail stays active and the 0.45 pin that sat
+at 24 N is not used. `retained_detach_events` is logged per update. A held pick (`grasped`, 0.12 s hand
 contact) pays a one-shot `+100` during RL; eval keeps `guidance_weight=0`
 so that jackpot stays off the score. A slam-detach without the hold does
 not pay. During those RL

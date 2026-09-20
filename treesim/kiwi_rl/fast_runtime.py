@@ -20,7 +20,7 @@ from .curriculum import (
     IK_GRASP_PRESET, IK_HARVEST_PRESET, commit_carry_starts, sample_carry_start_indices,
     sample_easy_start_indices,
 )
-from .fast_task import MAX_FRUITS, _pad_ids
+from .fast_task import DETACH_FORCE_N, MAX_FRUITS, _pad_ids
 from .rewards import (
     CARRY_LINE_POINTS, CARRY_LINE_RADIUS_M, W_CARRY_LINE, W_DAMAGE_PER_UNIT,
     W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE, W_LOSS, W_SMOOTH,
@@ -70,7 +70,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8),
                      detached: wp.array(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8),
                      retained_detach: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
-                     damage_proxy: wp.array(dtype=float),
+                     damage_proxy: wp.array(dtype=float), stem_force: wp.array(dtype=float),
+                     stem_shaping: wp.array(dtype=int),
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
@@ -129,6 +130,17 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     if easy_released[world] != 0 and use_basket != 0:
         phi = wp.exp(-d_hand_xy / length)
         potential_ref = 3
+    # Held and still attached: the TCP term is already ~0, so shape the stem
+    # load toward the 8 N release instead. Optional guidance; eval keeps
+    # guidance at 0. Not a paper angle or a required grasp sequence.
+    if stem_shaping[0] != 0 and grasped[world] != 0 and detached[world] == 0 and goal[world] != 0:
+        load = stem_force[world] / DETACH_FORCE_N
+        if load > 1.0:
+            load = 1.0
+        if load < 0.0:
+            load = 0.0
+        phi = load
+        potential_ref = 4
     shaped = float(0.)
     if shaping_ref[world] == potential_ref:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
@@ -1031,6 +1043,10 @@ class FastRuntime:
                                            dtype=float, device=self.device)
             self._deposit_w = wp.full(worlds, float(W_DEPOSIT), dtype=float, device=self.device)
             self._grasp_w = wp.full(1, float(W_GRASP_STABLE), dtype=float, device=self.device)
+            # Stem-load shaping while held; harvest RL only. Device flag so the
+            # captured graph can be retargeted. Eval keeps guidance at 0.
+            self._stem_shaping = wp.zeros(1, dtype=int, device=self.device)
+            self._harvest_slip_max_close = 0.0
             self._fail_w = wp.zeros(worlds, dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
@@ -1240,6 +1256,7 @@ class FastRuntime:
                           self._basket_distance, self._basket_xy, mask,
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
+                          self.task.stem_force, self._stem_shaping,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
                           self.task.deposited, self.task.loss_paid, self._basket_center,
                           self._hover_offset, self._release_offset, self._open_half_xy,
@@ -1293,6 +1310,18 @@ class FastRuntime:
                     self._actions, self.control.targets,
                     self._easy_jaw_hold, float(self._jaw_open),
                     float(2.5 * self.control_dt)],
+                    device=self.device)
+            if self._ik_harvest and self._harvest_slip_max_close > 0.0:
+                # Same slip guard as --easy, capped below the 0.45 pin that sat
+                # over the 15 N jaw limit. The pin still opens over the opening.
+                wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
+                    self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
+                    self.chassis, self.task.fruit_body, self.task.active_fruit,
+                    self._basket_center, self._easy_jaw_hold, float(self._jaw_open),
+                    float(self._jaw_closed), float(self._open_xy_m),
+                    float(self._open_rim_z_m), 0.03, float(self._harvest_slip_max_close),
+                    self._release_at_center, self._release_over_opening, self._open_half_xy,
+                    float(self._open_max_above_rim_m)],
                     device=self.device)
             if self._easy:
                 wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
@@ -2091,6 +2120,8 @@ class FastRuntime:
         self._ik_harvest = False
         self._easy = False
         self._ik_demo = False
+        self._harvest_slip_max_close = 0.0
+        self._stem_shaping.assign(np.array([0], dtype=np.int32))
         knobs = IK_GRASP_PRESET
         self._easy_pin.assign(np.array([1 if self._ik_grasp else 0], dtype=np.int32))
         self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
@@ -2205,6 +2236,14 @@ class FastRuntime:
         holds = np.full(self.worlds, hold, dtype=np.float32)
         self._easy_jaw_hold.assign(holds)
         self._easy_jaw_hold_next.assign(holds)
+        slip_cap = float(knobs.get('slip_max_close_frac', 0.0) or 0.0)
+        if not np.isfinite(slip_cap) or slip_cap < 0.0 or slip_cap > 0.85:
+            raise ValueError('slip_max_close_frac must be finite in [0, 0.85]')
+        if slip_cap > 0.0 and slip_cap < close:
+            raise ValueError('slip_max_close_frac must be >= jaw_close_frac')
+        self._harvest_slip_max_close = slip_cap if self._ik_harvest else 0.0
+        stem_shape = bool(knobs.get('stem_shaping', False)) and self._ik_harvest
+        self._stem_shaping.assign(np.array([1 if stem_shape else 0], dtype=np.int32))
         self._open_xy_m = float(knobs['open_xy_m'])
         host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
         q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
@@ -2227,6 +2266,8 @@ class FastRuntime:
             'fail_reward': float(knobs['fail_reward']),
             'pick_reward': pick,
             'hold_close_frac': close,
+            'slip_max_close_frac': float(self._harvest_slip_max_close),
+            'stem_shaping': bool(stem_shape),
             'scripted_jaw': bool(self._ik_harvest),
             'weld': False,
             **line,
@@ -2300,6 +2341,8 @@ class FastRuntime:
         self._easy = bool(enabled)
         self._ik_demo = bool(enabled) and bool(ik_demo)
         self._ik_harvest = False
+        self._harvest_slip_max_close = 0.0
+        self._stem_shaping.assign(np.array([0], dtype=np.int32))
         knobs = IK_DEMO_PRESET if self._ik_demo else EASY_PRESET
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
         shape_both = bool(self._easy and knobs.get('shape_hand_and_fruit'))

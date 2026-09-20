@@ -802,14 +802,20 @@ def evaluate(runtime, policy, gait, steps, camera_every, *, stage=None):
 
 
 def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False,
-                force_pregrasp=False):
+                force_pregrasp=False, train_timeout_s=None):
+    """Write per-world skills. ``train_timeout_s`` shortens training episodes only."""
     if evaluate_only:
         skills = evaluate_skills(stage, runtime.worlds)
     else:
         skills = sample_world_skills(stage, runtime.worlds, rng, primary_only=primary_only)
+    import numpy as np
     if force_pregrasp:
-        import numpy as np
         skills['reset_mode'] = np.full(runtime.worlds, int(RESET_PREGRASP), dtype=np.int32)
+    if train_timeout_s is not None and not evaluate_only:
+        timeout = float(train_timeout_s)
+        if not np_finite(timeout) or not 5.0 <= timeout <= 900.0:
+            raise ValueError('train_timeout_s must be finite in [5, 900] s')
+        skills['timeout_s'] = np.full(runtime.worlds, timeout, dtype=np.float32)
     runtime.configure_skills(skills)
     return skills
 
@@ -853,6 +859,8 @@ def run(args):
         knobs = IK_DEMO_PRESET
     else:
         knobs = EASY_PRESET
+    # Shorter training episodes for the harvest continue only; eval keeps its horizon.
+    train_timeout_s = knobs.get('train_timeout_s') if ik_harvest else None
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
@@ -986,6 +994,9 @@ def run(args):
             config['pick_reward'] = harvest_info.get('pick_reward')
             config['carry_line_bonus'] = harvest_info.get('carry_line_bonus')
             config['ppo_unclip_positive'] = bool(knobs['ppo_unclip_positive'])
+            config['train_timeout_s'] = train_timeout_s
+            config['stem_shaping'] = bool(harvest_info.get('stem_shaping'))
+            config['slip_max_close_frac'] = harvest_info.get('slip_max_close_frac')
             config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])
@@ -1005,7 +1016,7 @@ def run(args):
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle,
                                    scripted_jaw=(easy or ik_grasp or ik_harvest))
         apply_stage(runtime, stage, numpy_rng, primary_only=(ik_grasp or ik_harvest),
-                    force_pregrasp=ik_harvest)
+                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
                 teacher_mix=warmup_mix)
@@ -1037,7 +1048,7 @@ def run(args):
         carry = {}
         teacher_anneal_after = None
         apply_stage(runtime, stage, numpy_rng, primary_only=(ik_grasp or ik_harvest),
-                    force_pregrasp=ik_harvest)
+                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
         for iteration in range(args.updates):
             began = time.monotonic()
             demo_phase = bool((ik_demo or ik_grasp or ik_harvest) and iteration < demo_updates)
@@ -1140,6 +1151,7 @@ def run(args):
                 grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
+                retained_detach_events=int((torch.stack([r['retained_detach'] for r in rows]).max(dim=0).values > 0).sum()),
                 pick_reward=float(knobs.get('pick_reward', 0.5)) if (ik_harvest or ik_grasp or easy) else 0.5,
                 carry_line_hits=int(torch.stack([r['carry_line_hits'] for r in rows]).sum())
                 if 'carry_line_hits' in rows[0] else 0,
@@ -1216,7 +1228,7 @@ def run(args):
                         metrics['curriculum_blocked'] = 1
                         metrics['curriculum_blocked_reason'] = fruit_block_reason(nxt, n_fruits)
                         apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                    force_pregrasp=ik_harvest)
+                                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
                         carry = {}
                     else:
                         metrics['curriculum_promoted'] = True
@@ -1236,13 +1248,13 @@ def run(args):
                             eval_episodes = 0
                             carry = {}
                             apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                        force_pregrasp=ik_harvest)
+                                        force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
                             metrics['curriculum_stage'] = stage.name
                             metrics['curriculum_index'] = stage.index
                             metrics['idle_locomotion_masked'] = int(dim_mask is not None)
                 else:
                     apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                force_pregrasp=ik_harvest)
+                                force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
                     carry = {}
             persist = should_persist_checkpoint(
                 iteration + 1, updates=args.updates, eval_every=args.eval_every,

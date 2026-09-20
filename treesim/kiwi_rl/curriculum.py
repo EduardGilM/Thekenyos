@@ -287,6 +287,14 @@ IK_HARVEST_PRESET = {
     'rl_continue_ppo_unclip_positive': True,
     'rl_continue_shaping_coef': 15.0,
     'rl_continue_carry_line_bonus': 12.0,
+    # Harvest3/4 grasped (eval 49–87 %) but never deposited: the 0.32 pin
+    # (~5 N) let the fruit slip under the 8 N pull, the TCP term gave no
+    # signal once held, and 180 s episodes let a frozen hold run ~35 updates.
+    # Training timeout only; eval keeps its own horizon. The slip guard stays
+    # under the 0.45 pin that sat at 24 N over the 15 N jaw fail.
+    'rl_continue_timeout_s': 30.0,
+    'rl_continue_stem_shaping': True,
+    'rl_continue_slip_max_close_frac': 0.40,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -631,6 +639,9 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     Eval still keeps teacher_mix=0 and guidance_weight=0. Not a weld.
     """
     out = dict(IK_HARVEST_PRESET)
+    out.setdefault('train_timeout_s', None)
+    out.setdefault('stem_shaping', False)
+    out.setdefault('slip_max_close_frac', 0.0)
     if not continuing:
         return out
     entropy = float(out['rl_continue_entropy_coef'])
@@ -638,6 +649,12 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     epochs = int(out['rl_continue_ppo_epochs'])
     shaping = float(out['rl_continue_shaping_coef'])
     line = float(out['rl_continue_carry_line_bonus'])
+    timeout = float(out['rl_continue_timeout_s'])
+    slip_cap = float(out['rl_continue_slip_max_close_frac'])
+    if not np.isfinite(timeout) or not 5.0 <= timeout <= 900.0:
+        raise ValueError('rl_continue_timeout_s must be finite in [5, 900] s')
+    if not np.isfinite(slip_cap) or not float(out['jaw_close_frac']) <= slip_cap <= 0.85:
+        raise ValueError('rl_continue_slip_max_close_frac must be in [jaw_close_frac, 0.85]')
     if not np.isfinite(entropy) or not 0.0 <= entropy <= 0.1:
         raise ValueError('rl_continue_entropy_coef must be finite in [0, 0.1]')
     if not np.isfinite(lr) or not 1e-5 <= lr <= 1e-2:
@@ -655,6 +672,9 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out['shaping_coef'] = shaping
     out['carry_line_bonus'] = line
     out['updates'] = int(out['rl_continue_updates'])
+    out['train_timeout_s'] = timeout
+    out['stem_shaping'] = bool(out['rl_continue_stem_shaping'])
+    out['slip_max_close_frac'] = slip_cap
     return out
 
 
