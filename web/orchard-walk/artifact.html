@@ -1,0 +1,40 @@
+<title>Kiwi Orchard Walk</title>
+<style>
+:root{--bg:#15191e;--fg:#f4f4f4;--accent:#fbf28a;--panel:rgba(20,24,30,.78)}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:Lato,"Helvetica Neue",Arial,sans-serif;overflow:hidden}
+canvas{display:block}
+#hud{position:fixed;inset:0;pointer-events:none}
+#title{position:absolute;left:24px;top:20px;font-family:Oswald,Impact,"Arial Narrow",sans-serif;font-weight:700;letter-spacing:.02em;text-transform:uppercase;font-size:26px;text-shadow:0 2px 8px rgba(0,0,0,.6)}
+#title span{color:var(--accent)}
+#stats{position:absolute;right:24px;top:20px;background:var(--panel);padding:12px 16px;border-radius:12px;font-size:15px;line-height:1.5;min-width:220px;backdrop-filter:blur(6px)}
+#stats b{color:var(--accent);font-family:Oswald,Impact,sans-serif;font-weight:700;font-size:22px}
+#help{position:absolute;left:24px;bottom:20px;background:var(--panel);padding:12px 16px;border-radius:12px;font-size:14px;line-height:1.6;backdrop-filter:blur(6px)}
+#help kbd{background:#2c333c;border-radius:5px;padding:1px 7px;font-family:inherit;color:var(--accent);font-weight:700}
+#cross{position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px;border-radius:50%;background:rgba(255,255,255,.75);box-shadow:0 0 6px rgba(0,0,0,.7)}
+#label{position:absolute;left:50%;top:56%;transform:translate(-50%,0);background:var(--panel);padding:8px 14px;border-radius:10px;font-size:15px;display:none;white-space:nowrap}
+#label b{color:var(--accent)}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(10,12,16,.82);cursor:pointer;text-align:center;padding:24px}
+#start h1{font-family:Oswald,Impact,"Arial Narrow",sans-serif;font-weight:700;text-transform:uppercase;font-size:clamp(40px,8vw,96px);line-height:.95;margin:0 0 18px}
+#start h1 span{color:var(--accent)}
+#start p{max-width:560px;font-size:17px;line-height:1.55;color:#d8d8d8;margin:8px 0}
+#start .btn{margin-top:26px;background:var(--accent);color:#15191e;font-family:Oswald,Impact,sans-serif;font-weight:700;text-transform:uppercase;font-size:22px;padding:14px 38px;border-radius:14px;letter-spacing:.04em}
+#start small{margin-top:14px;color:#9aa0a6;font-size:13px}
+#loading{position:fixed;left:50%;bottom:36px;transform:translateX(-50%);font-size:14px;color:#9aa0a6}
+@media (max-width:700px){#help{display:none}#stats{font-size:13px;min-width:0}}
+</style>
+<div id="hud">
+  <div id="title">Thekenyos <span>·</span> kiwi orchard</div>
+  <div id="stats"><b id="count">0</b> kiwis in baskets<br><span id="robots"></span><br><span id="clock"></span></div>
+  <div id="help"><kbd>W A S D</kbd> walk &nbsp; <kbd>mouse</kbd> look &nbsp; <kbd>shift</kbd> run<br><kbd>F</kbd> follow nearest robot &nbsp; <kbd>T</kbd> time ×1.5 / ×4 &nbsp; <kbd>H</kbd> hide UI &nbsp; <kbd>Esc</kbd> release mouse</div>
+  <div id="cross"></div>
+  <div id="label"></div>
+</div>
+<div id="start">
+  <h1>Kiwi orchard<br><span>walk</span></h1>
+  <p>Five Spot robots harvest kiwis under the pergola using the RL arm policy we trained. Each robot replays a different recorded simulation run in which it picked all six of its kiwis; the orchard is the procedural plantation from our MuJoCo scene.</p>
+  <p>Walk around, get close, watch them pick.</p>
+  <div class="btn">Click to enter</div>
+  <small id="loading">loading scene…</small>
+</div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module" src="app.js"></script>
