@@ -286,6 +286,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _build_grasp_catalog', src)
         self.assertIn('def enable_ik_grasp', src)
         self.assertIn('grasped[world] != 0', src)
+        self.assertIn('close_radius', src)
+        self.assertIn('def _gpu_fruit_world_m', src)
+        self.assertIn('catalog_grasp_tcp_err_mean_m', src)
         self.assertIn('def set_carry_progress', src)
         self.assertIn('def _commit_queued_carry_starts', src)
         self.assertIn('_easy_start_index_next', src)
@@ -468,6 +471,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertAlmostEqual(preset['easy_standoff_min_m'], 0.01)
         self.assertAlmostEqual(preset['hard_standoff_max_m'], 0.15)
         self.assertGreater(preset['pull_distance_m'], preset['pregrasp_standoff_m'])
+        self.assertAlmostEqual(preset['jaw_close_radius_m'], 0.045)
         self.assertNotIn('weld', IK_GRASP_PRESET)
         self.assertEqual(preset['gate_success_rate'], 0.85)
         skills = sample_world_skills(stage_named('grasp_detach'), 400, np.random.default_rng(0),

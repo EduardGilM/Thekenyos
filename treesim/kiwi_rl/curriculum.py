@@ -246,6 +246,9 @@ IK_GRASP_PRESET = {
     'ik_accept_err_m': 0.025,
     'waypoint_advance_rad': 0.08,
     'jaw_close_frac': 0.45,
+    # Close when the live TCP sits in the pad-pocket radius, not only at a
+    # joint waypoint. 4.5 cm covers the rigid kiwi plus a small IK residual.
+    'jaw_close_radius_m': 0.045,
     'eval_every': 8,
     'checkpoint_every': 4,
     'deposit_reward': 30.0,

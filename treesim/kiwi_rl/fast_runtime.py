@@ -677,12 +677,17 @@ def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype
                              n_waypoints: int, close_index: int,
                              jaw_hold: wp.array(dtype=float), jaw_open: float,
                              max_delta: float, advance_rad: float,
+                             site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
+                             xpos: wp.array2d(dtype=wp.vec3),
+                             fruit_bodies: wp.array(dtype=int),
+                             active_fruit: wp.array(dtype=int),
+                             close_radius: float,
                              out_applied: wp.array2d(dtype=float)):
     """Follow a hanging-fruit IK path, close, then pull. Fruit stays attached.
 
-    Active only on DETACH_ONLY. The jaw stays open until the grasp waypoint
-    and does not advance to the pull until the evaluator latches ``grasped``.
-    This is a privileged teacher, not a weld or a paper angle.
+    Active only on DETACH_ONLY. The jaw closes at the grasp waypoint or when
+    the live TCP is inside ``close_radius``. It does not advance to the pull
+    until the evaluator latches ``grasped``. Not a weld or a paper angle.
     """
     world, joint = wp.tid()
     if goal[world] != 1:
@@ -697,7 +702,13 @@ def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype
     if wp_idx >= n_waypoints:
         wp_idx = n_waypoints - 1
     row = start * n_waypoints + wp_idx
-    closing = 1 if (wp_idx >= close_index or detached[world] != 0) else 0
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    dist = wp.length(site_xpos[world, tcp_site] - xpos[world, fruit])
+    near = 1 if dist < close_radius else 0
+    closing = 1 if (wp_idx >= close_index or near != 0 or detached[world] != 0) else 0
     if joint < 6:
         desired = waypoint_q[row, joint]
         current = targets[world, joint + 12]
@@ -1477,9 +1488,12 @@ class FastRuntime:
         import mujoco
         data = mujoco.MjData(self.model)
         data.qpos[:] = qpos
-        mujoco.mj_kinematics(self.model, data)
+        mujoco.mj_forward(self.model, data)
         chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
         fruit_p = np.asarray(data.xpos[self.fruit_body], dtype=np.float64)
+        gpu_fruit = self._gpu_fruit_world_m()
+        if gpu_fruit is not None and float(np.linalg.norm(gpu_fruit - fruit_p)) > 0.02:
+            fruit_p = gpu_fruit
         q_home = qpos[qids].copy()
         safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
         if (safe.shape == (6,) and np.isfinite(safe).all()
@@ -1496,7 +1510,9 @@ class FastRuntime:
         starts, paths, hard_flags = [], [], []
         rng = np.random.default_rng(13)
         attempts = 0
-        max_attempts = n * 24
+        max_attempts = n * 48
+        close_i = grasp_close_index(n_approach + 2)
+        grasp_tcp_errors = []
         q_init = q_seed.copy()
         while len(starts) < n and attempts < max_attempts:
             attempts += 1
@@ -1531,9 +1547,17 @@ class FastRuntime:
                 qids, dofs, ranges, approach_world=approach, accept_err_m=accept)
             if path is None or path.shape[0] != waypoints.shape[0]:
                 continue
+            data.qpos[:] = qpos
+            data.qpos[qids] = path[close_i]
+            mujoco.mj_forward(self.model, data)
+            tcp = np.asarray(data.site_xpos[self.tcp_site], dtype=np.float64)
+            grasp_err = float(np.linalg.norm(tcp - fruit_p))
+            if not np.isfinite(grasp_err) or grasp_err > accept + 0.01:
+                continue
             starts.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
             paths.append(path.astype(np.float32))
             hard_flags.append(bool(want_hard))
+            grasp_tcp_errors.append(grasp_err)
             q_init = np.asarray(arm_q, dtype=np.float64)
         if not starts:
             raise ValueError('grasp IK found no physics-safe start that reaches the hanging fruit')
@@ -1559,8 +1583,27 @@ class FastRuntime:
             'n_hard_starts': n_hard,
             'n_waypoints': int(self._n_waypoints),
             'grasp_close_index': int(self._grasp_close_index),
+            'catalog_grasp_tcp_err_mean_m': float(np.mean(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
+            'catalog_grasp_tcp_err_max_m': float(np.max(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
             'hover_error_m': 0.0,
         }
+
+    def _gpu_fruit_world_m(self):
+        """Settled hanging fruit from the GPU state. None if the buffer is empty."""
+        try:
+            host = np.asarray(self.data.xpos.numpy(), dtype=np.float64)
+        except (AttributeError, RuntimeError, ValueError):
+            return None
+        if host.ndim == 3 and host.shape[0] >= 1:
+            fruit = host[0, int(self.fruit_body)]
+        elif host.ndim == 2:
+            fruit = host[int(self.fruit_body)]
+        else:
+            return None
+        fruit = np.asarray(fruit, dtype=np.float64).reshape(3)
+        if not np.isfinite(fruit).all() or float(np.linalg.norm(fruit)) < 1e-6:
+            return None
+        return fruit
 
     def enable_ik_grasp(self, enabled=True, *, shaping_coef=None):
         """Hanging fruit, open jaw, privileged IK to grasp and pull.
@@ -1919,6 +1962,9 @@ class FastRuntime:
                 int(self._n_waypoints), int(self._grasp_close_index),
                 self._easy_jaw_hold, self._jaw_open,
                 float(max_delta), float(IK_GRASP_PRESET['waypoint_advance_rad']),
+                self.data.site_xpos, int(self.tcp_site), self.data.xpos,
+                self.task.fruit_body, self.task.active_fruit,
+                float(IK_GRASP_PRESET['jaw_close_radius_m']),
                 self._teacher_applied],
                 device=self.device)
         applied = wp.to_torch(self._teacher_applied)
