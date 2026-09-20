@@ -18,6 +18,7 @@ JAW_FORCE_LIMIT_N = 15.0
 # the simplified liner. Basket contact is still mandatory; this tolerance
 # only prevents that numerical penetration from resetting the dwell forever.
 CONTAINMENT_TOL_M = .012
+CONTAINMENT_JITTER_TOL_M = .020
 MAX_FRUITS = 5
 FORCE_CHECKS = {
     'source': 'MJWarp efc.force normal constraint rows',
@@ -162,6 +163,14 @@ def _record(
               basket_size[1] / 2. - wall + CONTAINMENT_TOL_M and
               local[2] - extent[2] >= basket_center[2] + wall / 2. - CONTAINMENT_TOL_M and
               local[2] + extent[2] < basket_center[2] + basket_size[2])
+    near_inside = (wp.abs(local[0] - basket_center[0]) + extent[0] <
+                   basket_size[0] / 2. - wall + CONTAINMENT_JITTER_TOL_M and
+                   wp.abs(local[1] - basket_center[1]) + extent[1] <
+                   basket_size[1] / 2. - wall + CONTAINMENT_JITTER_TOL_M and
+                   local[2] - extent[2] >=
+                   basket_center[2] + wall / 2. - CONTAINMENT_JITTER_TOL_M and
+                   local[2] + extent[2] <
+                   basket_center[2] + basket_size[2] + CONTAINMENT_JITTER_TOL_M)
     fruit_angular = wp.vec3(cvel[world, fruit_body_id][0], cvel[world, fruit_body_id][1], cvel[world, fruit_body_id][2])
     fruit_velocity = wp.vec3(cvel[world, fruit_body_id][3], cvel[world, fruit_body_id][4], cvel[world, fruit_body_id][5])
     fruit_velocity += wp.cross(fruit_angular, xipos[world, fruit_body_id] - subtree_com[world, fruit_root])
@@ -174,10 +183,11 @@ def _record(
         and inside and basket_contact[world] != 0)
     if contained_contact and relative_speed < SETTLE_SPEED_M_S:
         settle_time[world] += dt
-    elif contained_contact and relative_speed < SETTLE_JITTER_SPEED_M_S:
-        # Preserve a policy-rate stable dwell across one coarse-solver
-        # velocity spike, but never accumulate time above the physical gate.
-        settle_time[world] = wp.max(0.0, settle_time[world] - dt)
+    elif (detached[world] != 0 and hand_contact[world] == 0
+          and basket_contact[world] != 0 and near_inside
+          and relative_speed < SETTLE_JITTER_SPEED_M_S):
+        # Preserve, but never accumulate, dwell across coarse-solver jitter.
+        settle_time[world] = settle_time[world]
     else:
         settle_time[world] = 0.
     up = chassis_rotation[2, 2]

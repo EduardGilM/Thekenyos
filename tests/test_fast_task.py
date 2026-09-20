@@ -38,8 +38,11 @@ class FastTaskGpuTest(unittest.TestCase):
         </worldbody><equality><connect name="fruit_connect" site1="fruit_site" site2="anchor"/></equality></mujoco>'''
 
     def setUp(self):
-        from treesim.kiwi_rl.fast_task import CONTAINMENT_TOL_M, FastHarvestTask
+        from treesim.kiwi_rl.fast_task import (
+            CONTAINMENT_JITTER_TOL_M, CONTAINMENT_TOL_M, FastHarvestTask,
+        )
         self.assertEqual(CONTAINMENT_TOL_M, 0.012)
+        self.assertEqual(CONTAINMENT_JITTER_TOL_M, 0.020)
         self.model = self.mujoco.MjModel.from_xml_string(self.xml)
         native = self.mujoco.MjData(self.model)
         self.mujoco.mj_forward(self.model, native)

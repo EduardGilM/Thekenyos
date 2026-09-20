@@ -759,8 +759,9 @@ release-training aids; outside-crate generalisation still requires a later
 matched evaluation. The 5 ms rigid solver can settle a fruit 7–10 mm into the
 simplified liner, so the containment gate uses a documented 12 mm
 numerical liner tolerance. The 0.05 m/s settle gate remains; substep jitter
-below 0.10 m/s decays rather than accumulates dwell. Loss of liner contact,
-containment or hand clearance still resets it, and 0.5 s stable is required.
+inside a 20 mm numerical band and below 0.10 m/s preserves but never accumulates
+dwell. Loss of liner contact, that band or hand clearance still resets it, and
+only strict 12 mm containment below 0.05 m/s advances the required 0.5 s.
 
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \
