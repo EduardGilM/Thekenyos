@@ -37,11 +37,11 @@ POST_RADIUS_M = 0.095
 BEAM_HALF_M = (0.070, 0.052)
 FOOTER_RADIUS_M = 0.18
 FOOTER_HALF_M = 0.055
-# Azimuth 0 looks +X down the aisle; a small offset shows both post rows.
-CAMERA_LOOKAT = (2.4, 0.10, 0.78)
-CAMERA_DISTANCE_M = 17.0
-CAMERA_AZIMUTH_DEG = 20.0
-CAMERA_ELEVATION_DEG = -9.0
+# Azimuth 0 looks +X down the aisle. Stand at the west mouth, eye height.
+CAMERA_LOOKAT = (4.0, 0.05, 0.90)
+CAMERA_DISTANCE_M = 17.2
+CAMERA_AZIMUTH_DEG = 10.0
+CAMERA_ELEVATION_DEG = 0.5
 
 
 def _rgba(rgb, a=1.0) -> str:
@@ -128,6 +128,16 @@ def _value_field(rng, shape, waves):
     return field / peak
 
 
+def _block_field(rng, shape, cell: int) -> np.ndarray:
+    """Nearest-neighbour clumps that survive hfield filtering."""
+    gy = max(shape[0] // cell, 2)
+    gx = max(shape[1] // cell, 2)
+    grid = rng.random((gy, gx))
+    y = (np.arange(shape[0]) * gy) // shape[0]
+    x = (np.arange(shape[1]) * gx) // shape[1]
+    return grid[y[:, None], x[None, :]]
+
+
 def fruit_center(item) -> np.ndarray:
     """World fruit COM from ``place_fruit`` attach + Hayward radii."""
     return np.asarray(item.attach, dtype=np.float64) - np.array(
@@ -151,40 +161,43 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
     clump = _value_field(rng, (n, n), ((140, 1.0), (48, 0.55), (18, 0.25)))
     patch = _value_field(rng, (n, n), ((36, 1.0), (14, 0.45)))
     grit = _value_field(rng, (n, n), ((8, 1.0), (3, 0.40)))
+    blocks = _block_field(rng, (n, n), 18)
+    turf = _block_field(rng, (n, n), 9)
     speck = rng.random((n, n))
     wander = _value_field(rng, (n, n), ((50, 1.0), (20, 0.4)))
 
-    grass_dark = np.array([0.16, 0.22, 0.08])
-    grass_mid = np.array([0.27, 0.32, 0.11])
-    grass_sun = np.array([0.40, 0.38, 0.14])
-    straw = np.array([0.48, 0.40, 0.18])
-    soil_wet = np.array([0.20, 0.12, 0.06])
-    soil_loam = np.array([0.46, 0.30, 0.14])
-    soil_dust = np.array([0.62, 0.44, 0.22])
-    rut_col = np.array([0.24, 0.16, 0.08])
-    packed = np.array([0.50, 0.42, 0.28])
+    grass_dark = np.array([0.12, 0.18, 0.06])
+    grass_mid = np.array([0.24, 0.30, 0.09])
+    grass_sun = np.array([0.38, 0.36, 0.12])
+    straw = np.array([0.50, 0.41, 0.16])
+    soil_wet = np.array([0.16, 0.09, 0.04])
+    soil_loam = np.array([0.40, 0.24, 0.10])
+    soil_dust = np.array([0.58, 0.38, 0.18])
+    rut_col = np.array([0.18, 0.11, 0.05])
+    packed = np.array([0.48, 0.40, 0.26])
 
-    t = np.clip(0.42 * clump + 0.33 * patch + 0.25 * wander, 0.0, 1.0)
+    t = np.clip(0.30 * clump + 0.25 * patch + 0.20 * wander + 0.25 * blocks, 0.0, 1.0)
     grass = (1.0 - t)[..., None] * grass_dark + t[..., None] * grass_mid
-    grass = grass * (0.88 + 0.22 * grit[..., None])
-    sun_w = np.clip((clump - 0.48) / 0.42, 0.0, 1.0) * np.clip((patch - 0.35) / 0.50, 0.0, 1.0)
-    grass = grass * (1.0 - 0.70 * sun_w)[..., None] + sun_w[..., None] * grass_sun
-    dry_w = np.clip((wander - 0.52) / 0.35, 0.0, 1.0) * 0.70
+    grass = grass * (0.78 + 0.34 * turf[..., None] + 0.12 * grit[..., None])
+    sun_w = np.clip((blocks - 0.62), 0.0, 1.0) * 0.85
+    grass = grass * (1.0 - sun_w)[..., None] + sun_w[..., None] * grass_sun
+    dry_w = np.clip((turf - 0.72), 0.0, 1.0) * 0.90
     grass = grass * (1.0 - dry_w)[..., None] + dry_w[..., None] * straw
-    # Broad mower bands along the street; period ~0.55 m so they survive mip.
-    mow = 0.5 + 0.5 * np.sin(yy * (2.0 * np.pi / 0.55) + 0.55 * np.sin(xx * 0.22))
+    scars = np.clip((blocks - 0.88) / 0.10, 0.0, 1.0)
+    grass = grass * (1.0 - 0.75 * scars)[..., None] + scars[..., None] * soil_loam
+    mow = 0.5 + 0.5 * np.sin(yy * (2.0 * np.pi / 0.48) + 0.40 * np.sin(xx * 0.18))
     aisle = np.clip(1.0 - np.abs(yy - aisle_y) / 1.85, 0.0, 1.0)
-    grass = grass * (1.0 - 0.28 * aisle * (mow - 0.5))[..., None]
+    grass = grass * (1.0 - 0.34 * aisle * (mow - 0.5))[..., None]
 
     soil_w = np.zeros((n, n))
     for y in ys:
-        edge = 0.22 + 0.28 * (wander - 0.5)
+        edge = 0.18 + 0.34 * (wander - 0.5) + 0.10 * (blocks - 0.5)
         d = np.abs(yy - y)
-        soil_w = np.maximum(soil_w, np.clip((0.95 + edge - d) / 0.28, 0.0, 1.0))
-    soil_t = np.clip(0.40 * grit + 0.35 * patch + 0.25 * clump, 0.0, 1.0)
+        soil_w = np.maximum(soil_w, np.clip((0.88 + edge - d) / 0.10, 0.0, 1.0))
+    soil_t = np.clip(0.35 * grit + 0.25 * patch + 0.40 * turf, 0.0, 1.0)
     soil = (1.0 - soil_t)[..., None] * soil_wet + soil_t[..., None] * soil_dust
-    soil = soil * (0.88 + 0.20 * speck[..., None]) + 0.08 * soil_loam
-    edge_col = np.array([0.22, 0.18, 0.08])
+    soil = soil * (0.82 + 0.28 * blocks[..., None]) + 0.10 * soil_loam
+    edge_col = np.array([0.20, 0.16, 0.07])
     w = np.clip(soil_w, 0.0, 1.0)
     rgb = np.empty((n, n, 3))
     low = w < 0.5
@@ -195,23 +208,22 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
     rgb[hi] = (1.0 - t_hi[hi]) * edge_col + t_hi[hi] * soil[hi]
 
     track = np.zeros((n, n))
-    for side in (-0.62, 0.62):
+    for side in (-0.64, 0.64):
         d = np.abs(yy - (aisle_y + side))
-        track = np.maximum(track, np.clip(1.0 - d / 0.32, 0.0, 1.0) ** 1.15)
-    track *= (0.70 + 0.30 * grit) * (1.0 - 0.35 * soil_w)
-    rgb = rgb * (1.0 - 0.82 * track)[..., None] + track[..., None] * rut_col
+        track = np.maximum(track, np.clip(1.0 - d / 0.30, 0.0, 1.0) ** 1.05)
+    track *= (0.78 + 0.22 * grit) * (1.0 - 0.20 * soil_w)
+    rgb = rgb * (1.0 - 0.88 * track)[..., None] + track[..., None] * rut_col
 
     pads = np.zeros((n, n))
     for x in xs:
         for y in ys:
             pads = np.maximum(pads, np.clip(1.0 - np.hypot(xx - x, yy - y) / 0.38, 0.0, 1.0))
-    rgb = rgb * (1.0 - 0.70 * pads)[..., None] + pads[..., None] * packed
+    rgb = rgb * (1.0 - 0.78 * pads)[..., None] + pads[..., None] * packed
 
-    stones = (speck > 0.988).astype(np.float64) * (0.45 + 0.55 * grit)
-    rgb = rgb * (1.0 - 0.65 * stones)[..., None] + stones[..., None] * np.array([0.40, 0.36, 0.28])
-    litter = ((speck < 0.010) & (soil_w < 0.35)).astype(np.float64)
-    rgb = rgb * (1.0 - 0.45 * litter)[..., None] + litter[..., None] * np.array([0.34, 0.30, 0.10])
-    rgb *= 0.70 + 0.48 * clump[..., None]
+    stones = (speck > 0.986).astype(np.float64)
+    rgb = rgb * (1.0 - 0.70 * stones)[..., None] + stones[..., None] * np.array([0.38, 0.34, 0.26])
+    litter = ((speck < 0.012) & (soil_w < 0.35)).astype(np.float64)
+    rgb = rgb * (1.0 - 0.50 * litter)[..., None] + litter[..., None] * np.array([0.32, 0.28, 0.08])
     return _png_bytes(np.flipud(np.clip(rgb, 0, 1)) * 255.0)
 
 
@@ -221,19 +233,18 @@ def wood_texture(seed: int) -> bytes:
     n = 512
     yy, xx = np.mgrid[0:n, 0:n].astype(np.float64)
     noise = _value_field(rng, (n, n), ((40, 1.0), (14, 0.55), (5, 0.25)))
-    grain = 0.5 + 0.5 * np.sin(xx * 0.18 + 5.2 * np.sin(yy * 0.028) + 2.4 * noise)
-    checks = np.clip(np.sin(xx * 0.9 + 8.0 * noise) * 0.5 + 0.15, 0.0, 1.0) ** 2
-    weather = _value_field(rng, (n, n), ((22, 1.0), (8, 0.4)))
-    dark = np.array([0.18, 0.11, 0.06])
-    mid = np.array([0.52, 0.34, 0.16])
-    light = np.array([0.72, 0.52, 0.28])
-    silver = np.array([0.46, 0.38, 0.26])
-    # Broad rings so cylinder UVs still show grain at 15 m.
-    rings = 0.5 + 0.5 * np.sin(xx * 0.055 + 1.8 * noise)
-    rgb = dark + (mid - dark) * (0.35 * grain + 0.65 * rings)[..., None]
-    rgb = rgb * (1.0 - 0.40 * weather)[..., None] + weather[..., None] * light
-    rgb = rgb * (1.0 - 0.45 * checks)[..., None] + checks[..., None] * dark
-    gray = np.clip((weather - 0.48) / 0.40, 0.0, 1.0) * 0.42
+    grain = 0.5 + 0.5 * np.sin(xx * 0.55 + 3.2 * np.sin(yy * 0.04) + 1.6 * noise)
+    cracks = (np.sin(xx * 2.4 + 12.0 * noise) > 0.92).astype(np.float64)
+    weather = _block_field(rng, (n, n), 28)
+    dark = np.array([0.16, 0.10, 0.06])
+    mid = np.array([0.40, 0.26, 0.13])
+    light = np.array([0.58, 0.42, 0.24])
+    silver = np.array([0.42, 0.36, 0.26])
+    rings = 0.5 + 0.5 * np.sin(xx * 0.12 + 1.2 * noise)
+    rgb = dark + (mid - dark) * (0.45 * grain + 0.55 * rings)[..., None]
+    rgb = rgb * (1.0 - 0.35 * weather)[..., None] + weather[..., None] * light
+    rgb = rgb * (1.0 - 0.70 * cracks)[..., None] + cracks[..., None] * dark
+    gray = np.clip((weather - 0.55), 0.0, 1.0) * 0.55
     rgb = rgb * (1.0 - gray)[..., None] + gray[..., None] * silver
     return _png_bytes(np.clip(rgb, 0, 1) * 255.0)
 
@@ -246,34 +257,34 @@ def leaf_texture(seed: int, sun: bool) -> bytes:
     u = (xx / (n - 1)) * 2.0 - 1.0
     v = yy / (n - 1)
     mottling = _value_field(rng, (n, n), ((18, 1.0), (7, 0.5), (3, 0.25)))
-    speckle = 0.90 + 0.10 * rng.random((n, n))
-    midrib = np.exp(-((u * 11.0) ** 2)) * (0.55 + 0.45 * v)
+    blotch = _block_field(rng, (n, n), 22)
+    speckle = 0.86 + 0.14 * rng.random((n, n))
+    midrib = np.exp(-((u * 16.0) ** 2)) * (0.40 + 0.60 * v)
     veins = np.zeros((n, n))
     for k in range(-6, 7):
         if k == 0:
             continue
-        shift = 0.10 * k * (0.12 + 0.88 * v)
-        slant = 0.18 * k * (v - 0.08)
-        veins += np.exp(-(((u - shift - 0.15 * slant) * 14.0) ** 2)) * (
-            0.50 * (1.0 - abs(k) / 8.0)
+        shift = 0.11 * k * (0.10 + 0.90 * v)
+        slant = 0.22 * k * (v - 0.06)
+        veins += np.exp(-(((u - shift - 0.12 * slant) * 22.0) ** 2)) * (
+            0.85 * (1.0 - abs(k) / 8.0)
         )
-    veins *= 0.35 + 0.65 * v
-    edge = np.clip(1.0 - (np.abs(u) ** 1.6) * 0.22 - (v - 0.5) ** 2 * 0.15, 0.55, 1.0)
+    veins *= 0.25 + 0.75 * v
+    serration = 0.92 + 0.08 * np.sin(v * 42.0 * np.pi) * np.clip(np.abs(u), 0, 1)
     if sun:
-        dark = np.array([0.28, 0.48, 0.10])
-        light = np.array([0.52, 0.68, 0.16])
-        rib = np.array([0.40, 0.54, 0.12])
+        dark = np.array([0.16, 0.34, 0.08])
+        light = np.array([0.34, 0.52, 0.12])
+        rib = np.array([0.22, 0.36, 0.08])
     else:
-        dark = np.array([0.10, 0.30, 0.06])
-        light = np.array([0.22, 0.46, 0.10])
-        rib = np.array([0.16, 0.36, 0.08])
-    mix = np.clip(0.28 + 0.55 * mottling + 0.17 * v, 0.0, 1.0)
+        dark = np.array([0.07, 0.20, 0.05])
+        light = np.array([0.16, 0.34, 0.08])
+        rib = np.array([0.10, 0.24, 0.06])
+    mix = np.clip(0.22 + 0.40 * mottling + 0.38 * blotch, 0.0, 1.0)
     rgb = dark + (light - dark) * mix[..., None]
-    rgb *= speckle[..., None] * edge[..., None]
-    rgb = rgb * (1.0 - 0.28 * midrib)[..., None] + midrib[..., None] * rib
-    rgb = rgb * (1.0 - 0.16 * np.clip(veins, 0, 1))[..., None] + (
-        np.clip(veins, 0, 1)[..., None] * (rib * 0.85)
-    )
+    rgb *= speckle[..., None] * serration[..., None]
+    rgb = rgb * (1.0 - 0.45 * midrib)[..., None] + midrib[..., None] * rib
+    veins = np.clip(veins, 0, 1)
+    rgb = rgb * (1.0 - 0.38 * veins)[..., None] + veins[..., None] * rib
     return _png_bytes(np.clip(rgb, 0, 1) * 255.0)
 
 
@@ -333,13 +344,21 @@ def mjcf(floor, skeleton, fruit, leaves, pads, xs, ys) -> str:
                 f'    <geom type="cylinder" pos="{mid[0]:.5f} {mid[1]:.5f} {mid[2]:.5f}" '
                 f'size="{POST_RADIUS_M:.3f} {0.5 * length:.5f}" '
                 f'quat="{quat[0]:.5f} {quat[1]:.5f} {quat[2]:.5f} {quat[3]:.5f}" '
-                f'material="wood" rgba="0.62 0.46 0.26 1" contype="0" conaffinity="0"/>'
+                f'material="wood" rgba="0.58 0.42 0.24 1" contype="0" conaffinity="0"/>'
             )
+            low = foot if foot[2] <= mid[2] else np.array([mid[0], mid[1], mid[2] - 0.5 * length])
+            for frac in (0.22, 0.48, 0.74):
+                ring_z = float(low[2]) + frac * length
+                geoms.append(
+                    f'    <geom type="cylinder" pos="{low[0]:.5f} {low[1]:.5f} {ring_z:.5f}" '
+                    f'size="{POST_RADIUS_M + 0.008:.3f} 0.014" material="wood" '
+                    f'rgba="0.28 0.18 0.10 1" contype="0" conaffinity="0"/>'
+                )
             top = seg.end if seg.end[2] > seg.start[2] else seg.start
             geoms.append(
                 f'    <geom type="cylinder" pos="{top[0]:.5f} {top[1]:.5f} {top[2] - 0.04:.5f}" '
-                f'size="{POST_RADIUS_M + 0.012:.3f} 0.016" material="steel" '
-                f'rgba="0.30 0.30 0.30 1" contype="0" conaffinity="0"/>'
+                f'size="{POST_RADIUS_M + 0.014:.3f} 0.018" material="steel" '
+                f'rgba="0.34 0.34 0.34 1" contype="0" conaffinity="0"/>'
             )
         elif seg.order == 0:
             quat = _quat_wxyz_from_z(axis)
@@ -411,7 +430,7 @@ def mjcf(floor, skeleton, fruit, leaves, pads, xs, ys) -> str:
   <compiler angle="radian"/>
   <option gravity="0 0 -9.81"/>
   <visual>
-    <global offwidth="1920" offheight="1080" fovy="38"/>
+    <global offwidth="1920" offheight="1080" fovy="42"/>
     <headlight ambient=".24 .24 .22" diffuse=".44 .44 .40" specular=".10 .10 .09"/>
     <rgba haze=".58 .66 .72 1"/>
     <map fogstart="14" fogend="48" znear=".12" zfar="90"/>
@@ -450,9 +469,10 @@ def mjcf(floor, skeleton, fruit, leaves, pads, xs, ys) -> str:
     <light name="fill" pos="-4 -8 6" diffuse=".30 .32 .28"/>
     <light name="rim" directional="true" pos="-8 10 8" dir="0.28 -0.22 -0.92"
            diffuse=".18 .24 .30"/>
-    <light name="aisle0" pos="-8 0 1.15" diffuse=".50 .42 .28"/>
-    <light name="aisle1" pos="-1 0 1.15" diffuse=".52 .44 .30"/>
-    <light name="aisle2" pos="6 0 1.15" diffuse=".46 .38 .24"/>
+    <light name="aisle0" pos="-10 0 1.05" diffuse=".70 .58 .38"/>
+    <light name="aisle1" pos="-2 0 1.05" diffuse=".74 .60 .40"/>
+    <light name="aisle2" pos="6 0 1.05" diffuse=".62 .50 .32"/>
+    <light name="aisle3" pos="0 -1.4 1.10" diffuse=".40 .36 .28"/>
     <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
           pos="0 0 {min_z:.5f}" rgba="1 1 1 1"
           friction="{float(floor.friction):.3f} 0.01 0.001"/>

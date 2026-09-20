@@ -87,8 +87,10 @@ class KiwiStreetRenderTest(unittest.TestCase):
         self.assertGreater(xml.count('type="cylinder"'), street.ROWS * street.COLUMNS)
         center = street.fruit_center(fruit[0])
         self.assertIn(f"{center[0]:.5f} {center[1]:.5f} {center[2]:.5f}", xml)
-        self.assertGreaterEqual(street.CAMERA_AZIMUTH_DEG, 8.0)
-        self.assertLess(street.CAMERA_AZIMUTH_DEG, 35.0)
+        self.assertGreaterEqual(street.CAMERA_AZIMUTH_DEG, 4.0)
+        self.assertLess(street.CAMERA_AZIMUTH_DEG, 28.0)
+        self.assertGreater(street.CAMERA_ELEVATION_DEG, -6.0)
+        self.assertLess(street.CAMERA_ELEVATION_DEG, 8.0)
 
 
 if __name__ == "__main__":
