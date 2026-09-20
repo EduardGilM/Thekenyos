@@ -853,7 +853,11 @@ horizon), shapes the **stem load toward 8 N** while the fruit is held and
 still attached (guidance-gated, `potential_ref=4`), and reuses the `--easy`
 slip guard so the pin tightens toward at most `0.40` only when the fruit is
 leaving the mouth; the 15 N jaw fail stays active and the 0.45 pin that sat
-at 24 N is not used. `retained_detach_events` is logged per update. A held pick (`grasped`, 0.12 s hand
+at 24 N is not used. Harvest5 still lost most pulls to slip (retained detach
+0–9/512 per update), so the continue also pins at the `0.40` pull hold as
+soon as the oracle latches `grasped`, and pays the held detach `+40` once
+(fresh runs keep `+2`). These are training assists on the scripted jaw, not
+a calibrated grip force. `retained_detach_events` is logged per update. A held pick (`grasped`, 0.12 s hand
 contact) pays a one-shot `+100` during RL; eval keeps `guidance_weight=0`
 so that jackpot stays off the score. A slam-detach without the hold does
 not pay. During those RL
