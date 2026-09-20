@@ -749,22 +749,23 @@ promotion gates do not change and `training_ready` stays false.
 
 The current easy release curriculum starts at the collision-safe high hover and
 introduces the outside-crate catalog as `easy_far_frac` grows to 0.25; it is no
-longer a logging-only anneal. Reward shaping targets 14 cm above the rim, inside
-the scripted ≤16 cm release band only after fruit and TCP XY are over the
-opening; outside it first targets the collision-safe 28 cm hover. The CPU
+longer a logging-only anneal. Reward shaping and the scripted jaw both use that
+28 cm hover (open at most 30 cm above the rim) so the arm does not have to
+descend into the liner. This is a hover-high dump, not a measured carry. The CPU
 dashboard preview uses the same hover-first reset instead of showing a stale
-side-wall approach. Hover and release sit 15 cm toward the robot side of the
+side-wall approach. Hover sits 15 cm toward the robot side of the
 opening so the wrist stays outside the liner; the jaw cannot open below the
 rim. The high-hover joint pose is fitted for the pinned RELIC asset and rejected
-at runtime if TCP error, joint limits or arm/basket contacts disagree. Once the
-jaw opens it stays open and shaping stops. PPO excludes that
+at runtime if TCP error, joint limits or arm/basket contacts disagree. A
+privileged hold teacher starts at mix 1.0 and anneals after the first deposit
+burst so evaluation can stay at `teacher_mix=0`. PPO excludes the
 scripted jaw dimension, whitens advantages normally, and self-imitates only the
 causal episode prefix ending in success. The easy optimizer uses clip 0.2,
 learning rate 5e-4, four epochs and target KL 0.05. These are student-side
 release-training aids; outside-crate generalisation still requires a later
-matched evaluation. On the live RTX 5090, `--easy` is capped at three updates:
-easy37 peaked there and later updates regressed, while startup, training and
-final evaluation stay well below the requested ten-minute ceiling.
+matched evaluation. On the live RTX 5090, `--easy` is capped at 15 updates so
+the hold teacher can anneal and the final unassisted eval still fits the
+requested ten-minute ceiling.
 The 5 ms rigid solver can settle a fruit 7–10 mm into the
 simplified liner, so the containment gate uses a documented 12 mm
 numerical liner tolerance. The 0.05 m/s settle gate remains; substep jitter

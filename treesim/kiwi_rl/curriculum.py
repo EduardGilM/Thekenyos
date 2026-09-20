@@ -64,19 +64,20 @@ SPEEDRUN_PRESET = {
 # the liner, change promotion gates, or turn the oracle into an action teacher.
 # Eval still uses guidance_weight=0 and teacher_mix=0.
 EASY_PRESET = {
-    # easy37 peaked by update 3 and then regressed. Startup, three updates and
-    # final eval stay well below the requested ten-minute ceiling.
-    'updates': 3,
-    'teacher_mix': 0.0,
-    'teacher_horizon_updates': 60,
+    # Hover-high dump: opening at the wrist-safe hover so the arm never has to
+    # descend into the liner. 15 updates leave room to anneal the hold teacher
+    # and still finish a 3072-world eval inside the ten-minute ceiling.
+    'updates': 15,
+    'teacher_mix': 1.0,
+    'teacher_horizon_updates': 6,
     'entropy_coef': 0.001,
     'shaping_coef': 25.0,
     'open_xy_m': 0.15,
     'hover_clearance_m': 0.28,
-    # Keep the reset pose at the collision-safe high hover, but shape the
-    # free fruit into the scripted release band. This is a numerical
-    # curriculum target, not a measured grasp pose.
-    'release_target_clearance_m': 0.14,
+    # Shape and release at the same 28 cm hover. The 14 cm descent put the
+    # ~20 cm wrist through the liner; this is a hover-high dump, not a
+    # measured carry.
+    'release_target_clearance_m': 0.28,
     # Drop on the robot-side half of the opening so the ~20 cm wrist stays
     # outside the liner instead of hanging vertically inside the basket.
     'release_target_inset_x_m': 0.15,
@@ -90,7 +91,8 @@ EASY_PRESET = {
     # and hand XY to the opening. Introduce at most 25% outside-crate starts;
     # the prior all-far catalog prevented the release skill from bootstrapping.
     # Force the jaw open once both XY sit inside the opening AABB and the fruit
-    # is at most 16 cm above the rim. Over-opening starts stay behind this flag.
+    # is at most 30 cm above the rim (the 28 cm hover). Over-opening starts
+    # stay behind this flag.
     # The hold sweep stays at 0.40 m / 0.28 m so a closer student pose
     # cannot poison close-fraction.
     # 0.25 m shaping is flat at 0.7–1.2 m; 0.60 m is an engineering lever,
@@ -100,7 +102,7 @@ EASY_PRESET = {
     'release_at_center': True,
     'release_over_opening': True,
     'release_opening_inset_m': 0.04,
-    'release_max_above_rim_m': 0.16,
+    'release_max_above_rim_m': 0.30,
     'start_open_radius_m': 0.06,
     'start_inset_x_m': 0.0,
     'start_margin_m': 0.32,

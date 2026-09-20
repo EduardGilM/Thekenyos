@@ -106,9 +106,9 @@ class FastTrainerCLITest(unittest.TestCase):
         from train_fast import apply_easy_cli
         filled = apply_easy_cli(argparse.Namespace(
             easy=True, teacher_mix=None, shaping_coef=None, entropy_coef=0.01, ppo_epochs=2))
-        self.assertEqual(filled.teacher_mix, 0.0)
+        self.assertEqual(filled.teacher_mix, 1.0)
         self.assertEqual(filled.shaping_coef, 25.0)
-        self.assertEqual(filled.updates, 3)
+        self.assertEqual(filled.updates, 15)
         self.assertEqual(filled.entropy_coef, 0.001)
         self.assertEqual(filled.ppo_epochs, 4)
         kept = apply_easy_cli(argparse.Namespace(

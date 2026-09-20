@@ -693,15 +693,15 @@ class FastRuntime:
             hx, hy = opening_half_xy_m(inset_m=float(EASY_PRESET['release_opening_inset_m']))
             self._open_half_xy = wp.vec2(float(hx), float(hy))
             # Captured into the CUDA graph: changing this later does not
-            # retarget `_pin_scripted_jaw`. 16 cm above the rim is below
-            # the 28 cm hover so a hover-high dump is not forced.
+            # retarget `_pin_scripted_jaw`. 30 cm includes the 28 cm hover so
+            # the scripted jaw can open without descending into the liner.
             self._open_max_above_rim_m = float(EASY_PRESET['release_max_above_rim_m'])
             if (not np.isfinite(self._open_max_above_rim_m)
                     or not 0.0 <= self._open_max_above_rim_m <= 0.4):
                 raise ValueError('release_max_above_rim_m must be finite in [0, 0.4] m')
             # Outside the opening, shaping first targets the collision-safe
-            # 28 cm hover. Once fruit and TCP XY are over the hole, it switches
-            # to 14 cm inside the <=16 cm scripted release band.
+            # 28 cm hover. Once fruit and TCP XY are over the hole it stays
+            # there: release is the same hover, not a descent into the liner.
             release_target = float(EASY_PRESET['release_target_clearance_m'])
             release_inset_x = float(EASY_PRESET['release_target_inset_x_m'])
             if (not np.isfinite(release_target) or release_target < 0.05
@@ -1127,10 +1127,10 @@ class FastRuntime:
 
         Does not weld fruit, spawn the arm inside the liner, or write fruit
         into the liner. Starts begin at the high hover and introduce a bounded
-        outside-crate fraction. Shaping pulls fruit 3D toward the 14 cm release
-        target and hand XY over the hole. The script opens when both
-        XY sit over the opening AABB and the fruit is at most 16 cm above the
-        rim, stays open, and disables shaping for the free fall. Eval
+        outside-crate fraction. Shaping pulls fruit 3D toward the 28 cm hover
+        and hand XY over the hole. The script opens when both XY sit over the
+        opening AABB and the fruit is at most 30 cm above the rim, so the
+        wrist-safe hover can dump without descending into the liner. Eval
         still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
         fractions are a rigid contact sweep, not a calibrated tissue-safe force.
         """

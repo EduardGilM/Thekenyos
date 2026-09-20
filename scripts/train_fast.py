@@ -656,6 +656,8 @@ def run(args):
             config['release_opening_inset_m'] = easy_info.get('release_opening_inset_m')
             config['release_max_above_rim_m'] = easy_info.get('release_max_above_rim_m')
             config['release_target_clearance_m'] = EASY_PRESET['release_target_clearance_m']
+            config['release_target_inset_x_m'] = EASY_PRESET['release_target_inset_x_m']
+            config['safe_hover_arm_q'] = [float(q) for q in EASY_PRESET['safe_hover_arm_q']]
             config['far_horizon_updates'] = easy_info.get('far_horizon_updates')
             config['far_frac_cap'] = easy_info.get('far_frac_cap')
             config['hover_clearance_m'] = easy_info.get('hover_clearance_m')
