@@ -509,6 +509,21 @@ def visual_meshes(floor: OrchardFloor, stride: int = 2):
         idx = np.asarray(faces[kind], dtype=np.int32)
         if idx.size:
             out.append((verts, idx, color))
+    # ponytail: a 10 km visual apron covers the horizon; streamed terrain if robots leave the block.
+    boundary = np.concatenate([
+        verts[:nx], verts[2 * nx - 1::nx],
+        verts[-2:-nx - 1:-1], verts[-2 * nx:0:-nx],
+    ])
+    outer = boundary.copy()
+    outer[:, :2] *= max(10000.0, floor.half_extent_m * 2) / floor.half_extent_m
+    outer[:, 2] = [floor.aisle_plane_z(x, y) + 0.002 for x, y in outer[:, :2]]
+    count = len(boundary)
+    apron_faces = []
+    for i in range(count):
+        j = (i + 1) % count
+        apron_faces.extend((i, i + count, j, j, i + count, j + count))
+    out.append((np.concatenate([boundary, outer]),
+                np.asarray(apron_faces, dtype=np.int32), GRASS_COLOR))
     return out
 
 
@@ -540,7 +555,7 @@ def add_to_builder(builder, floor: OrchardFloor):
         mesh = newton.Mesh(verts, faces)
         builder.add_shape_mesh(
             -1, mesh=mesh, cfg=visual, color=color,
-            label=("orchard_grass", "orchard_soil", "orchard_furrow")[i],
+            label=("orchard_grass", "orchard_soil", "orchard_furrow", "orchard_horizon")[i],
         )
     return floor.ground_z
 

@@ -7,7 +7,7 @@ import numpy as np
 from treesim.config import FruitParams, preset
 from treesim.orchard_terrain import (
     AISLE_HEIGHT_M, POST_EMBED_M, floor_kwargs_for_plantation,
-    sample_orchard_floor,
+    sample_orchard_floor, visual_meshes,
 )
 from treesim.pergola import generate, place_fruit
 
@@ -69,6 +69,19 @@ class OrchardTerrainTest(unittest.TestCase):
             floor.canopy_z(0.0, 0.0) - floor.aisle_plane_z(0.0, 0.0), 1.6)
         # With no ruts or noise, ground follows the aisle plane within the 1 cm crown.
         self.assertLess(abs(floor.ground_z(0.0, 0.0) - floor.aisle_plane_z(0.0, 0.0)), 0.015)
+
+    def test_horizon_apron_joins_terrain_edge(self):
+        floor = _pinned(slope_deg=2.0)
+        meshes = visual_meshes(floor)
+        verts, faces, _ = meshes[-1]
+        count = len(verts) // 2
+        self.assertGreaterEqual(np.max(np.abs(verts[count:, :2])), 10000.0)
+        for x, y, z in verts[:count]:
+            self.assertAlmostEqual(z, floor.ground_z(x, y) + 0.002, places=5)
+        for x, y, z in verts[count:]:
+            self.assertAlmostEqual(z, floor.aisle_plane_z(x, y) + 0.002, places=4)
+        self.assertTrue(np.isfinite(verts).all())
+        self.assertLess(faces.max(), len(verts))
 
     def test_invalid_inputs(self):
         with self.assertRaises(ValueError):

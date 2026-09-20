@@ -700,7 +700,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
     terrain_fn = None
     terrain_params = None
     if num_envs == 1:
-        builder.add_ground_plane()
+        builder.add_ground_plane(cfg=builder.ShapeConfig(is_visible=orchard_floor is None))
         if orchard_floor is not None:
             from .orchard_terrain import add_to_builder
             terrain_fn = add_to_builder(builder, orchard_floor)
@@ -715,7 +715,7 @@ def build(config: TreeConfig, skeleton: TreeSkeleton,
         # better conditioning, and the one global terrain/ground is then valid
         # for every env).  The viewer spreads them on the display grid.
         main.replicate(builder, world_count=num_envs)
-        main.add_ground_plane()
+        main.add_ground_plane(cfg=main.ShapeConfig(is_visible=orchard_floor is None))
         if orchard_floor is not None:
             from .orchard_terrain import add_to_builder
             terrain_fn = add_to_builder(main, orchard_floor)
