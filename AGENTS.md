@@ -261,7 +261,20 @@ physical success criteria remain strict. Preserve the original experiment
 snapshot and its source hashes.
 
 Camera geometry follow-up uses `/home/ubuntu/Thekenyos-visual-training-v4`;
-`v3` contains development pilots. The scene's old 6.644 cm rendering near plane
+`v3` contains development pilots. Wrist-search curriculum source on dayone is
+`/home/ubuntu/Thekenyos-wrist-search-v4`; do not overwrite visual, stationary,
+estimated, assisted, `v1`, `v2` or `v3` snapshots. `v1` keeps the original search
+terms; `v2` is the off-axis grab-02 run; `v3` queued release/carry then collect-02.
+Collect-03 uses training-only deposit mix/shaping; evaluations stay pick with
+those terms off. Do not enable `--search-rewards` on collect: the ToF gate would
+zero basket-approach progress after the weld. Search
+reward terms are `SEARCH_*` in `treesim/visual_kiwi_env.py`. Search-grab places
+the target inside the wrist depth FOV at 20–40 cm and parks other fruit;
+privileged ToF-in-view counts as a lock, and the walking jaw mean is biased
+closed. Untrained `initial-policy.zip` files are not encoder warm-starts.
+Evaluations keep that spawn and turn search rewards off. A trained wrist-only
+S0v checkpoint (`steps > 0`) may encoder-warm-start; skip random
+`initial-policy.zip` and do not load archived `stationary-kiwi-ppo-01`. The scene's old 6.644 cm rendering near plane
 clipped geometry at the hand TCP. Keep the robot-camera-only 5 mm near-plane
 fix and matching metric-depth conversion, restore shared visual settings after
 rendering, and retain the independent 0.15 m ToF validity cutoff. Preserve off-axis
@@ -277,6 +290,12 @@ hand RGB/ToF color heuristic is not validated real-kiwi perception. Stop transla
 monocular range after hand-depth acquisition. Keep all failed/contactful attempts,
 matched body-position comparisons and camera ablations; a brief assisted hold
 still does not validate contact-only grasping, basket collection or damage safety.
+Trainer-only `--deposit-mix` / `--deposit-shaping` may sample carry/release
+resets and pay hold/open-near-basket terms during collect training. Evaluations
+keep `start_phase=pick` and shaping off. Do not change environment hashes to
+warm-start an existing visual checkpoint. Vast deposit source is
+`/workspace/Thekenyos-wrist-deposit-v1`; do not overwrite wrist-search `v1`/`v2`/`v3`,
+visual, stationary, estimated or assisted snapshots.
 
 ## Stationary close-fruit camera lesson
 

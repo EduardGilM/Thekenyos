@@ -9,7 +9,10 @@ import mujoco
 import numpy as np
 
 from treesim.basket_kiwi_env import BasketTask
-from treesim.visual_kiwi_env import CAMERA_COUNT, RGB_CHANNELS, RobotCameras, VisionConfig, VisualKiwiEnv, camera_axes, depth_measurement
+from treesim.visual_kiwi_env import (
+    CAMERA_COUNT, RGB_CHANNELS, RGB_FOVY_DEG, RobotCameras, VisionConfig,
+    VisualKiwiEnv, camera_axes, depth_measurement,
+)
 
 
 class VisualContractTest(unittest.TestCase):
@@ -39,6 +42,24 @@ class VisualContractTest(unittest.TestCase):
             VisualKiwiEnv.set_ablation(dummy, 'head')
         VisualKiwiEnv.set_ablation(dummy, 'hand')
         self.assertEqual(dummy.ablation, 'hand')
+
+    def test_fruit_color_mask_accepts_tan_kiwi_and_rejects_leaves(self):
+        from treesim.visual_servo import brown_mask
+        kiwi = np.zeros((8, 8, 3), np.uint8)
+        kiwi[..., 0], kiwi[..., 1], kiwi[..., 2] = 160, 90, 40
+        self.assertTrue(brown_mask(kiwi).all())
+        leaf = np.zeros((8, 8, 3), np.uint8)
+        leaf[..., 0], leaf[..., 1], leaf[..., 2] = 40, 120, 30
+        self.assertFalse(brown_mask(leaf).any())
+
+    def test_fruit_color_mask_accepts_tan_kiwi_and_rejects_leaves(self):
+        from treesim.visual_servo import brown_mask
+        kiwi = np.zeros((8, 8, 3), np.uint8)
+        kiwi[..., 0], kiwi[..., 1], kiwi[..., 2] = 160, 90, 40
+        self.assertTrue(brown_mask(kiwi).all())
+        leaf = np.zeros((8, 8, 3), np.uint8)
+        leaf[..., 0], leaf[..., 1], leaf[..., 2] = 40, 120, 30
+        self.assertFalse(brown_mask(leaf).any())
 
     def test_camera_axes_orthonormal(self):
         for pitch in np.linspace(-np.pi, np.pi, 25):
@@ -233,7 +254,7 @@ class VisualIntegrationTest(unittest.TestCase):
     def test_off_axis_render_matches_camera_projection(self):
         from treesim.visual_servo import pinhole_intrinsics, project_points
         model = mujoco.MjModel.from_xml_string('<mujoco><worldbody><geom type="plane" size="5 5 .1" rgba="0 0 1 1"/>'
-                                              '<geom type="box" size=".01 .01 .01" pos=".1 .15 .7" rgba="1 0 0 1"/>'
+                                              '<geom type="box" size=".01 .01 .01" pos=".06 .08 .7" rgba="1 0 0 1"/>'
                                               '</worldbody></mujoco>')
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
@@ -243,7 +264,7 @@ class VisualIntegrationTest(unittest.TestCase):
         cameras.pose = lambda index: (np.array([0., 0., 1.]), np.array([0., 0., -1.]), np.array([0., 1., 0.]))
         rgb, _ = cameras.capture(np.random.default_rng(1))
         rows, cols = np.nonzero(rgb[0].astype(float) > rgb[2].astype(float)+20)
-        expected, _ = project_points(np.array([.1, -.15, .3]), pinhole_intrinsics(64, 75.))
+        expected, _ = project_points(np.array([.06, -.08, .3]), pinhole_intrinsics(64, RGB_FOVY_DEG))
         np.testing.assert_allclose([cols.mean(), rows.mean()], expected, atol=1.2)
 
     def test_rendered_occlusion_is_not_filtered(self):
@@ -422,6 +443,21 @@ class VisualIntegrationTest(unittest.TestCase):
             self.assertTrue(info['success'], info)
             self.assertFalse(env.env.data.eq_active[env.env.grips].any())
             self.assertGreaterEqual(info['settle_times_s'][env.env.target_index], .5)
+
+    def test_search_spawn_starts_inside_hand_depth_and_detects(self):
+        from treesim.visual_kiwi_env import kiwi_camera_uv
+        env = self.make_env(vision=VisionConfig(noise=False), search_spawn=True, search_rewards=True,
+                            view_weight=1., guidance_weight=1.)
+        _, info = env.reset(seed=21)
+        physics = env.env
+        self.assertTrue(info['search_spawn'])
+        _, depth_in_view, _ = kiwi_camera_uv(physics.model, physics.data, physics.ee_depth,
+                                             env.vision.size, physics.data.xpos[physics.target_body])
+        self.assertTrue(depth_in_view)
+        _, _, _, _, stepped = env.step(np.zeros(10))
+        self.assertTrue(stepped['search_target_detected'])
+        self.assertGreater(stepped['reward_terms']['tracking'], 0.)
+        self.assertNotIn('target', env.actor_observation())
 
 
 if __name__ == '__main__':

@@ -90,6 +90,9 @@ class QueueVisualHarvestTest(unittest.TestCase):
         self.assertAlmostEqual(float(policy.log_std[-1]), math.log(.4))
         initialize_walking_policy(policy, .3, .4, encoder_transfer=False)
         self.assertAlmostEqual(float(policy.log_std[0]), math.log(.3))
+        initialize_walking_policy(policy, .3, .25, encoder_transfer=False, gripper_bias=.6)
+        self.assertAlmostEqual(float(policy.action_net.bias[-1]), .6)
+        self.assertAlmostEqual(float(policy.log_std[-1]), math.log(.25))
 
     def test_queue_does_not_precreate_the_trainer_output_directory(self):
         with tempfile.TemporaryDirectory() as raw:

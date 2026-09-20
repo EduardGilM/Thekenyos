@@ -42,7 +42,9 @@ def project_points(points, intrinsics):
 
 def brown_mask(image):
     r, g, b = image.astype(float).transpose(2, 0, 1)
-    return (r > 1.18*g) & (g > 1.2*b) & (r > 30) & (g > 15)
+    brown = (r > 1.18*g) & (g > 1.2*b) & (r > 30) & (g > 15)
+    tan = (r > g) & (g >= .8*b) & ((r-b) > 20) & (r > 35) & (g > 15)
+    return brown | tan
 
 
 def estimate_fruit(packet):

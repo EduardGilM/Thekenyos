@@ -236,6 +236,7 @@ class OrchardFloor:
     slope_azimuth_rad: float
     colors_rgb: np.ndarray = None
     soil_weight: np.ndarray = None
+    landform_m: np.ndarray = None
     sampled: dict = field(default_factory=dict)
 
     @property
@@ -254,6 +255,27 @@ class OrchardFloor:
     def aisle_plane_z(self, x, y) -> float:
         return self.reference_z_m + self.slope_z(x, y)
 
+    def _bilinear(self, grid, x, y) -> float:
+        grid = np.asarray(grid, dtype=np.float64)
+        nr, nc = grid.shape
+        span = 2.0 * self.half_extent_m
+        u = (float(x) + self.half_extent_m) / span * (nc - 1)
+        v = (float(y) + self.half_extent_m) / span * (nr - 1)
+        if not (0.0 <= u <= nc - 1 and 0.0 <= v <= nr - 1):
+            return 0.0
+        j0 = int(np.floor(u))
+        i0 = int(np.floor(v))
+        j1 = min(j0 + 1, nc - 1)
+        i1 = min(i0 + 1, nr - 1)
+        fu, fv = u - j0, v - i0
+        return float((grid[i0, j0] * (1.0 - fu) + grid[i0, j1] * fu) * (1.0 - fv)
+                     + (grid[i1, j0] * (1.0 - fu) + grid[i1, j1] * fu) * fv)
+
+    def landform_z(self, x, y) -> float:
+        if self.landform_m is None:
+            return 0.0
+        return self._bilinear(self.landform_m, x, y)
+
     def canopy_z(self, x, y) -> float:
         return self.canopy_height_m + self.aisle_plane_z(x, y)
 
@@ -263,15 +285,8 @@ class OrchardFloor:
         u = (x + self.half_extent_m) / span * (self.ncol - 1)
         v = (y + self.half_extent_m) / span * (self.nrow - 1)
         if not (0.0 <= u <= self.ncol - 1 and 0.0 <= v <= self.nrow - 1):
-            return self.aisle_plane_z(x, y)
-        j0 = int(np.floor(u))
-        i0 = int(np.floor(v))
-        j1 = min(j0 + 1, self.ncol - 1)
-        i1 = min(i0 + 1, self.nrow - 1)
-        fu, fv = u - j0, v - i0
-        g = self.heights_m
-        return float((g[i0, j0] * (1.0 - fu) + g[i0, j1] * fu) * (1.0 - fv)
-                     + (g[i1, j0] * (1.0 - fu) + g[i1, j1] * fu) * fv)
+            return self.aisle_plane_z(x, y) + self.landform_z(x, y)
+        return self._bilinear(self.heights_m, x, y)
 
     def color_at(self, x, y) -> np.ndarray:
         """Bilinear sample of the grass/soil map in world metres."""
@@ -301,17 +316,152 @@ class OrchardFloor:
         )
         return out
 
-    def texture_png_bytes(self) -> bytes:
+    def texture_png_bytes(self, skeleton=None, sun_dir=None, seed: int = 0) -> bytes:
         """RGB PNG of the grass/soil map, origin at the south-west corner."""
         from io import BytesIO
         from PIL import Image
         rgb = np.asarray(self.colors_rgb, dtype=np.float64)
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError("colors_rgb must be an (nrow, ncol, 3) map")
+        if skeleton is not None:
+            rgb = shade_under_canopy(rgb, self, skeleton, sun_dir=sun_dir, seed=seed)
         pixels = np.clip(np.flipud(rgb) * 255.0, 0, 255).astype(np.uint8)
         buf = BytesIO()
         Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
         return buf.getvalue()
+
+
+def shade_under_canopy(rgb: np.ndarray, floor: OrchardFloor, skeleton,
+                       sun_dir=None, seed: int = 0) -> np.ndarray:
+    """Bake irregular under-tree shade into a world-mapped albedo.
+
+    Classic-GL shadow maps on thousands of leaf cards alias into a grid, so
+    this is a procedural dapple (dark canopy body plus sun flecks), not a
+    realtime shadow map.
+    """
+    rgb = np.asarray(rgb, dtype=np.float64)
+    pts = []
+    for seg in skeleton:
+        if int(getattr(seg, "order", 0)) < 1:
+            continue
+        mid = 0.5 * (np.asarray(seg.start, dtype=float) + np.asarray(seg.end, dtype=float))
+        pts.append(mid[:2])
+    if len(pts) < 2:
+        return rgb
+    pts = np.asarray(pts, dtype=float)
+    lo, hi = pts.min(0) - 1.15, pts.max(0) + 1.15
+    sun = np.array([0.26, 0.42], dtype=float) if sun_dir is None else np.asarray(sun_dir, dtype=float)[:2]
+    nxy = float(np.linalg.norm(sun)) or 1.0
+    shift = 0.70 * sun / nxy
+    half = float(floor.half_extent_m)
+    nr, nc = rgb.shape[:2]
+    xt = np.linspace(-half, half, nc)
+    yt = np.linspace(-half, half, nr)
+    xx, yy = np.meshgrid(xt, yt)
+    xs, ys = xx - shift[0], yy - shift[1]
+    wx = np.clip(np.minimum(xs - lo[0], hi[0] - xs) / 1.2, 0.0, 1.0)
+    wy = np.clip(np.minimum(ys - lo[1], hi[1] - ys) / 1.2, 0.0, 1.0)
+    cover = wx * wy
+    rng = np.random.default_rng((int(seed) * 7919 + 3) & 0x7FFFFFFF)
+    body = _value_noise(rng, xt, yt, half, wavelength_m=1.55)
+    fleck = _value_noise(rng, xt, yt, half, wavelength_m=0.42)
+    speck = _value_noise(rng, xt, yt, half, wavelength_m=0.16)
+    holes = np.clip((fleck * speck - 0.38) / 0.28, 0.0, 1.0) ** 1.35
+    dark = 0.28 + 0.20 * body
+    bright = 0.78 + 0.16 * fleck
+    under = dark * (1.0 - holes) + bright * holes
+    factor = (1.0 - cover) + cover * under
+    return np.clip(rgb * factor[..., None], 0.0, 1.0)
+
+
+def earth_cut_png_bytes(seed: int = 0) -> bytes:
+    """Small tiled loam albedo for the hillside cut (procedural, not a photo)."""
+    from io import BytesIO
+    from PIL import Image
+    rng = np.random.default_rng((int(seed) * 19 + 5) & 0x7FFFFFFF)
+    n = 128
+    x = np.linspace(-2.0, 2.0, n)
+    y = np.linspace(-2.0, 2.0, n)
+    field = _value_noise(rng, x, y, 2.0, wavelength_m=0.55)
+    grit = _value_noise(rng, x, y, 2.0, wavelength_m=0.14)
+    loam = np.array([0.30, 0.19, 0.10])
+    dry = np.array([0.50, 0.34, 0.18])
+    rgb = (1.0 - field)[..., None] * loam + field[..., None] * dry
+    rgb = rgb * (0.86 + 0.20 * grit[..., None])
+    pixels = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(pixels, mode="RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def sample_world_tile(tile: np.ndarray, xx: np.ndarray, yy: np.ndarray,
+                      period_m: float = 0.35) -> np.ndarray:
+    """Nearest-neighbour wrap of a square RGB tile in world metres."""
+    n = int(tile.shape[0])
+    j = np.floor(np.mod(xx / period_m, 1.0) * n).astype(np.int32) % n
+    i = np.floor(np.mod(yy / period_m, 1.0) * n).astype(np.int32) % n
+    return tile[i, j]
+
+
+def grass_tile_rgb(seed: int = 4, n: int = 256) -> np.ndarray:
+    """Tileable lawn: visible blades and litter, not a flat green."""
+    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+    rgb = np.zeros((n, n, 3), dtype=np.float64)
+    rgb[:] = (0.07, 0.13, 0.03)
+    for _ in range(2200):
+        cx = float(rng.uniform(0.0, n))
+        y0 = int(rng.integers(0, n))
+        length = int(rng.integers(18, 64))
+        lean = float(rng.uniform(-0.55, 0.55))
+        hue = float(rng.uniform(0.0, 1.0))
+        col = np.array([0.10 + 0.16 * hue, 0.34 + 0.42 * hue, 0.04 + 0.08 * hue])
+        width = int(rng.integers(1, 4))
+        for t in range(length):
+            x = int(cx + lean * t) % n
+            y = (y0 + t) % n
+            x1 = x + width
+            if x1 <= n:
+                rgb[y, x:x1] = 0.22 * rgb[y, x:x1] + 0.78 * col
+            else:
+                rgb[y, x:n] = 0.22 * rgb[y, x:n] + 0.78 * col
+                rgb[y, 0:x1 - n] = 0.22 * rgb[y, 0:x1 - n] + 0.78 * col
+    for _ in range(180):
+        x, y = int(rng.integers(0, n)), int(rng.integers(0, n))
+        rgb[y:min(n, y + 3), x:min(n, x + 4)] = (0.32, 0.21, 0.08)
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def soil_tile_rgb(seed: int = 8, n: int = 256) -> np.ndarray:
+    """Tileable cultivated earth: crumbs and stones, not a flat brown."""
+    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+    x = np.linspace(0.0, 1.0, n)
+    y = np.linspace(0.0, 1.0, n)
+    clump = _value_noise(rng, x, y, 0.5, wavelength_m=0.18)
+    grit = _value_noise(rng, x, y, 0.5, wavelength_m=0.05)
+    wet = np.array([0.14, 0.08, 0.04])
+    dry = np.array([0.58, 0.38, 0.16])
+    rgb = (1.0 - clump)[..., None] * wet + clump[..., None] * dry
+    rgb = rgb * (0.72 + 0.40 * grit[..., None])
+    for _ in range(140):
+        px, py = int(rng.integers(2, n - 4)), int(rng.integers(2, n - 4))
+        rgb[py:py + 4, px:px + 5] = (0.42, 0.33, 0.20)
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def tiled_floor_rgb(floor: OrchardFloor) -> np.ndarray:
+    """Mix the orchard colour map with tiled grass/soil (recording look)."""
+    rgb = np.asarray(floor.colors_rgb, dtype=np.float64)
+    half = float(floor.half_extent_m)
+    nr, nc = rgb.shape[:2]
+    xt = np.linspace(-half, half, nc)
+    yt = np.linspace(-half, half, nr)
+    xx, yy = np.meshgrid(xt, yt)
+    pitch = float(floor.sampled.get("row_pitch_m", DEFAULT_ROW_PITCH_M))
+    soil = _planting_strip_weight(xx, pitch, 0.0)
+    grass = 1.0 - np.clip(soil, 0.0, 1.0)
+    tiled = (grass[..., None] * sample_world_tile(grass_tile_rgb(), xx, yy)
+             + (1.0 - grass)[..., None] * sample_world_tile(soil_tile_rgb(), xx, yy))
+    return np.clip(0.18 * rgb + 0.82 * tiled, 0.0, 1.0)
 
 
 def floor_kwargs_for_plantation(rows, columns, spacing, params=None,
@@ -363,7 +513,9 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
                          slope_azimuth_deg=None, half_extent_m=None,
                          row_pitch_m=None, cell_m=None,
                          appearance_cell_m=None,
-                         canopy_height_m: float = 1.6) -> OrchardFloor:
+                         canopy_height_m: float = 1.6,
+                         landform_m=None,
+                         landform_wavelength_m=None) -> OrchardFloor:
     """Sample one seeded orchard floor.
 
     Omit a keyword to draw it from ``params`` (or the default assumed ranges).
@@ -396,7 +548,8 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     depth_span = _as_range(rut_depth_m, getattr(ph, "orchard_rut_depth_m", (0.0, 0.08)), "rut_depth_m")
     width_span = _as_range(rut_width_m, getattr(ph, "orchard_rut_width_m", (0.20, 0.60)), "rut_width_m")
     mu_span = _as_range(friction, getattr(ph, "orchard_friction", (0.6, 1.3)), "friction")
-    az_span = _as_range(slope_azimuth_deg, (0.0, 360.0), "slope_azimuth_deg")
+    az_span = _as_range(slope_azimuth_deg, getattr(ph, "orchard_slope_azimuth_deg", (0.0, 360.0)),
+                       "slope_azimuth_deg")
 
     if slope_span[0] < -4.0 - 1e-9 or slope_span[1] > 4.0 + 1e-9:
         raise ValueError("slope_deg must stay inside [-4, +4]")
@@ -410,6 +563,13 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         raise ValueError("sampled rut_width_m range must stay inside [0.20, 0.60] m")
     if mu_span[0] < 0.6 - 1e-9 or mu_span[1] > 1.3 + 1e-9:
         raise ValueError("friction must stay inside [0.6, 1.3]")
+    landform_amp = float(landform_m if landform_m is not None else getattr(ph, "orchard_landform_m", 0.0))
+    landform_wl = float(landform_wavelength_m if landform_wavelength_m is not None
+                        else getattr(ph, "orchard_landform_wavelength_m", 22.0))
+    if not np.isfinite(landform_amp) or landform_amp < 0.0 or landform_amp > 8.0:
+        raise ValueError("landform_m must be finite and inside [0, 8] m")
+    if landform_amp > 0.0 and (not np.isfinite(landform_wl) or landform_wl < 4.0):
+        raise ValueError("landform_wavelength_m must be finite and at least 4 m")
 
     rng = np.random.default_rng((seed * 2654435761) & 0x7FFFFFFF)
     slope = _sample_unit(rng, slope_span)
@@ -436,6 +596,11 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
     aisle = _aisle_weight(xx, row_pitch_m, max(rut_width, 1e-6))
     noise_m_field = noise_amp * noise * (AISLE_NOISE_SCALE * aisle + (1.0 - aisle))
     heights = AISLE_HEIGHT_M + relief + plane + noise_m_field
+    landform = np.zeros_like(heights)
+    if landform_amp > 0.0:
+        landform = landform_amp * _value_noise(rng, x, y, half_extent_m, landform_wl)
+        landform -= float(landform.mean())
+        heights = heights + landform
 
     for px, py in PERGOLA_POST_XY_M:
         r = np.hypot(xx - px, yy - py)
@@ -475,6 +640,8 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         canopy_height_m=float(canopy_height_m),
         post_embed_m=POST_EMBED_M,
         lift_m=float(lift),
+        landform_m=float(landform_amp),
+        landform_wavelength_m=float(landform_wl),
     )
     return OrchardFloor(
         heights_m=heights.astype(np.float64),
@@ -482,6 +649,7 @@ def sample_orchard_floor(seed: int = 0, params=None, *,
         canopy_height_m=float(canopy_height_m), reference_z_m=float(reference_z),
         slope_deg=slope, slope_azimuth_rad=az,
         colors_rgb=colors.astype(np.float64), soil_weight=soil.astype(np.float64),
+        landform_m=landform.astype(np.float64),
         sampled=sampled,
     )
 

@@ -70,6 +70,14 @@ class OrchardTerrainTest(unittest.TestCase):
         # With no ruts or noise, ground follows the aisle plane within the 1 cm crown.
         self.assertLess(abs(floor.ground_z(0.0, 0.0) - floor.aisle_plane_z(0.0, 0.0)), 0.015)
 
+    def test_landform_is_opt_in_rolling_relief(self):
+        flat = _pinned(seed=42, slope_deg=0.0, rut_depth_m=0.0, noise_m=0.0, landform_m=0.0)
+        hill = _pinned(seed=42, slope_deg=0.0, rut_depth_m=0.0, noise_m=0.0,
+                       landform_m=1.2, landform_wavelength_m=18.0)
+        self.assertLess(float(np.ptp(flat.heights_m)), 0.03)
+        self.assertGreater(float(np.ptp(hill.heights_m)), 0.8)
+        self.assertAlmostEqual(hill.sampled["landform_m"], 1.2)
+
     def test_invalid_inputs(self):
         with self.assertRaises(ValueError):
             sample_orchard_floor(0, slope_deg=9.0)
@@ -116,6 +124,18 @@ class OrchardTerrainTest(unittest.TestCase):
             center = f.attach - np.array([0.0, 0.0, fp.stem_length + extent])
             self.assertLess(center[2] + extent, floor.canopy_z(*f.attach[:2]))
             self.assertGreater(center[2] - extent, floor.ground_z(center[0], center[1]))
+
+    def test_kiwis_hang_along_tied_canes_and_tips(self):
+        floor = _pinned(seed=42)
+        skel = generate(height=1.6, seed=42, rows=2, columns=2, spacing=5.0,
+                        ground_z=floor.ground_z, canopy_z=floor.canopy_z)
+        fruit = place_fruit(skel, FruitParams(max_count=400,
+                                              colors=((0.39, 0.27, 0.12),)), seed=42)
+        self.assertGreater(len(fruit), 40)
+        tied = sum(1 for f in fruit if skel[f.parent_seg].supported)
+        hang = sum(1 for f in fruit if not skel[f.parent_seg].supported)
+        self.assertGreater(tied, 15)
+        self.assertGreater(hang, 5)
 
     def test_plantation_cover_matches_commercial_grid(self):
         small = floor_kwargs_for_plantation(2, 2, 5.0)

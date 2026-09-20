@@ -31,14 +31,20 @@ def main():
     from treesim.visual_kiwi_env import VisualKiwiEnv, VisionConfig
     from stable_baselines3 import PPO
     task = BasketTask(**saved['task'])
-    vision = VisionConfig(**saved['vision']) if saved.get('vision') else None
+    vision_config = dict(saved['vision']) if saved.get('vision') else None
+    if vision_config and 'cameras' in vision_config:
+        vision_config['cameras'] = tuple(vision_config['cameras'])
+    vision = VisionConfig(**vision_config) if vision_config else None
     if vision is None:
         parser.error('Replay is for camera checkpoints')
     env_class = VisualKiwiEnv
     if saved.get('stationary'):
         from treesim.stationary_kiwi_env import StationaryKiwiEnv
         env_class = StationaryKiwiEnv
-    env = env_class(args.relic, task=replace(task), vision=vision, guidance_weight=0., render_mode='rgb_array')
+    search_spawn = bool((saved.get('training_config') or {}).get('search_rewards'))
+    env = env_class(args.relic, task=replace(task), vision=vision, guidance_weight=0.,
+                    view_weight=0., search_rewards=False, search_spawn=search_spawn,
+                    render_mode='rgb_array')
     env.set_stage(saved.get('stage', 0))
     model = PPO.load(args.checkpoint, device=args.device)
     label = f'inference-stage-{env.stage}'

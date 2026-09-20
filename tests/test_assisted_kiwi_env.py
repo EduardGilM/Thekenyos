@@ -169,6 +169,15 @@ class TrainingHarnessTest(unittest.TestCase):
                     task={'stage': 0, 'capture_radius_m': .12, 'hold_time_s': .3, 'physics_hz': 1000},
                     training_config={'num_envs': 4, 'learning_rate': .0001})
 
+    def test_visual_env_drops_unknown_keywords(self):
+        from scripts.train_assisted_kiwi import visual_env
+        class Env:
+            def __init__(self, relic, *, task=None, vision=None):
+                self.relic, self.task, self.vision = relic, task, vision
+        env = visual_env(Env, 'relic', task=1, vision=2, search_spawn=True)
+        self.assertEqual((env.relic, env.task, env.vision), ('relic', 1, 2))
+        self.assertFalse(hasattr(env, 'search_spawn'))
+
     def test_warm_start_preserves_environment_contract(self):
         import copy
         from scripts.train_assisted_kiwi import checkpoint_compatible
@@ -218,6 +227,30 @@ class TrainingHarnessTest(unittest.TestCase):
         from scripts.train_assisted_kiwi import score
         self.assertGreater(score(dict(successes=6, episodes=8, mean_best_distance_m=.11)),
                            score(dict(successes=5, episodes=8, mean_best_distance_m=.01)))
+
+    def test_search_lesson_stays_close_and_requires_view_weight(self):
+        from argparse import Namespace
+        from scripts.train_assisted_kiwi import configure_search_lesson
+
+        def error(message):
+            raise ValueError(message)
+
+        args = Namespace(search_rewards=True, vision=True, stationary=False, visual_lesson='grab',
+                         view_weight=1., fixed_stage=False)
+        configure_search_lesson(args, error)
+        self.assertTrue(args.fixed_stage)
+        args.view_weight = 0.
+        with self.assertRaises(ValueError):
+            configure_search_lesson(args, error)
+        args.view_weight = 1.
+        args.stationary = True
+        with self.assertRaises(ValueError):
+            configure_search_lesson(args, error)
+        args.stationary = False
+        args.visual_lesson = 'collect'
+        args.fixed_stage = False
+        configure_search_lesson(args, error)
+        self.assertFalse(args.fixed_stage)
 
     def test_workspace_error_requires_body_approach_and_alignment(self):
         from scripts.train_assisted_kiwi import workspace_error
@@ -285,6 +318,130 @@ class TrainingHarnessTest(unittest.TestCase):
         plain = WorkspaceApproach(Env(), weight=0.)
         plain.reset(seed=42)
         self.assertEqual(plain.step(action)[1], 1.)
+
+    def test_deposit_mix_probabilities_must_sum_to_one(self):
+        from scripts.train_assisted_kiwi import parse_deposit_mix
+        self.assertEqual(parse_deposit_mix('pick:1'), dict(pick=1., carry=0., release=0.))
+        mix = parse_deposit_mix('pick:0.5,carry:0.3,release:0.2')
+        self.assertAlmostEqual(sum(mix.values()), 1.)
+        self.assertAlmostEqual(mix['carry'], .3)
+        for text in ('pick:0.5', 'grab:1', 'pick:-0.1,carry:0.6,release:0.5'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_deposit_mix(text)
+
+    def test_deposit_shaping_pays_hold_far_and_open_near_basket(self):
+        from scripts.train_assisted_kiwi import (DEPOSIT_HOLD, DEPOSIT_LINGER, DEPOSIT_NEAR_M,
+                                                DEPOSIT_OPEN_NEAR, deposit_shaping_terms)
+        far = deposit_shaping_terms(dict(phase='carry', basket_distance_m=DEPOSIT_NEAR_M+.2, events=[]), 1.)
+        self.assertAlmostEqual(far['hold'], DEPOSIT_HOLD)
+        self.assertEqual(far['linger'], 0.)
+        self.assertEqual(far['open_near'], 0.)
+        near = deposit_shaping_terms(dict(phase='carry', basket_distance_m=DEPOSIT_NEAR_M-.05, events=[]), 1.)
+        self.assertEqual(near['hold'], 0.)
+        self.assertAlmostEqual(near['linger'], -DEPOSIT_LINGER)
+        opened = deposit_shaping_terms(dict(phase='settle', basket_distance_m=.1,
+                                            events=[dict(event='released', fruit=0)]), 1.)
+        self.assertAlmostEqual(opened['open_near'], DEPOSIT_OPEN_NEAR)
+        self.assertEqual(deposit_shaping_terms(dict(phase='approach', basket_distance_m=.8, events=[]), 1.)['hold'], 0.)
+        self.assertEqual(deposit_shaping_terms(dict(phase='carry', basket_distance_m=.8, events=[]), 0.)['hold'], 0.)
+
+    def test_deposit_curriculum_samples_start_phase_and_adds_shaping(self):
+        import gymnasium as gym
+        from dataclasses import dataclass
+        from scripts.train_assisted_kiwi import DepositCurriculum
+
+        @dataclass(frozen=True)
+        class Task:
+            start_phase: str = 'pick'
+
+        class Env(gym.Env):
+            def __init__(self):
+                super().__init__()
+                self.task = Task()
+                self.stage = 0
+                self.observation_space = gym.spaces.Box(-np.inf, np.inf, (4,), np.float32)
+                self.action_space = gym.spaces.Box(-1., 1., (4,), np.float32)
+            def set_stage(self, stage):
+                self.stage = stage
+            def reset(self, seed=None, options=None):
+                return np.zeros(4), dict(phase=self.task.start_phase, start_phase=self.task.start_phase,
+                                         basket_distance_m=.8, events=[], reward_terms={'time': -.015})
+            def step(self, action):
+                info = dict(phase='carry', basket_distance_m=.8, events=[], reward_terms={'time': -.015})
+                return np.zeros(4), -.015, False, False, info
+
+        env = DepositCurriculum(Env(), 'pick:0,carry:1,release:0', weight=1.)
+        _, info = env.reset(seed=11)
+        self.assertEqual(env.unwrapped.task.start_phase, 'carry')
+        self.assertEqual(info['train_start_phase'], 'carry')
+        env.set_stage(1)
+        self.assertEqual(env.unwrapped.stage, 1)
+        _, reward, _, _, stepped = env.step(np.zeros(4))
+        self.assertGreater(reward, -.015)
+        self.assertGreater(stepped['reward_terms']['hold'], 0.)
+        off = DepositCurriculum(Env(), dict(pick=1., carry=0., release=0.), weight=0.)
+        off.reset(seed=11)
+        self.assertEqual(off.step(np.zeros(4))[1], -.015)
+
+    def test_deposit_curriculum_softens_dropped_oracle_penalty(self):
+        import gymnasium as gym
+        from dataclasses import dataclass
+        from scripts.train_assisted_kiwi import DEPOSIT_DROP, DEPOSIT_HOLD, DepositCurriculum
+
+        @dataclass
+        class Task:
+            start_phase: str = 'pick'
+
+        class Env(gym.Env):
+            def __init__(self):
+                super().__init__()
+                self.task = Task()
+                self.stage = 0
+                self.observation_space = gym.spaces.Box(-np.inf, np.inf, (4,), np.float32)
+                self.action_space = gym.spaces.Box(-1., 1., (4,), np.float32)
+            def reset(self, seed=None, options=None):
+                return np.zeros(4), {}
+            def step(self, action):
+                info = dict(phase='carry', outcome='dropped', basket_distance_m=.8, events=[],
+                            reward_terms={'failure': -10., 'time': -.015})
+                return np.zeros(4), -10.015, True, False, info
+
+        env = DepositCurriculum(Env(), dict(pick=1., carry=0., release=0.), weight=1.)
+        _, reward, terminated, _, info = env.step(np.zeros(4))
+        self.assertTrue(terminated)
+        self.assertEqual(info['reward_terms']['failure'], DEPOSIT_DROP)
+        self.assertAlmostEqual(reward, DEPOSIT_DROP-.015+DEPOSIT_HOLD)
+
+    def test_deposit_hold_cannot_outscore_a_basket_deposit(self):
+        import gymnasium as gym
+        from dataclasses import dataclass
+        from scripts.train_assisted_kiwi import DEPOSIT_HOLD_CAP, DepositCurriculum
+
+        @dataclass
+        class Task:
+            start_phase: str = 'pick'
+
+        class Env(gym.Env):
+            def __init__(self):
+                super().__init__()
+                self.task = Task()
+                self.observation_space = gym.spaces.Box(-np.inf, np.inf, (4,), np.float32)
+                self.action_space = gym.spaces.Box(-1., 1., (4,), np.float32)
+            def reset(self, seed=None, options=None):
+                return np.zeros(4), {}
+            def step(self, action):
+                info = dict(phase='carry', outcome='running', basket_distance_m=.8, events=[],
+                            reward_terms={'time': -.015})
+                return np.zeros(4), -.015, False, False, info
+
+        env = DepositCurriculum(Env(), dict(pick=0., carry=1., release=0.), weight=1.)
+        env.reset(seed=0)
+        paid = 0.
+        for _ in range(900):
+            _, reward, _, _, info = env.step(np.zeros(4))
+            paid += info['reward_terms']['hold']
+        self.assertLessEqual(paid, DEPOSIT_HOLD_CAP+1e-9)
+        self.assertLess(paid, 15.)
 
     def test_evaluation_aggregates_all_seeds(self):
         from pathlib import Path

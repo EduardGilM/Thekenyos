@@ -8,7 +8,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from .basket_kiwi_env import BasketKiwiEnv, BasketTask
-from .visual_servo import APPROACH_STANDOFF_M, optical_transform, pinhole_intrinsics, project_points, transform_points
+from .visual_servo import (APPROACH_STANDOFF_M, brown_mask, optical_transform, pinhole_intrinsics,
+                          project_points, transform_points)
 
 
 SCOPE = 'Camera-policy assisted harvesting; wrist RGB-D only; frozen RELIC; not calibrated sensing or physical grasp validation'
@@ -31,6 +32,22 @@ PRIVILEGED_KEYS = frozenset({'privileged', 'fruit', 'target', 'target_xyz', 'dis
                              'picked', 'attachment', 'harvest', 'estimate', 'target_index'})
 COLLECT_FORWARD_M = (.75, 1.15, 1.60, 2.05, 2.50, 2.95)
 S0V_RANGE_M = (.20, .40)
+# Search-lesson reward terms (10 Hz). Edit these before launching
+# scripts/train_wrist_search_harvest.py. Evaluations keep search_rewards=False.
+# Later collect lessons use --view-weight 0. Scaled by --view-weight (default 1).
+SEARCH_ACQUISITION = 1.          # one-time first target-matched hand RGB+ToF detection
+SEARCH_TRACKING = .2             # each detected approach step; must beat time=-0.015
+SEARCH_CLOSE = .2                # each detected step with jaw command > SEARCH_CLOSE_COMMAND
+SEARCH_CLOSE_COMMAND = .2        # same close threshold as can_capture
+SEARCH_BODY_SPEED_PENALTY = .05  # * |v_xy| m/s while tracking
+SEARCH_CENTERING_SCALE = .05     # potential delta scale
+SEARCH_CENTERING_DISCOUNT = .99  # matches PPO gamma
+SEARCH_CENTERING_CLIP = .05      # per-step bound
+SEARCH_VIEW_LOSS = -1.           # once after SEARCH_VIEW_STREAK detections are lost
+SEARCH_VIEW_STREAK = 5           # consecutive detections before a loss penalty can fire
+SEARCH_MATCH_RADIUS_M = .12      # privileged target match; not an actor input
+# Search-grab spawn: fruit starts inside the 44° wrist depth FOV, 20-40 cm out.
+SEARCH_IN_VIEW_FOV_SCALE = .55
 
 
 @dataclass(frozen=True)
@@ -50,6 +67,24 @@ class VisionConfig:
             raise ValueError('Invalid visual lesson or fruit randomization')
         if self.cameras != ('ee_cam', 'ee_depth'):
             raise ValueError('Only wrist ee_cam RGB and ee_depth ToF are supported')
+
+
+def in_view_fruit_position(physics, rng):
+    cam = physics.ee_depth
+    origin = physics.data.cam_xpos[cam]
+    rotation = physics.data.cam_xmat[cam].reshape(3, 3)
+    forward, right, up = -rotation[:, 2], rotation[:, 0], rotation[:, 1]
+    dist = float(rng.uniform(*S0V_RANGE_M))
+    radius = dist*np.tan(np.deg2rad(DEPTH_FOVY_DEG/2))*SEARCH_IN_VIEW_FOV_SCALE*np.sqrt(float(rng.uniform(0., 1.)))
+    angle = float(rng.uniform(0., 2*np.pi))
+    return origin+forward*dist+right*(radius*np.cos(angle))+up*(radius*np.sin(angle)), dist, radius
+
+
+def gated_search_rewards(reward_terms, search_terms):
+    merged = dict(reward_terms, **search_terms)
+    if search_terms.get('tracking', 0) <= 0:
+        merged['progress'] = 0.
+    return merged
 
 
 def camera_axes(pitch):
@@ -113,11 +148,15 @@ def kiwi_camera_uv(model, data, cam_id, size, fruit_pos):
 class VisualTaskPhysics(BasketKiwiEnv):
     hand_cameras = True
 
-    def __init__(self, relic, *, vision, view_weight=0., **kwargs):
+    def __init__(self, relic, *, vision, view_weight=0., search_spawn=False, **kwargs):
         self.vision = vision
         if not np.isfinite(view_weight) or not 0 <= view_weight <= 4:
             raise ValueError('View shaping weight must be finite in [0, 4]')
+        if type(search_spawn) is not bool:
+            raise ValueError('Search spawn mode must be boolean')
         self.view_weight = view_weight
+        self.search_spawn = search_spawn
+        self.search_off_axis_m = 0.
         super().__init__(relic, **kwargs)
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, (61,), np.float32)
         self.action_space = gym.spaces.Box(-1., 1., (10,), np.float32)
@@ -125,6 +164,8 @@ class VisualTaskPhysics(BasketKiwiEnv):
         self.in_view_streak = 0
         self.view_loss_fired = False
         self.had_view = False
+        self.kiwi_in_view = False
+        self.kiwi_tof_valid = False
         if vision.lesson in ('grab', 's0v') and self.task.start_phase != 'pick':
             raise ValueError('Grab lesson must start with an unpicked fruit')
 
@@ -175,13 +216,23 @@ class VisualTaskPhysics(BasketKiwiEnv):
 
     def _view_terms(self):
         terms = dict(in_view=0., centering=0., view_loss=0.)
-        if self.view_weight <= 0 or self.phase != 'approach' or self.model is None:
+        self.kiwi_in_view = self.kiwi_tof_valid = False
+        if self.phase != 'approach' or self.model is None:
             return terms
         _, in_view, norm = kiwi_camera_uv(self.model, self.data, self.ee_cam, self.vision.size,
                                           self.data.xpos[self.target_body])
+        _, depth_in_view, _ = kiwi_camera_uv(self.model, self.data, self.ee_depth, self.vision.size,
+                                             self.data.xpos[self.target_body])
+        depth_rotation = self.data.cam_xmat[self.ee_depth].reshape(3, 3)
+        depth_m = float(-(depth_rotation.T@(self.data.xpos[self.target_body]-self.data.cam_xpos[self.ee_depth]))[2])
+        tof_valid = bool(depth_in_view and MIN_DEPTH_M <= depth_m < 3.)
+        self.kiwi_in_view, self.kiwi_tof_valid = in_view, tof_valid
+        if self.view_weight <= 0:
+            return terms
         if in_view:
+            potential = 1-np.tanh(2*min(norm, 8.))
             terms['in_view'] = self.view_weight*.5
-            terms['centering'] = self.view_weight*.5*(1-np.tanh(2*min(norm, 8.)))
+            terms['centering'] = self.view_weight*.5*potential
             self.in_view_streak += 1
             self.had_view = True
             self.view_loss_fired = False
@@ -199,6 +250,9 @@ class VisualTaskPhysics(BasketKiwiEnv):
         self.in_view_streak = 0
         self.view_loss_fired = False
         self.had_view = False
+        self.kiwi_in_view = False
+        self.kiwi_tof_valid = False
+        self.search_off_axis_m = 0.
         if self.model is not None:
             self.fruit_positions[:] = [self.original_site_pos[self.model.site(f'anchor_{i}').id] for i in range(6)]
         super().reset(seed=seed, options=options)
@@ -211,6 +265,9 @@ class VisualTaskPhysics(BasketKiwiEnv):
             self._place_collect_targets()
         mujoco.mj_forward(self.model, self.data)
         self._select_candidate()
+        if self.search_spawn:
+            self._place_search_target()
+        mujoco.mj_forward(self.model, self.data)
         self.previous_distance = self.best_distance = self._distance()
         return self._observation(), self._info()
 
@@ -237,6 +294,19 @@ class VisualTaskPhysics(BasketKiwiEnv):
             original = self.original_site_pos[self.model.site(f'anchor_{index}').id]
             self._set_fruit(index, original+[0., 2.5, 0.])
 
+    def _place_search_target(self):
+        if self.vision.lesson != 'grab' or self.phase != 'approach':
+            self.search_off_axis_m = 0.
+            return
+        for index in np.flatnonzero(~self.picked):
+            if index != self.target_index:
+                original = self.original_site_pos[self.model.site(f'anchor_{index}').id]
+                self._set_fruit(index, original+[0., 2.5, 0.])
+        position, _, radius = in_view_fruit_position(self, self.np_random)
+        self.search_off_axis_m = radius
+        self._set_fruit(self.target_index, position)
+        self.target = self.fruit_positions[self.target_index].copy()
+
     def _select_candidate(self):
         if self.phase != 'approach':
             return
@@ -259,9 +329,10 @@ class VisualTaskPhysics(BasketKiwiEnv):
             for name in ('progress', 'capture'):
                 if name in info['reward_terms']:
                     info['reward_terms'][name] *= .5
-        if extra['in_view'] or extra['centering'] or extra['view_loss']:
+        if any(extra.values()):
             reward = float(sum(info['reward_terms'].values()))
-        info['kiwi_in_view'] = extra['in_view'] > 0
+        info['kiwi_in_view'] = self.kiwi_in_view
+        info['kiwi_tof_valid'] = self.kiwi_tof_valid
         info['in_view_streak'] = self.in_view_streak
         return obs, reward, term, trunc, info
 
@@ -301,6 +372,8 @@ class VisualTaskPhysics(BasketKiwiEnv):
         info['pregrasp'] = bool(self._distance() <= APPROACH_STANDOFF_M and not self.failure)
         if self.vision.lesson == 'collect' and self.task.start_phase == 'pick':
             info['collect_forward_m'] = list(getattr(self, 'collect_forward_m', ()))
+        info['search_spawn'] = self.search_spawn
+        info['search_off_axis_m'] = float(self.search_off_axis_m)
         return info
 
 
@@ -418,11 +491,22 @@ class RobotCameras:
 class VisualKiwiEnv(gym.Wrapper):
     physics_class = VisualTaskPhysics
 
-    def __init__(self, relic, *, task=None, vision=None, render_mode=None, guidance_weight=1., view_weight=0.):
+    def __init__(self, relic, *, task=None, vision=None, render_mode=None, guidance_weight=1.,
+                 view_weight=0., search_rewards=False, search_spawn=None):
         self.vision = vision or VisionConfig()
+        if type(search_rewards) is not bool:
+            raise ValueError('Search reward mode must be boolean')
+        if search_spawn is None:
+            search_spawn = search_rewards
+        if type(search_spawn) is not bool:
+            raise ValueError('Search spawn mode must be boolean')
+        self.search_rewards = search_rewards
+        self.search_spawn = search_spawn
+        self.search_weight = view_weight
         super().__init__(self.physics_class(relic, vision=self.vision, task=task or BasketTask(picks=1),
                                           render_mode=render_mode, guidance_weight=guidance_weight,
-                                          view_weight=view_weight))
+                                          view_weight=0. if search_rewards else view_weight,
+                                          search_spawn=search_spawn))
         c = self.vision
         actor = {
             'rgb': gym.spaces.Box(0, 255, (RGB_CHANNELS*c.history, c.size, c.size), np.uint8),
@@ -477,6 +561,11 @@ class VisualKiwiEnv(gym.Wrapper):
 
     def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
+        self.search_acquisition_paid = False
+        self.search_view_streak = 0
+        self.search_view_loss_fired = False
+        self.search_previous_potential = None
+        self.last_action = np.zeros(10)
         self.sensor_rng = np.random.default_rng(np.random.SeedSequence([int(self.env.np_random.integers(2**31)), 917]))
         if self.cameras is None:
             self.cameras = RobotCameras(self.env, self.vision)
@@ -490,12 +579,91 @@ class VisualKiwiEnv(gym.Wrapper):
         return self._policy_observation(obs), info
 
     def step(self, action):
+        self.last_action = np.asarray(action, dtype=float).reshape(-1)
         obs, reward, term, trunc, info = self.env.step(action)
         if not self.vision.noise or self.sensor_rng.random() >= .05:
             self.last_packet = (*self.cameras.capture(self.sensor_rng), self.env.steps, self.cameras.calibration())
         self.pending.append(self.last_packet)
         self.frames.append(self.pending[0])
+        if self.search_rewards:
+            terms = self._search_reward_terms()
+            info['reward_terms'] = gated_search_rewards(info.get('reward_terms', {}), terms)
+            info['search_target_detected'] = terms['tracking'] > 0
+            info['search_view_streak'] = self.search_view_streak
+            reward = float(sum(info['reward_terms'].values()))
         return self._policy_observation(obs), reward, term, trunc, info
+
+    def _search_target_base(self):
+        rotation = self.env.data.xmat[self.env.chassis].reshape(3, 3)
+        return rotation.T@(self.env.data.xpos[self.env.target_body]-self.env.data.xpos[self.env.chassis])
+
+    def _matched_hand_rgb_tof(self, packet, target):
+        from .visual_servo import estimate_fruit
+        return [item for item in estimate_fruit(packet)
+                if item['source'] == 'hand_rgb_tof' and np.linalg.norm(item['point']-target) <= SEARCH_MATCH_RADIUS_M]
+
+    def _close_range_rgb_hold(self, packet, target):
+        """Keep tracking after a ToF lock if RGB still sees the fruit inside the 0.15 m cutoff."""
+        if not self.search_acquisition_paid or packet.get('rgb') is None:
+            return False
+        camera_point = transform_points(target, np.linalg.inv(packet['camera_to_base'][0]))
+        if not np.isfinite(camera_point).all() or camera_point[2] < 1e-6 or camera_point[2] >= MIN_DEPTH_M:
+            return False
+        pixel, valid = project_points(camera_point, packet['intrinsics'][0])
+        if not valid:
+            return False
+        u, v = np.rint(pixel).astype(int)
+        size = int(self.vision.size)
+        if not (0 <= u < size and 0 <= v < size):
+            return False
+        rgb = np.asarray(packet['rgb'])
+        image = rgb[:3].transpose(1, 2, 0) if rgb.ndim == 3 and rgb.shape[0] == 3 else rgb
+        return bool(brown_mask(image)[v, u])
+
+    def _jaw_command(self):
+        action = np.asarray(getattr(self, 'last_action', np.zeros(10)), dtype=float).reshape(-1)
+        if action.size > 9:
+            return float(action[9])
+        return float(action[-1]) if action.size else 0.
+
+    def _search_reward_terms(self):
+        terms = dict(acquisition=0., tracking=0., centering=0., view_loss=0., close=0., body_speed=0.)
+        if self.search_weight <= 0 or self.env.phase != 'approach':
+            return terms
+        packet = self.sensor_packet()
+        target = self._search_target_base()
+        candidates = self._matched_hand_rgb_tof(packet, target)
+        tof_lock = bool(getattr(self.env, 'kiwi_tof_valid', False))
+        rgb_hold = not candidates and not tof_lock and self._close_range_rgb_hold(packet, target)
+        if candidates or tof_lock or rgb_hold:
+            selected_point = min(candidates, key=lambda item: np.linalg.norm(item['point']-target))['point'] if candidates else target
+            camera_point = transform_points(selected_point, np.linalg.inv(packet['camera_to_base'][0]))
+            pixel, valid = project_points(camera_point, packet['intrinsics'][0])
+            centre = (self.vision.size-1)/2
+            norm = float(np.linalg.norm((pixel-centre)/max(self.vision.size/2, 1e-6))) if valid else 8.
+            potential = 1-np.tanh(2*min(norm, 8.))
+            if (candidates or tof_lock) and not self.search_acquisition_paid:
+                terms['acquisition'] = self.search_weight*SEARCH_ACQUISITION
+                self.search_acquisition_paid = True
+            terms['tracking'] = self.search_weight*SEARCH_TRACKING
+            if self._jaw_command() > SEARCH_CLOSE_COMMAND:
+                terms['close'] = self.search_weight*SEARCH_CLOSE
+            speed = float(np.linalg.norm(np.asarray(self.env._base_velocity()[:2], dtype=float)))
+            terms['body_speed'] = -self.search_weight*SEARCH_BODY_SPEED_PENALTY*min(max(speed, 0.), 2.)
+            if self.search_previous_potential is not None:
+                terms['centering'] = self.search_weight*float(np.clip(
+                    SEARCH_CENTERING_SCALE*(SEARCH_CENTERING_DISCOUNT*potential-self.search_previous_potential),
+                    -SEARCH_CENTERING_CLIP, SEARCH_CENTERING_CLIP))
+            self.search_previous_potential = potential
+            self.search_view_streak += 1
+            self.search_view_loss_fired = False
+        else:
+            if self.search_view_streak >= SEARCH_VIEW_STREAK and not self.search_view_loss_fired:
+                terms['view_loss'] = self.search_weight*SEARCH_VIEW_LOSS
+                self.search_view_loss_fired = True
+            self.search_view_streak = 0
+            self.search_previous_potential = None
+        return terms
 
     def _masked_images(self, rgb, depth):
         rgb, depth = rgb.copy(), depth.copy()

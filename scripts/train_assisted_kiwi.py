@@ -87,7 +87,127 @@ class WorkspaceApproach(gym.Wrapper):
         return self._metrics(self.env._info())
 
 
+# Training-only collect shaping. Evaluations keep start_phase=pick and weight 0.
+# Hold must beat time=-0.015 so keeping the weld pays more than wandering.
+# Cap it: 90 s of 0.05/step is +45, larger than deposit +15, which recreates
+# carry-1 hold-forever. Near-basket linger makes standing over the liner worse
+# than opening. Dropped failure is -10 in the oracle; training replaces it so a
+# short pick-then-drop is not worse than a 90 s timeout (which never deposits).
+DEPOSIT_HOLD = .02
+DEPOSIT_HOLD_CAP = .6
+DEPOSIT_NEAR_M = .30
+DEPOSIT_OPEN_NEAR = 4.
+DEPOSIT_LINGER = .04
+DEPOSIT_DROP = -2.
+
+
+def parse_deposit_mix(text):
+    weights = dict(pick=0., carry=0., release=0.)
+    for part in str(text).split(','):
+        if ':' not in part:
+            raise ValueError('Deposit mix entries must be phase:probability')
+        name, raw = part.strip().split(':', 1)
+        if name not in weights:
+            raise ValueError('Deposit mix phases are pick, carry and release')
+        value = float(raw)
+        if not np.isfinite(value) or value < 0:
+            raise ValueError('Deposit mix probabilities must be finite and nonnegative')
+        weights[name] = value
+    total = sum(weights.values())
+    if not np.isfinite(total) or abs(total-1.) > 1e-6:
+        raise ValueError('Deposit mix probabilities must sum to 1')
+    return weights
+
+
+def deposit_shaping_terms(info, weight):
+    terms = dict(hold=0., linger=0., open_near=0.)
+    if not np.isfinite(weight) or weight <= 0:
+        return terms
+    distance = info.get('basket_distance_m', np.inf)
+    try:
+        distance = float(distance)
+    except (TypeError, ValueError):
+        distance = np.inf
+    if info.get('phase') == 'carry' and np.isfinite(distance):
+        if distance > DEPOSIT_NEAR_M:
+            terms['hold'] = weight*DEPOSIT_HOLD
+        else:
+            terms['linger'] = -weight*DEPOSIT_LINGER
+    released = any(item.get('event') == 'released' for item in info.get('events') or ())
+    if released and np.isfinite(distance) and distance <= DEPOSIT_NEAR_M:
+        terms['open_near'] = weight*DEPOSIT_OPEN_NEAR
+    return terms
+
+
+class DepositCurriculum(gym.Wrapper):
+    """Reset-mix carry/release fixtures and hold/open shaping. Not an action teacher."""
+
+    def __init__(self, env, mix, weight=0.):
+        super().__init__(env)
+        if isinstance(mix, str):
+            mix = parse_deposit_mix(mix)
+        mix = dict(mix)
+        if set(mix) != {'pick', 'carry', 'release'}:
+            raise ValueError('Deposit mix must include pick, carry and release')
+        if abs(sum(mix.values())-1.) > 1e-6 or any(value < 0 or not np.isfinite(value) for value in mix.values()):
+            raise ValueError('Deposit mix probabilities must be finite, nonnegative and sum to 1')
+        if not np.isfinite(weight) or not 0 <= weight <= 4:
+            raise ValueError('Deposit shaping weight must be in [0, 4]')
+        self.mix = mix
+        self.weight = weight
+        self._rng = np.random.default_rng(0)
+        self.sampled_phase = 'pick'
+        self._hold_paid = 0.
+
+    @property
+    def stage(self):
+        return self.unwrapped.stage
+
+    def set_stage(self, stage):
+        self.unwrapped.set_stage(stage)
+
+    def _sample_phase(self):
+        names = ('pick', 'carry', 'release')
+        return str(self._rng.choice(names, p=[self.mix[name] for name in names]))
+
+    def reset(self, **kwargs):
+        seed = kwargs.get('seed')
+        if seed is not None:
+            self._rng = np.random.default_rng(int(seed)+901)
+        self.sampled_phase = self._sample_phase()
+        self._hold_paid = 0.
+        object.__setattr__(self.unwrapped.task, 'start_phase', self.sampled_phase)
+        obs, info = self.env.reset(**kwargs)
+        info = dict(info, train_start_phase=self.sampled_phase)
+        return obs, info
+
+    def step(self, action):
+        obs, reward, term, trunc, info = self.env.step(action)
+        extra = deposit_shaping_terms(info, self.weight)
+        cap = self.weight*DEPOSIT_HOLD_CAP
+        if extra['hold'] and self._hold_paid+extra['hold'] > cap:
+            extra['hold'] = max(0., cap-self._hold_paid)
+        self._hold_paid += extra['hold']
+        terms = dict(info.get('reward_terms') or {}, **extra)
+        reward = float(reward+sum(extra.values()))
+        if self.weight > 0 and info.get('outcome') == 'dropped':
+            previous = float(terms.get('failure', 0.))
+            terms['failure'] = DEPOSIT_DROP
+            reward += DEPOSIT_DROP-previous
+        info = dict(info, reward_terms=terms, train_start_phase=self.sampled_phase)
+        return obs, reward, term, trunc, info
+
+
 ENV_SOURCES = ('treesim/assisted_kiwi_env.py', 'treesim/spot.py')
+
+
+def configure_search_lesson(args, error):
+    if args.search_rewards and (not args.vision or args.stationary or args.visual_lesson not in ('grab', 'collect')):
+        error('Temporary search rewards require a non-stationary visual grab or collect lesson')
+    if args.search_rewards and args.view_weight <= 0:
+        error('Search rewards require --view-weight > 0')
+    if args.search_rewards and args.visual_lesson == 'grab':
+        args.fixed_stage = True
 
 
 def emit(path, record):
@@ -152,7 +272,7 @@ def transfer_visual_encoder(model, previous):
     dest.load_state_dict(weights, strict=True)
 
 
-def initialize_walking_policy(policy, exploration_std, gripper_std, *, encoder_transfer):
+def initialize_walking_policy(policy, exploration_std, gripper_std, *, encoder_transfer, gripper_bias=0.):
     import torch
     with torch.no_grad():
         if encoder_transfer:
@@ -162,6 +282,8 @@ def initialize_walking_policy(policy, exploration_std, gripper_std, *, encoder_t
         policy.log_std[-1] = float(np.log(gripper_std))
         if encoder_transfer:
             policy.log_std[:-1] = float(np.log(min(exploration_std, .15)))
+        if gripper_bias:
+            policy.action_net.bias[-1] = float(gripper_bias)
 
 
 @dataclass
@@ -194,10 +316,21 @@ def score(report):
     return (report['stationary_successes']/report['episodes'], *result) if 'stationary_successes' in report else result
 
 
+def visual_env(env_class, relic, **kwargs):
+    import inspect
+    accepted = inspect.signature(env_class.__init__).parameters
+    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in accepted.values()):
+        return env_class(relic, **kwargs)
+    return env_class(relic, **{name: value for name, value in kwargs.items() if name in accepted})
+
+
 def make_env(relic, task, workspace_weight=0., basket=False, vision=None, stationary=False,
-             estimate=False, estimate_vision=None, guidance_weight=1., view_weight=0.):
+             estimate=False, estimate_vision=None, guidance_weight=1., view_weight=0.,
+             search_rewards=False, search_spawn=False, deposit_mix=None, deposit_shaping=0.):
     from stable_baselines3.common.monitor import Monitor
     from treesim.assisted_kiwi_env import AssistedKiwiEnv, AssistedTask
+    mix = deposit_mix or dict(pick=1., carry=0., release=0.)
+    wrap_deposit = deposit_shaping > 0 or mix.get('pick', 1.) < 1.-1e-9
     if vision is not None:
         from treesim.basket_kiwi_env import BasketTask
         from treesim.visual_kiwi_env import VisualKiwiEnv, VisionConfig
@@ -205,8 +338,12 @@ def make_env(relic, task, workspace_weight=0., basket=False, vision=None, statio
         if stationary:
             from treesim.stationary_kiwi_env import StationaryKiwiEnv
             env_class = StationaryKiwiEnv
-        return Monitor(env_class(relic, task=BasketTask(**task), vision=VisionConfig(**vision),
-                                 guidance_weight=guidance_weight, view_weight=view_weight))
+        env = visual_env(env_class, relic, task=BasketTask(**task), vision=VisionConfig(**vision),
+                         guidance_weight=guidance_weight, view_weight=view_weight,
+                         search_rewards=search_rewards, search_spawn=search_spawn)
+        if wrap_deposit:
+            env = DepositCurriculum(env, mix, deposit_shaping)
+        return Monitor(env)
     if basket:
         from treesim.basket_kiwi_env import BasketKiwiEnv, BasketTask
         env = BasketKiwiEnv(relic, task=BasketTask(**task))
@@ -214,6 +351,8 @@ def make_env(relic, task, workspace_weight=0., basket=False, vision=None, statio
             from treesim.estimated_kiwi_env import EstimatedTarget
             from treesim.visual_kiwi_env import VisionConfig
             env = EstimatedTarget(env, vision=VisionConfig(**(estimate_vision or {})))
+        if wrap_deposit:
+            env = DepositCurriculum(env, mix, deposit_shaping)
         return Monitor(env)
     env = AssistedKiwiEnv(relic, task=AssistedTask(**task))
     if estimate:
@@ -334,6 +473,12 @@ def main():
     parser.add_argument('--start-phase', choices=('pick', 'carry', 'release'), default='pick')
     parser.add_argument('--fixed-stage', action='store_true')
     parser.add_argument('--workspace-weight', type=float, default=0.)
+    parser.add_argument('--view-weight', type=float, default=1.)
+    parser.add_argument('--search-rewards', action='store_true')
+    parser.add_argument('--deposit-mix', default='pick:1',
+                        help='Training-only reset mix, e.g. pick:0.5,carry:0.3,release:0.2. Evaluation stays pick')
+    parser.add_argument('--deposit-shaping', type=float, default=0.,
+                        help='Training-only hold/open-near-basket weight; evaluation stays 0')
     parser.add_argument('--eval-all-stages', action='store_true')
     parser.add_argument('--num-envs', type=int, default=4)
     parser.add_argument('--rollout-steps', type=int, default=128)
@@ -374,6 +519,7 @@ def main():
         vision = asdict(VisionConfig(size=args.camera_size, lesson=args.visual_lesson))
         if args.visual_lesson == 'grab' and args.start_phase != 'pick':
             parser.error('Visual grab lessons require --start-phase pick')
+    configure_search_lesson(args, parser.error)
     if args.estimate and (args.vision or args.smoke or args.encoder_warm_start):
         parser.error('Estimated-target training is not a visual CNN; do not combine with --vision, --smoke or --encoder-warm-start')
     if args.estimate:
@@ -385,9 +531,20 @@ def main():
     if not args.smoke and (args.steps % rollout_size or rollout_size < args.batch_size or rollout_size % args.batch_size):
         parser.error('Training steps must be a multiple of rollout size; batch size must divide rollout size')
     for value, low, high in ((args.learning_rate, 1e-7, .01), (args.entropy, 0., .1),
-                             (args.exploration_std, .05, 1.), (args.gripper_std, .05, 1.), (args.workspace_weight, 0., 4.)):
+                             (args.exploration_std, .05, 1.), (args.gripper_std, .05, 1.),
+                             (args.workspace_weight, 0., 4.), (args.view_weight, 0., 4.),
+                             (args.deposit_shaping, 0., 4.)):
         if not np.isfinite(value) or not low <= value <= high:
             parser.error('Learning settings must be finite and in supported ranges')
+    try:
+        deposit_mix = parse_deposit_mix(args.deposit_mix)
+    except ValueError as exc:
+        parser.error(str(exc))
+    mixed = deposit_mix['pick'] < 1.-1e-9
+    if (mixed or args.deposit_shaping) and not args.basket and not args.vision:
+        parser.error('Deposit mix/shaping requires the basket or visual collect task')
+    if mixed and (args.stationary or (args.vision and args.visual_lesson == 'grab')):
+        parser.error('Carry/release mix is a collect training fixture; grab/stationary stay pick')
     if args.heldout_seed < 10000+args.eval_episodes or (args.no_images and args.record_video):
         parser.error('Held-out seeds must follow monitoring seeds; video requires rendering')
     if args.basket and (args.workspace_weight or args.smoke):
@@ -420,7 +577,9 @@ def main():
                            learning_rate=args.learning_rate, entropy=args.entropy,
                            exploration_std=args.exploration_std, gripper_std=args.gripper_std,
                            n_epochs=5, gamma=.99, gae_lambda=.95, clip_range=.15, target_kl=.02,
-                           workspace_weight=args.workspace_weight)
+                           workspace_weight=args.workspace_weight, view_weight=args.view_weight,
+                           search_rewards=args.search_rewards, deposit_mix=deposit_mix,
+                           deposit_shaping=args.deposit_shaping)
     manifest = dict(scope=SCOPE, config={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                     task=asdict(task), training_config=training_config,
                     physics='Native MuJoCo CPU; floating Spot; fixed simplified pergola; rigid kiwi',
@@ -439,20 +598,26 @@ def main():
         manifest.update(assistance='12 cm capture and artificial stem/grip weld; actual opening removes grip; free settling deposit',
                         observations='99 ideal target/proprioception, basket displacement, phase, deposited and remaining-fruit values',
                         basket='Existing 1.2kg chassis-mounted geometry; independent fruit; drops/spills fail; no basket attachment',
-                        curriculum_start=args.start_phase, evaluation_guidance_weight=0.)
-    eval_env = (BasketKiwiEnv(args.relic, task=replace(task), guidance_weight=0.,
+                        curriculum_start=args.start_phase, evaluation_guidance_weight=0.,
+                        training_deposit_mix=deposit_mix, training_deposit_shaping=args.deposit_shaping,
+                        evaluation_start_phase=args.start_phase if not mixed else 'pick')
+    eval_task = replace(task, start_phase='pick') if mixed and args.basket else replace(task)
+    eval_env = (BasketKiwiEnv(args.relic, task=eval_task, guidance_weight=0.,
                               render_mode=None if args.no_images else 'rgb_array') if args.basket else
                 WorkspaceApproach(AssistedKiwiEnv(args.relic, task=replace(task),
                                                  render_mode=None if args.no_images else 'rgb_array')))
     if args.vision:
-        from treesim.visual_kiwi_env import VisualKiwiEnv, VisionConfig, SCOPE
+        from treesim.visual_kiwi_env import (VisualKiwiEnv, VisionConfig, SCOPE,
+                                            SEARCH_ACQUISITION, SEARCH_CLOSE, SEARCH_TRACKING, SEARCH_VIEW_LOSS)
         eval_env.close()
         env_class = VisualKiwiEnv
         if args.stationary:
             from treesim.stationary_kiwi_env import StationaryKiwiEnv, GAPS_M, OFF_AXIS_M, SCOPE
             env_class = StationaryKiwiEnv
-        eval_env = env_class(args.relic, task=replace(task), vision=VisionConfig(**vision), guidance_weight=0.,
-                                 view_weight=0., render_mode=None if args.no_images else 'rgb_array')
+        eval_env = visual_env(env_class, args.relic, task=eval_task, vision=VisionConfig(**vision),
+                              guidance_weight=0., view_weight=0., search_rewards=False,
+                              search_spawn=bool(args.search_rewards and args.visual_lesson == 'grab'),
+                              render_mode=None if args.no_images else 'rgb_array')
         manifest.update(scope=SCOPE, vision=vision,
                         observations='Actor: stacked wrist RGB-D, 22-D proprioception, phase, grasp/place flags and ages. '
                                      'Critic: privileged 99-D basket state plus proprioception. No fruit XYZ, IDs or segmentation on the actor',
@@ -462,8 +627,17 @@ def main():
                                 'no chassis head camera; 10Hz, one-frame delay, four-frame history; 5% frame loss, 3% depth dropout, '
                                 '0.15-3m optical-axis ToF; pose/light/color/gain DR; cameras on at train and eval',
                         scene_randomization='Independent fruit XYZ reset offsets after arm initialization; any unpicked fruit may be captured',
-                        workspace='No workspace wrapper or action teacher; oracle-only distance shaping disabled at evaluation',
-                        evaluation_view_weight=0.)
+                        workspace='No workspace wrapper or action teacher; oracle-only distance shaping disabled at evaluation; '
+                                  'training-only deposit mix/hold-open shaping does not change eval start_phase=pick or success rules',
+                        training_view_weight=args.view_weight,
+                        search_rewards=(f'Hand RGB+ToF: {SEARCH_ACQUISITION:+g} first ToF lock, '
+                                        f'{SEARCH_TRACKING:+g}/step tracking, {SEARCH_CLOSE:+g} close-while-detected, '
+                                        f'body-speed penalty, RGB hold below 0.15m ToF cutoff, '
+                                        f'{SEARCH_VIEW_LOSS:+g} view loss; privileged progress only while detected; '
+                                        f'target match is evaluator-only'
+                                        if args.search_rewards else 'legacy projected view shaping'),
+                        search_spawn=bool(args.search_rewards and args.visual_lesson == 'grab'),
+                        evaluation_view_weight=0., evaluation_search_rewards=False)
     if args.stationary:
         for key in ('exploration_std', 'gripper_std'):
             training_config.pop(key)
@@ -480,7 +654,7 @@ def main():
         from treesim.estimated_kiwi_env import EstimatedTarget, SCOPE
         from treesim.visual_kiwi_env import VisionConfig
         eval_env.close()
-        inner = (BasketKiwiEnv(args.relic, task=replace(task), guidance_weight=0.,
+        inner = (BasketKiwiEnv(args.relic, task=eval_task, guidance_weight=0.,
                                render_mode=None if args.no_images else 'rgb_array') if args.basket else
                  AssistedKiwiEnv(args.relic, task=replace(task),
                                  render_mode=None if args.no_images else 'rgb_array'))
@@ -536,9 +710,11 @@ def main():
                                                   parent_steps=saved['steps'],
                                                   mode='resume' if args.resume else 'encoder' if args.encoder_warm_start else 'weights_only')
         (args.output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
+        search_spawn = bool(args.search_rewards and args.visual_lesson == 'grab')
         makers = [partial(make_env, str(args.relic.resolve()), asdict(task), args.workspace_weight, args.basket, vision,
                           args.stationary, args.estimate, estimate_vision, 0. if args.stationary else 1.,
-                          1. if args.vision else 0.)
+                          args.view_weight if args.vision else 0., args.search_rewards, search_spawn,
+                          deposit_mix, args.deposit_shaping)
                   for _ in range(args.num_envs)]
         policy_kwargs = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
         policy_class = 'MlpPolicy'
@@ -568,7 +744,8 @@ def main():
             del previous
         if not args.resume and not args.stationary:
             initialize_walking_policy(model.policy, args.exploration_std, args.gripper_std,
-                                     encoder_transfer=bool(args.encoder_warm_start))
+                                     encoder_transfer=bool(args.encoder_warm_start),
+                                     gripper_bias=.6 if args.search_rewards else 0.)
         curriculum = Curriculum(saved['stage'] if args.resume else args.stage, require_workspace=args.workspace_weight > 0,
                                 require_stationary=args.stationary)
         train_env.env_method('set_stage', curriculum.stage)

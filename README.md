@@ -803,6 +803,19 @@ python scripts/train_assisted_kiwi.py --relic ../relic --basket \
   --eval-every 4096 --eval-episodes 8 --heldout-seed 70000 --record-video
 ```
 
+The same scripted six-fruit controller can be recorded inside the hillside
+orchard from `cursor/mujoco-beauty-frames` (rolling landform, tiled grass/soil,
+cordate leaf roof, kiwis on tied canes). Extra fruit and foliage are visual
+only; the six harvestable bodies and free-basket rules are unchanged. The
+camera stands above the south-west aisle and looks through Spot into the
+rolling block, so the landscape and the harvest are in the same shot. Do not
+launch this until the host is free:
+
+```bash
+MUJOCO_GL=egl python scripts/record_basket_orchard.py --relic ../relic \
+  --output output/basket-orchard-six --picks 6 --video
+```
+
 The basket task defaults to six requested fruit and a 120 s horizon. `--picks`
 selects 1–6; `--episode-seconds` and the original `--stage` approach distance
 remain configurable. For incremental training, `--start-phase release` starts
@@ -1136,6 +1149,56 @@ that parent’s held-out evaluation actually succeeded.
 python scripts/queue_visual_harvest.py --relic ../relic \
   --stationary-checkpoint output/stationary-grab/policy-00032768.zip \
   --output-root output --wait-for-trainers --queue-dir output/visual-harvest-queue-01
+```
+
+For a wrist-search curriculum, `--search-rewards` is a **look-lock-close** PPO
+lesson, not a privileged-XYZ wrap and not six-fruit collection. The actor still
+sees only delayed wrist RGB-D; the critic may read privileged basket state.
+Fruit starts **inside** the 44° wrist depth FOV at 20–40 cm (S0v-style), with
+other hanging fruit parked aside. Training pays acquisition/tracking when the
+privileged fruit is in the hand ToF, not only when the brown-mask heuristic
+fires, and keeps oracle distance progress only while that lock is held. The
+deterministic jaw mean is biased closed (0.6) so evaluation can pass the 0.2
+close threshold. Search rewards are off at evaluation; the in-FOV spawn stays
+on. `--fixed-stage` keeps this lesson at close range. Untrained
+`initial-policy.zip` files (`steps: 0`) are not used as encoder warm-starts.
+
+`--grab-only` is the short submission run: 32,768 steps, 8 s episodes, eight
+eval seeds. This is still an assisted 12 cm weld, not contact-only grasping or
+a learned six-kiwi basket policy.
+
+```bash
+python scripts/train_wrist_search_harvest.py --relic ../relic \
+  --grab-only --output-root output --wait-for-trainers \
+  --queue-dir output/wrist-search-inview-queue-01
+```
+
+To continue a successful grab into basket deposit, `--continue-from` skips grab
+and queues one-fruit then three-fruit collect. It does not train the held-fruit
+release/carry fixtures: those solved opening next to the basket but did not
+transfer into pick-and-place. `--one-fruit` stops before the three-fruit stage.
+Collect training uses `--deposit-mix pick:0.5,carry:0.3,release:0.2` and
+`--deposit-shaping 1` so a noisy rollout actually sees opening over the liner.
+Hold-while-far is capped below one deposit bonus so standing still cannot beat putting fruit in the basket.
+Search rewards stay off on collect: gating them on would zero basket progress
+after the weld. Evaluations keep cameras on, start from hanging fruit, and turn
+deposit shaping off.
+`--initial-warm-start` may load the 8,192-step collect checkpoint (5/8 greedy
+picks) instead of the grab zip. This remains an assisted 12 cm weld.
+
+If collect-1 learns to weld and then drop, extra pick-only steps mostly tune
+grab-then-wander. The mix/shaping flags are training-only. Warm-start may change
+the trainer and these flags; environment/Spot hashes and the 12 cm weld must
+still match. Use the 8,192-step collect checkpoint rather than a later zip that
+has already lost the grab. New runs write `wrist-collect-*fruit-03` and must not
+overwrite `*-02`.
+
+```bash
+python scripts/train_wrist_search_harvest.py --relic ../relic \
+  --continue-from output/wrist-search-grab-02 \
+  --initial-warm-start output/wrist-collect-1fruit-02-snapshot/policy-00008192.zip \
+  --output-root output --wait-for-trainers \
+  --queue-dir output/wrist-search-collect-queue-03
 ```
 
 ### Estimated-target assisted PPO
