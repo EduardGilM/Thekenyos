@@ -58,10 +58,10 @@ class KiwiStreetRenderTest(unittest.TestCase):
             j = int(round((x + half) / (2 * half) * (n - 1)))
             i = int(round((half - y) / (2 * half) * (n - 1)))
             return rgb[i, j].astype(np.float64) / 255.0
-        aisle = sample(0.0, 0.0)
-        row = sample(0.0, -2.5)
+        aisle = np.mean([sample(x, 0.0) for x in (-4.0, -2.0, 0.0, 2.0, 4.0)], axis=0)
+        row = np.mean([sample(x, -2.5) for x in (-4.0, -2.0, 0.0, 2.0, 4.0)], axis=0)
         self.assertGreater(row[0] / max(row[1], 1e-6), aisle[0] / max(aisle[1], 1e-6))
-        self.assertGreater(aisle[1], aisle[0])
+        self.assertGreater(row[0], row[1])
 
     def test_mjcf_uses_round_posts_and_place_fruit_hang(self):
         floor = sample_orchard_floor(
