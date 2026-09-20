@@ -16,7 +16,7 @@ document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fc4e6);
 scene.fog = new THREE.Fog(0xb8d3ea, 30, 110);
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, .05, 300);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, .05, 900);
 camera.up.set(0, 0, 1);
 
 const hemi = new THREE.HemisphereLight(0xcfe6ff, 0x5f7a3a, 1.1);
@@ -75,7 +75,7 @@ async function loadOrchard() {
   skirt.position.z = meta.terrain.min_z - 1.5 - .01;
   scene.add(skirt);
   // far ground beyond the block
-  const far = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: 0x3f6a26, roughness: 1 }));
+  const far = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({ color: 0x3f6a26, roughness: 1 }));
   far.position.z = meta.terrain.min_z - .02; scene.add(far);
 
   // wood: posts, wires, canes as merged cylinders
@@ -129,37 +129,29 @@ async function loadOrchard() {
   }
   leafMeshes.forEach((im, c) => { im.instanceColor = new THREE.InstancedBufferAttribute(colAttr[c], 3); im.instanceMatrix.needsUpdate = true; });
 
-  // Perimeter hedge: an opaque wall of foliage so the flat world has no visible edge.
+  // Distant procedural mountains: two rings of 2-D silhouettes beyond the fog, so the horizon
+  // is a skyline instead of a flat edge. Drawn without fog and in haze colours to read as far.
   {
-    const R = half + .9, HGT = 1.4, THK = .8;
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x4a2c12, roughness: 1 });
-    const walls = [[R, 0, THK, 2 * R + THK], [-R, 0, THK, 2 * R + THK], [0, R, 2 * R + THK, THK], [0, -R, 2 * R + THK, THK]];
-    for (const [x, y, sx, sy] of walls) {
-      const w = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, HGT), wallMat);
-      w.position.set(x, y, HGT / 2 - .1); w.receiveShadow = true; scene.add(w);
-    }
-    const blade = leafMeshes[2].geometry;
-    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: .85 });
-    const autumn = [[.66, .34, .10], [.78, .48, .14], [.56, .24, .08], [.84, .60, .20], [.48, .30, .12]];
-    const perWall = 2400, hedgeLeaves = new THREE.InstancedMesh(blade, hedgeMat, 4 * perWall);
-    hedgeLeaves.castShadow = true;
-    const cols = new Float32Array(4 * perWall * 3);
-    const e = new THREE.Euler(), s2 = new THREE.Vector3();
-    let k = 0;
-    for (let wi = 0; wi < 4; wi++) for (let i = 0; i < perWall; i++) {
-      const along = (Math.random() * 2 - 1) * R, hgt = Math.random() * HGT, depth = -THK / 2 - .12 - Math.random() * .3;
-      const scale = 1.4 + Math.random() * 1.2;
-      if (wi === 0) p.set(R + depth, along, hgt); else if (wi === 1) p.set(-R - depth, along, hgt);
-      else if (wi === 2) p.set(along, R + depth, hgt); else p.set(along, -R - depth, hgt);
-      // blade +Z faces roughly into the field, with plenty of scatter
-      const face = wi === 0 ? Math.PI : wi === 1 ? 0 : wi === 2 ? -Math.PI / 2 : Math.PI / 2;
-      e.set(Math.PI / 2 + (Math.random() - .5) * 1.4, (Math.random() - .5) * 1.2, face + (Math.random() - .5) * 1.6);
-      q.setFromEuler(e); s2.setScalar(scale);
-      mats.compose(p, q, s2); hedgeLeaves.setMatrixAt(k, mats);
-      const c = autumn[Math.floor(Math.random() * autumn.length)], v = .75 + .45 * Math.random(); cols[k * 3] = c[0] * v; cols[k * 3 + 1] = c[1] * v; cols[k * 3 + 2] = c[2] * v; k++;
-    }
-    hedgeLeaves.instanceColor = new THREE.InstancedBufferAttribute(cols, 3);
-    scene.add(hedgeLeaves);
+    const noise = (t, seed) => Math.sin(t * 3 + seed) * .5 + Math.sin(t * 7.3 + seed * 1.7) * .25 + Math.sin(t * 13.1 + seed * 2.9) * .12 + Math.sin(t * 29 + seed * 4.1) * .05;
+    const ring = (radius, base, amp, seed, colorLow, colorHigh, segments = 720) => {
+      const pos = [], col = [], idx = [];
+      const lo = new THREE.Color(colorLow), hi = new THREE.Color(colorHigh), c = new THREE.Color();
+      for (let i = 0; i <= segments; i++) {
+        const a = i / segments * Math.PI * 2, t = i / segments * Math.PI * 2;
+        const h = Math.max(2, base + amp * (noise(t, seed) + .6 * noise(t * 2.1 + 1, seed + 5)));
+        const x = Math.cos(a) * radius, y = Math.sin(a) * radius;
+        pos.push(x, y, -3, x, y, h);
+        col.push(lo.r, lo.g, lo.b); c.lerpColors(lo, hi, Math.min(1, h / (base + amp))); col.push(c.r, c.g, c.b);
+        if (i < segments) { const k = i * 2; idx.push(k, k + 1, k + 2, k + 1, k + 3, k + 2); }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setIndex(idx);
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, fog: false, side: THREE.DoubleSide }));
+      m.frustumCulled = false; scene.add(m);
+    };
+    ring(420, 34, 30, 2.0, 0x8fb0d0, 0xb9cfe6);   // far, pale haze
+    ring(300, 18, 20, 7.5, 0x6f8fa8, 0x93afc6);   // mid
+    ring(210, 7, 9, 11.2, 0x5d7c6a, 0x7f9b82);     // near foothills, greener
   }
 
   // canopy kiwis (visual) + stems
