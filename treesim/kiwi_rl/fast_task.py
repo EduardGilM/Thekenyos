@@ -183,10 +183,10 @@ def _record(
         and inside and basket_contact[world] != 0)
     if contained_contact and relative_speed < SETTLE_SPEED_M_S:
         settle_time[world] += dt
-    elif (detached[world] != 0 and hand_contact[world] == 0
-          and basket_contact[world] != 0 and near_inside
+    elif (detached[world] != 0 and hand_contact[world] == 0 and near_inside
           and relative_speed < SETTLE_JITTER_SPEED_M_S):
-        # Preserve, but never accumulate, dwell across coarse-solver jitter.
+        # Preserve, but never accumulate, dwell across coarse-solver velocity
+        # or contact flicker. Strict liner contact remains required to advance.
         settle_time[world] = settle_time[world]
     else:
         settle_time[world] = 0.
