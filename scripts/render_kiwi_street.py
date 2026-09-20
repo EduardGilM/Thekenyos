@@ -24,7 +24,11 @@ from treesim.config import FoliageParams, FruitParams
 from treesim.foliage import place_canopy_leaves, place_leaves
 from treesim.gl_backend import bind_mujoco_gl
 from treesim.kiwi_material import STEM_LENGTH
-from treesim.orchard_terrain import floor_kwargs_for_plantation, sample_orchard_floor
+from treesim.orchard_terrain import (
+    _appearance_rgb,
+    floor_kwargs_for_plantation,
+    sample_orchard_floor,
+)
 from treesim.pergola import generate, place_fruit
 
 
@@ -38,10 +42,10 @@ BEAM_HALF_M = (0.070, 0.052)
 FOOTER_RADIUS_M = 0.18
 FOOTER_HALF_M = 0.055
 # Azimuth 0 looks +X down the aisle. Look slightly down so the street fills the frame.
-CAMERA_LOOKAT = (3.2, 0.22, 0.52)
-CAMERA_DISTANCE_M = 15.8
-CAMERA_AZIMUTH_DEG = 16.0
-CAMERA_ELEVATION_DEG = -8.0
+CAMERA_LOOKAT = (2.4, 0.18, 0.48)
+CAMERA_DISTANCE_M = 13.6
+CAMERA_AZIMUTH_DEG = 18.0
+CAMERA_ELEVATION_DEG = -11.0
 
 
 def _rgba(rgb, a=1.0) -> str:
@@ -158,72 +162,28 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
     xx, yy = np.meshgrid(u, v)
     aisle_y = 0.5 * (ys[0] + ys[-1])
 
-    clump = _value_field(rng, (n, n), ((140, 1.0), (48, 0.55), (18, 0.25)))
-    patch = _value_field(rng, (n, n), ((36, 1.0), (14, 0.45)))
     grit = _value_field(rng, (n, n), ((8, 1.0), (3, 0.40)))
-    blocks = _block_field(rng, (n, n), 18)
-    turf = _block_field(rng, (n, n), 9)
-    speck = rng.random((n, n))
-    wander = _value_field(rng, (n, n), ((50, 1.0), (20, 0.4)))
-
-    grass_dark = np.array([0.12, 0.18, 0.06])
-    grass_mid = np.array([0.24, 0.30, 0.09])
-    grass_sun = np.array([0.38, 0.36, 0.12])
-    straw = np.array([0.50, 0.41, 0.16])
-    soil_wet = np.array([0.16, 0.09, 0.04])
-    soil_loam = np.array([0.40, 0.24, 0.10])
-    soil_dust = np.array([0.58, 0.38, 0.18])
-    rut_col = np.array([0.18, 0.11, 0.05])
-    packed = np.array([0.48, 0.40, 0.26])
-
-    t = np.clip(0.30 * clump + 0.25 * patch + 0.20 * wander + 0.25 * blocks, 0.0, 1.0)
-    grass = (1.0 - t)[..., None] * grass_dark + t[..., None] * grass_mid
-    grass = grass * (0.78 + 0.34 * turf[..., None] + 0.12 * grit[..., None])
-    sun_w = np.clip((blocks - 0.62), 0.0, 1.0) * 0.85
-    grass = grass * (1.0 - sun_w)[..., None] + sun_w[..., None] * grass_sun
-    dry_w = np.clip((turf - 0.72), 0.0, 1.0) * 0.90
-    grass = grass * (1.0 - dry_w)[..., None] + dry_w[..., None] * straw
-    scars = np.clip((blocks - 0.88) / 0.10, 0.0, 1.0)
-    grass = grass * (1.0 - 0.75 * scars)[..., None] + scars[..., None] * soil_loam
-    mow = 0.5 + 0.5 * np.sin(yy * (2.0 * np.pi / 0.48) + 0.40 * np.sin(xx * 0.18))
-    aisle = np.clip(1.0 - np.abs(yy - aisle_y) / 1.85, 0.0, 1.0)
-    grass = grass * (1.0 - 0.34 * aisle * (mow - 0.5))[..., None]
-
-    soil_w = np.zeros((n, n))
-    for y in ys:
-        edge = 0.18 + 0.34 * (wander - 0.5) + 0.10 * (blocks - 0.5)
-        d = np.abs(yy - y)
-        soil_w = np.maximum(soil_w, np.clip((0.88 + edge - d) / 0.10, 0.0, 1.0))
-    soil_t = np.clip(0.35 * grit + 0.25 * patch + 0.40 * turf, 0.0, 1.0)
-    soil = (1.0 - soil_t)[..., None] * soil_wet + soil_t[..., None] * soil_dust
-    soil = soil * (0.82 + 0.28 * blocks[..., None]) + 0.10 * soil_loam
-    edge_col = np.array([0.20, 0.16, 0.07])
-    w = np.clip(soil_w, 0.0, 1.0)
-    rgb = np.empty((n, n, 3))
-    low = w < 0.5
-    hi = ~low
-    t_low = (2.0 * w)[..., None]
-    t_hi = (2.0 * w - 1.0)[..., None]
-    rgb[low] = (1.0 - t_low[low]) * grass[low] + t_low[low] * edge_col
-    rgb[hi] = (1.0 - t_hi[hi]) * edge_col + t_hi[hi] * soil[hi]
-
+    look = np.random.default_rng(seed + 348)
+    # Orchard appearance is X-row; swap so soil follows the post Y rows.
+    row0 = float(ys[0])
+    rgb = _appearance_rgb(
+        v, u, yy - row0, xx, float(SPACING_M), 0.0, 0.40, half, look,
+    )
     track = np.zeros((n, n))
     for side in (-0.64, 0.64):
         d = np.abs(yy - (aisle_y + side))
-        track = np.maximum(track, np.clip(1.0 - d / 0.30, 0.0, 1.0) ** 1.05)
-    track *= (0.78 + 0.22 * grit) * (1.0 - 0.20 * soil_w)
-    rgb = rgb * (1.0 - 0.88 * track)[..., None] + track[..., None] * rut_col
-
+        track = np.maximum(track, np.clip(1.0 - d / 0.26, 0.0, 1.0) ** 1.2)
+    track *= 0.55 + 0.45 * grit
+    rgb = rgb * (1.0 - 0.55 * track)[..., None] + track[..., None] * np.array(
+        [0.28, 0.18, 0.08]
+    )
     pads = np.zeros((n, n))
     for x in xs:
         for y in ys:
-            pads = np.maximum(pads, np.clip(1.0 - np.hypot(xx - x, yy - y) / 0.38, 0.0, 1.0))
-    rgb = rgb * (1.0 - 0.78 * pads)[..., None] + pads[..., None] * packed
-
-    stones = (speck > 0.986).astype(np.float64)
-    rgb = rgb * (1.0 - 0.70 * stones)[..., None] + stones[..., None] * np.array([0.38, 0.34, 0.26])
-    litter = ((speck < 0.012) & (soil_w < 0.35)).astype(np.float64)
-    rgb = rgb * (1.0 - 0.50 * litter)[..., None] + litter[..., None] * np.array([0.32, 0.28, 0.08])
+            pads = np.maximum(pads, np.clip(1.0 - np.hypot(xx - x, yy - y) / 0.34, 0.0, 1.0))
+    rgb = rgb * (1.0 - 0.45 * pads)[..., None] + pads[..., None] * np.array(
+        [0.46, 0.38, 0.24]
+    )
     return _png_bytes(np.flipud(np.clip(rgb, 0, 1)) * 255.0)
 
 
