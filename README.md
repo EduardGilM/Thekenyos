@@ -129,6 +129,21 @@ python scripts/record_scene.py --video output/plantation-gpu.mp4 --orbit \
   --pergola-rows 5 --pergola-columns 4
 ```
 
+### Scripted 6-7 (kinematic gag)
+
+This is **not** harvest, gait, balance, or a learned policy. It kinematically
+rears RELIC Spot onto its hind legs, waves the front legs as two hands, and
+stamps SIX/SEVEN on the recording. Gravity is off and feet are planted after
+`mj_forward`; do not read it as bipedal contact control.
+
+```bash
+python scripts/spot_six_seven.py --relic ../relic \
+  --video output/spot-six-seven.mp4
+```
+
+`python -B -m unittest tests.test_six_seven -v` covers the pose timing. The
+script still needs the external RELIC URDF to render.
+
 #### Continuous leaf roof (render-only)
 
 For a continuous **visual leaf roof**, `--canopy-spacing .08` adds overlapping
@@ -1082,6 +1097,8 @@ limits of the uncalibrated tissue and damage models.
 | `treesim/sim.py` | Solver and stepping integration |
 | `scripts/walk_spot.py` | Loaded walking and spill recordings |
 | `scripts/record_orchard_mujoco.py` | Native MuJoCo orbit of the orchard heightfield |
+| `scripts/spot_six_seven.py` | Kinematic RELIC Spot rear-up 6-7 gag; not harvest or a policy |
+| `treesim/six_seven.py` | Joint timing, nose-up pitch and SIX/SEVEN captions for that gag |
 | `scripts/kiwi_compression.py` | Native MuJoCo material bench |
 | `tests/` | Fast geometry, mass, independence and event checks |
 | `docs/kiwi-material-evidence.md` | Research sources and calibration gaps |
