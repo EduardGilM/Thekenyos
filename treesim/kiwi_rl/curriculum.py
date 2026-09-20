@@ -64,6 +64,9 @@ SPEEDRUN_PRESET = {
 # the liner, change promotion gates, or turn the oracle into an action teacher.
 # Eval still uses guidance_weight=0 and teacher_mix=0.
 EASY_PRESET = {
+    # Measured on the live RTX 5090: startup/eval + 25 updates stays near the
+    # requested ten-minute ceiling. This is a wall-clock speedrun budget.
+    'updates': 25,
     'teacher_mix': 0.0,
     'teacher_horizon_updates': 60,
     'entropy_coef': 0.001,

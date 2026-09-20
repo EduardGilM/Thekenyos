@@ -87,6 +87,7 @@ def apply_easy_cli(args):
         args.teacher_mix = preset['teacher_mix']
     if getattr(args, 'shaping_coef', None) is None:
         args.shaping_coef = preset['shaping_coef']
+    args.updates = int(preset['updates'])
     args.entropy_coef = float(preset['entropy_coef'])
     args.ppo_epochs = int(preset['ppo_epochs'])
     return args
