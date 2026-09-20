@@ -464,6 +464,27 @@ def street_heights(floor, xs, ys) -> np.ndarray:
     return heights
 
 
+def street_ground_z(floor, xs, ys):
+    """``(x, y) -> z`` on the rendered floor (smoothed, ruts and pads), so the
+    walkers stand on the surface that is drawn rather than the raw sample."""
+    heights = street_heights(floor, xs, ys)
+    x = np.asarray(floor.x_m, dtype=np.float64)
+    y = np.asarray(floor.y_m, dtype=np.float64)
+
+    def ground_z(px: float, py: float) -> float:
+        if not np.isfinite([px, py]).all():
+            raise ValueError("ground query must be finite")
+        u = np.clip((px - x[0]) / (x[-1] - x[0]) * (x.size - 1), 0.0, x.size - 1 - 1e-9)
+        v = np.clip((py - y[0]) / (y[-1] - y[0]) * (y.size - 1), 0.0, y.size - 1 - 1e-9)
+        i, j = int(v), int(u)
+        fv, fu = v - i, u - j
+        top = heights[i, j] * (1 - fu) + heights[i, j + 1] * fu
+        bot = heights[i + 1, j] * (1 - fu) + heights[i + 1, j + 1] * fu
+        return float(top * (1 - fv) + bot * fv)
+
+    return ground_z
+
+
 def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -> str:
     heights = street_heights(floor, xs, ys)
     min_z = float(heights.min())
@@ -895,8 +916,12 @@ class SpotWalker:
         for leg in SPOT_LEGS:
             dx, dz = self.foot_offset(gait + SPOT_TROT_PHASE[leg])
             # Target in the hip-pitch frame (x forward, z up); hips sit at z=0.
-            target = np.array([dx - 0.03,
-                               -(SPOT_BODY_HEIGHT_M + bob) + SPOT_FOOT_RADIUS_M + dz])
+            # The foot height follows the floor under the foot, not under the
+            # body, so a planted foot does not ride the body's terrain profile.
+            fx = x + self.direction * (self.hip[leg][0] + dx - 0.03)
+            fy = y + self.direction * self.hip[leg][1]
+            foot_z = float(self.ground_z(fx, fy)) + SPOT_FOOT_RADIUS_M + dz
+            target = np.array([dx - 0.03, foot_z - z])
             hy, kn = self._ik(leg, target)
             data.qpos[self.q[f"{leg}_hx"]] = 0.0
             data.qpos[self.q[f"{leg}_hy"]] = hy
@@ -1111,14 +1136,14 @@ def main():
     apply_hfield(model, floor, xs, ys)
     # fogstart/fogend are multiples of stat.meansize; express them in metres.
     meansize = max(float(model.stat.meansize), 1e-3)
-    model.vis.map.fogstart = 18.0 / meansize
-    model.vis.map.fogend = 95.0 / meansize
+    model.vis.map.fogstart = 10.0 / meansize
+    model.vis.map.fogend = 80.0 / meansize
     # shadowclip is a multiple of stat.extent; express the cube in metres.
     model.vis.map.shadowclip = SHADOW_HALF_M / max(float(model.stat.extent), 1e-3)
     key_light = model.light("key").id
     data = mujoco.MjData(model)
     if with_spot:
-        walkers = default_walkers(model, aisles, xs, floor.ground_z, args.seed)
+        walkers = default_walkers(model, aisles, xs, street_ground_z(floor, xs, ys), args.seed)
     mujoco.mj_forward(model, data)
 
     camera = mujoco.MjvCamera()

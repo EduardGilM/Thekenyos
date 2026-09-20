@@ -173,6 +173,21 @@ class KiwiStreetRenderTest(unittest.TestCase):
         kept = street.upright_leaves([up, down, sideways])
         self.assertEqual(kept, [up, sideways])
 
+    def test_walkers_stand_on_the_rendered_floor(self):
+        floor, _ = _small_scene()
+        xs, ys, aisles = street.row_layout()
+        heights = street.street_heights(floor, xs, ys)
+        ground_z = street.street_ground_z(floor, xs, ys)
+        x = np.asarray(floor.x_m)
+        y = np.asarray(floor.y_m)
+        for i, j in ((10, 20), (heights.shape[0] // 2, heights.shape[1] // 3)):
+            self.assertAlmostEqual(ground_z(float(x[j]), float(y[i])), float(heights[i, j]), places=9)
+        # Wheel ruts are part of the drawn floor and must be seen by the feet.
+        aisle = aisles[1]
+        self.assertLess(ground_z(0.3, aisle + 0.64), ground_z(0.3, aisle) - 0.01)
+        with self.assertRaises(ValueError):
+            ground_z(float("nan"), 0.0)
+
     def test_shadow_eye_sits_upstream_of_a_camera_centred_focus(self):
         focus = street.shadow_focus((2.0, 1.0, 0.6), 10.0, 0.0, -5.0)
         np.testing.assert_allclose(focus, (5.0, 1.0, street.SHADOW_FOCUS_Z_M))

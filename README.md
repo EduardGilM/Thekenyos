@@ -94,8 +94,10 @@ and a ground map aligned to the post rows. Fruit hang stays `place_fruit`
 plus `STEM_LENGTH`. With `--relic` the animation adds five Spot robots
 imported from the RELIC URDF and driven by a **scripted** kinematic trot with
 a sum-of-sines arm: joint values are written into `qpos`, so it is neither
-the RELIC gait policy, a learned behaviour nor contact physics. The arm
-wander is bounded by a planar FK check so the hand stays under the beams.
+the RELIC gait policy, a learned behaviour nor contact physics. Stance feet
+are locked to the drawn floor (smoothed sample plus ruts and pads, sampled
+under each foot); the arm wander is bounded by a planar FK check so the hand
+stays under the beams.
 Shoot leaves that would hang below the canes are dropped so the roof sits
 above the wires and the `place_fruit` crop hangs visible beneath it. The
 directional shadow eye follows the camera (MuJoCo clips casters upstream of
