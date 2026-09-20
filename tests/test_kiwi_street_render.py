@@ -89,8 +89,8 @@ class KiwiStreetRenderTest(unittest.TestCase):
         self.assertIn(f"{center[0]:.5f} {center[1]:.5f} {center[2]:.5f}", xml)
         self.assertGreaterEqual(street.CAMERA_AZIMUTH_DEG, 4.0)
         self.assertLess(street.CAMERA_AZIMUTH_DEG, 28.0)
-        self.assertGreater(street.CAMERA_ELEVATION_DEG, -6.0)
-        self.assertLess(street.CAMERA_ELEVATION_DEG, 8.0)
+        self.assertGreater(street.CAMERA_ELEVATION_DEG, -14.0)
+        self.assertLess(street.CAMERA_ELEVATION_DEG, 4.0)
 
 
 if __name__ == "__main__":

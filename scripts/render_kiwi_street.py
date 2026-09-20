@@ -37,11 +37,11 @@ POST_RADIUS_M = 0.095
 BEAM_HALF_M = (0.070, 0.052)
 FOOTER_RADIUS_M = 0.18
 FOOTER_HALF_M = 0.055
-# Azimuth 0 looks +X down the aisle. Stand at the west mouth, eye height.
-CAMERA_LOOKAT = (4.0, 0.05, 0.90)
-CAMERA_DISTANCE_M = 17.2
-CAMERA_AZIMUTH_DEG = 10.0
-CAMERA_ELEVATION_DEG = 0.5
+# Azimuth 0 looks +X down the aisle. Look slightly down so the street fills the frame.
+CAMERA_LOOKAT = (3.2, 0.22, 0.52)
+CAMERA_DISTANCE_M = 15.8
+CAMERA_AZIMUTH_DEG = 16.0
+CAMERA_ELEVATION_DEG = -8.0
 
 
 def _rgba(rgb, a=1.0) -> str:
@@ -431,7 +431,7 @@ def mjcf(floor, skeleton, fruit, leaves, pads, xs, ys) -> str:
   <option gravity="0 0 -9.81"/>
   <visual>
     <global offwidth="1920" offheight="1080" fovy="42"/>
-    <headlight ambient=".24 .24 .22" diffuse=".44 .44 .40" specular=".10 .10 .09"/>
+    <headlight ambient=".36 .34 .28" diffuse=".52 .50 .44" specular=".10 .10 .09"/>
     <rgba haze=".58 .66 .72 1"/>
     <map fogstart="14" fogend="48" znear=".12" zfar="90"/>
     <quality shadowsize="4096" offsamples="8"/>
