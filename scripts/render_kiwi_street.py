@@ -164,10 +164,10 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
 
     grit = _value_field(rng, (n, n), ((8, 1.0), (3, 0.40)))
     look = np.random.default_rng(seed + 348)
-    # Orchard appearance is X-row; swap so soil follows the post Y rows.
-    row0 = float(ys[0])
+    # Orchard appearance puts pasillo on pitch centres; soil at ±2.5 m
+    # already matches the two post rows. Pass Y as the row axis.
     rgb = _appearance_rgb(
-        v, u, yy - row0, xx, float(SPACING_M), 0.0, 0.40, half, look,
+        v, u, yy, xx, float(SPACING_M), 0.0, 0.40, half, look,
     )
     track = np.zeros((n, n))
     for side in (-0.64, 0.64):
