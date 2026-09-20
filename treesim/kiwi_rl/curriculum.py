@@ -315,6 +315,9 @@ IK_HARVEST_PRESET = {
     # HARVEST. Eval stays hanging-only. Fruit stays free; not a weld.
     'rl_continue_deposit_start_frac': 0.50,
     'rl_continue_shape_hand_fruit': True,
+    # Deposit-world hover hold only. Hanging HARVEST stays student-only.
+    # Eval stays deterministic with teacher_mix=0. Not a full IK harvest.
+    'rl_continue_deposit_hover_teacher': True,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -666,6 +669,7 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out.setdefault('detach_reward', W_DETACH_HELD)
     out.setdefault('deposit_start_frac', 0.0)
     out.setdefault('shape_hand_fruit', False)
+    out.setdefault('deposit_hover_teacher', False)
     if not continuing:
         return out
     entropy = float(out['rl_continue_entropy_coef'])
@@ -712,6 +716,7 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out['detach_reward'] = detach_w
     out['deposit_start_frac'] = deposit_frac
     out['shape_hand_fruit'] = bool(out['rl_continue_shape_hand_fruit'])
+    out['deposit_hover_teacher'] = bool(out['rl_continue_deposit_hover_teacher'])
     return out
 
 

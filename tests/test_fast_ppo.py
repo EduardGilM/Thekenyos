@@ -189,6 +189,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('retained_detach_events', run_src)
         self.assertIn('mix_harvest_reset_modes', inspect.getsource(train_fast))
         self.assertIn('assign_harvest_deposit_goals', inspect.getsource(train_fast))
+        self.assertIn('_deposit_hover_teacher', inspect.getsource(train_fast.collect))
+        self.assertIn('privileged_deposit_action', inspect.getsource(train_fast.collect))
         self.assertIn('deposit_start_frac', run_src)
         self.assertIn('deposit_start_worlds', run_src)
         self.assertIn('deposit_only_worlds', run_src)

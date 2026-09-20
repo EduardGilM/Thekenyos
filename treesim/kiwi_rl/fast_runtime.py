@@ -127,9 +127,15 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
         phi = wp.exp(-d_shape / length)
     # After the scripted jaw opens, keep hand-XY shaping so PPO still has a
     # dense signal during the 0.5 s liner settle. Fruit fall is not shaped.
+    # DEPOSIT_ONLY dump worlds must not be pulled back over the opening:
+    # that parks the ~20 cm wrist in the liner and blocks settle.
     if easy_released[world] != 0 and use_basket != 0:
-        phi = wp.exp(-d_hand_xy / length)
-        potential_ref = 3
+        if goal[world] == 0:
+            phi = 1.0
+            potential_ref = 5
+        else:
+            phi = wp.exp(-d_hand_xy / length)
+            potential_ref = 3
     # Held and still attached: the TCP term is already ~0, so shape the stem
     # load toward the 8 N release instead. Optional guidance; eval keeps
     # guidance at 0. Not a paper angle or a required grasp sequence.
@@ -340,6 +346,13 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
     length = shaping_length[world]
     if length <= 0.0:
         length = 0.25
+    if goal[world] == 0:
+        previous_potential[world] = 1.0
+        shaping_ref[world] = 5
+        reward[world] = 0.0
+        episode_time[world] = 0.0
+        timed_out[world] = wp.uint8(0)
+        return
     if use_basket != 0 and shape_hand_fruit[0] != 0:
         basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
         idx = active_fruit[world]
@@ -1246,6 +1259,7 @@ class FastRuntime:
             self._ik_demo = False
             self._ik_grasp = False
             self._ik_harvest = False
+            self._deposit_hover_teacher = False
             self._grasp_close_index = 1
             self._harvest_pull_index = 1
             self._grasp_catalog_locked = False
@@ -2245,6 +2259,7 @@ class FastRuntime:
         """
         self._ik_grasp = bool(enabled)
         self._ik_harvest = False
+        self._deposit_hover_teacher = False
         self._easy = False
         self._ik_demo = False
         self._harvest_slip_max_close = 0.0
@@ -2321,6 +2336,7 @@ class FastRuntime:
         self._easy = False
         self._ik_demo = False
         knobs = IK_HARVEST_PRESET if knobs is None else knobs
+        self._deposit_hover_teacher = bool(knobs.get('deposit_hover_teacher', False)) and self._ik_harvest
         self._easy_pin.assign(np.array([1 if self._ik_harvest else 0], dtype=np.int32))
         shape_both = bool(knobs.get('shape_hand_fruit', False)) and self._ik_harvest
         self._shape_hand_fruit.assign(np.array([1 if shape_both else 0], dtype=np.int32))
@@ -2413,6 +2429,7 @@ class FastRuntime:
             'pull_close_frac': pull_frac if self._harvest_pull_hold is not None else 0.0,
             'detach_reward': detach_w,
             'shape_hand_fruit': bool(shape_both),
+            'deposit_hover_teacher': bool(self._deposit_hover_teacher),
             'scripted_jaw': bool(self._ik_harvest),
             'weld': False,
             **line,
@@ -2486,6 +2503,7 @@ class FastRuntime:
         self._easy = bool(enabled)
         self._ik_demo = bool(enabled) and bool(ik_demo)
         self._ik_harvest = False
+        self._deposit_hover_teacher = False
         self._harvest_slip_max_close = 0.0
         self._harvest_pull_hold = None
         self._stem_shaping.assign(np.array([0], dtype=np.int32))

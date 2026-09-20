@@ -274,6 +274,16 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                     teacher_applied = runtime.privileged_deposit_action()
                 raw = mix_privileged_actions(raw, teacher_applied, mask)
                 teacher_used += int(mask.sum().item())
+            elif (not deterministic and getattr(runtime, '_deposit_hover_teacher', False)):
+                # Harvest continue: hold the robot-side hover on DEPOSIT_ONLY
+                # dump worlds so the grasp policy cannot put the wrist back
+                # in the liner. Hanging HARVEST stays student-only. Eval
+                # is deterministic and never enters this branch.
+                teacher_applied = runtime.privileged_deposit_action()
+                import warp as wp
+                mask = wp.to_torch(runtime.task.goal).reshape(-1) == 0
+                raw = mix_privileged_actions(raw, teacher_applied, mask)
+                teacher_used += int(mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
             base, arm = _split_action(raw)
             runtime.set_base_commands(base.contiguous())
