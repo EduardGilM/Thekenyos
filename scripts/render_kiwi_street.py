@@ -201,6 +201,7 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     tuft = _block_field(rng, (n, n), px(0.11))
     fine = _value_field(rng, (n, n), ((px(0.06), 1.0), (px(0.03), 0.5)))
     wander = _value_field(rng, (n, n), ((px(0.7), 1.0), (px(0.3), 0.4)))
+    blades = _value_field(rng, (n, n), ((px(0.02), 1.0), (px(0.01), 0.6)))
     speck = rng.random((n, n), dtype=np.float32)
 
     dark = np.array([0.11, 0.18, 0.05], np.float32)
@@ -227,15 +228,16 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     rgb = rgb * (1.0 - 0.5 * clo)[..., None] + (0.5 * clo)[..., None] * clover
     bare = np.clip((tuft - 0.985) / 0.015, 0, 1) * np.clip((broad - 0.55) / 0.4, 0, 1)
     rgb = rgb * (1.0 - 0.6 * bare)[..., None] + (0.6 * bare)[..., None] * (soil_dry * 0.85)
-    blades = _value_field(rng, (n, n), ((px(0.02), 1.0), (px(0.01), 0.6)))
     rgb *= (0.80 + 0.40 * blades)[..., None]
 
     soil_w = np.zeros((n, n), np.float32)
     for y in ys:
         edge = 0.14 + 0.30 * (wander - 0.5)
         soil_w = np.maximum(soil_w, np.clip((0.66 + edge - np.abs(yy - y)) / 0.12, 0, 1))
-    crumb = np.clip(0.45 * fine + 0.30 * patch + 0.25 * tuft, 0, 1)
+    clods = _value_field(rng, (n, n), ((px(0.12), 1.0), (px(0.05), 0.5)))
+    crumb = np.clip(0.40 * fine + 0.25 * patch + 0.35 * clods, 0, 1)
     soil = (1.0 - crumb)[..., None] * soil_wet + crumb[..., None] * soil_dry
+    soil *= (0.86 + 0.28 * blades)[..., None]
     for y in ys:
         moist = np.clip(1.0 - np.abs(yy - y) / 0.22, 0, 1) ** 1.3
         soil = soil * (1.0 - 0.45 * moist)[..., None] + (0.45 * moist)[..., None] * soil_wet
