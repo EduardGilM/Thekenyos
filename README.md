@@ -758,8 +758,9 @@ scripted jaw dimension, whitens advantages normally, and self-imitates only the
 causal episode prefix ending in success. The easy optimizer uses clip 0.2,
 learning rate 5e-4, four epochs and target KL 0.05. These are student-side
 release-training aids; outside-crate generalisation still requires a later
-matched evaluation. On the live RTX 5090, `--easy` is capped at 25 updates so
-startup, evaluation and training stay near the requested ten-minute ceiling.
+matched evaluation. On the live RTX 5090, `--easy` is capped at three updates:
+easy37 peaked there and later updates regressed, while startup, training and
+final evaluation stay well below the requested ten-minute ceiling.
 The 5 ms rigid solver can settle a fruit 7–10 mm into the
 simplified liner, so the containment gate uses a documented 12 mm
 numerical liner tolerance. The 0.05 m/s settle gate remains; substep jitter
