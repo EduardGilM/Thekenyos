@@ -550,6 +550,20 @@ def _mark_scripted_grasp_open(mask: wp.array(dtype=wp.uint8), reset_mode: wp.arr
 
 
 @wp.kernel
+def _mark_scripted_deposit_open(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                                released: wp.array(dtype=int),
+                                qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
+                                jaw_qposadr: int, jaw_open: float):
+    """In-hand harvest dump: open the pin at the release waypoint. Not a weld."""
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 1:
+        return
+    released[world] = 1
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
+
+
+@wp.kernel
 def _tighten_on_grasp(goal: wp.array(dtype=int), grasped: wp.array(dtype=wp.uint8),
                       released: wp.array(dtype=int), jaw_hold: wp.array(dtype=float),
                       pull_hold: float, jaw_open: float, jaw_closed: float):
@@ -2842,6 +2856,11 @@ class FastRuntime:
                 wp.launch(_apply_easy_jaw_hold, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self._jaw_qposadr, self._easy_jaw_hold],
+                    device=self.device)
+                wp.launch(_mark_scripted_deposit_open, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self._easy_released,
+                    self.data.qpos, self.control.targets,
+                    int(self._jaw_qposadr), float(self._jaw_open)],
                     device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)

@@ -756,25 +756,30 @@ def assign_harvest_deposit_goals(goal_id, reset_mode):
     return goals
 
 
-def sample_harvest_deposit_waypoints(reset_mode, pull_index, n_waypoints, rng):
-    """Post-pull catalog rows for in-hand harvest starts. Hanging worlds stay 0.
+def sample_harvest_deposit_waypoints(reset_mode, pull_index, n_waypoints, rng, tail=1):
+    """Opening-end catalog rows for in-hand harvest starts. Hanging worlds stay 0.
 
-    Samples uniformly in ``[pull_index + 1, n_waypoints)`` so some worlds
-    begin the high slide and others start over the opening. Not a weld.
+    Harvest9/10 sampled the whole post-pull slide: most worlds were still
+    mid-carry, the 0.32 pin stayed closed, and a 2.56 s collect never
+    settled. Default ``tail=1`` is the last waypoint (the liner-free
+    release pose) so a DEPOSIT_ONLY dump starts over the opening. Not a
+    weld.
     """
     modes = np.asarray(reset_mode, dtype=np.int32).reshape(-1)
     pull = int(pull_index)
     n_wp = int(n_waypoints)
-    if isinstance(pull_index, bool) or isinstance(n_waypoints, bool):
-        raise ValueError('pull_index and n_waypoints must be integers')
-    if n_wp < 1 or pull < 0:
-        raise ValueError('n_waypoints must be >= 1 and pull_index >= 0')
+    n_tail = int(tail)
+    if isinstance(pull_index, bool) or isinstance(n_waypoints, bool) or isinstance(tail, bool):
+        raise ValueError('pull_index, n_waypoints and tail must be integers')
+    if n_wp < 1 or pull < 0 or n_tail < 1:
+        raise ValueError('n_waypoints and tail must be >= 1 and pull_index >= 0')
     if not hasattr(rng, 'integers'):
         raise TypeError('rng must be a NumPy Generator')
-    lo = min(n_wp - 1, max(0, pull + 1))
+    last = n_wp - 1
+    lo = min(last, max(pull + 1, last - n_tail + 1))
     hi = n_wp
     if hi <= lo:
-        lo = n_wp - 1
+        lo = last
         hi = n_wp
     waypoints = np.zeros(modes.size, dtype=np.int32)
     deposit = modes == RESET_DEPOSIT

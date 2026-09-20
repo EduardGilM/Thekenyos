@@ -284,6 +284,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _privileged_grasp_action', src)
         self.assertIn('def _apply_grasp_start', src)
         self.assertIn('def _apply_harvest_start', src)
+        self.assertIn('def _mark_scripted_deposit_open', src)
         self.assertIn('def _sample_harvest_deposit_waypoints', src)
         self.assertIn('sample_harvest_deposit_waypoints', src)
         self.assertIn('def _build_grasp_catalog', src)
@@ -618,9 +619,13 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(waypoints.shape, (200,))
         self.assertTrue(np.all(waypoints[mixed == RESET_PREGRASP] == 0))
         deposit_wps = waypoints[mixed == RESET_DEPOSIT]
-        self.assertTrue(np.all(deposit_wps >= 5))
-        self.assertTrue(np.all(deposit_wps < 11))
-        self.assertGreater(int(np.unique(deposit_wps).size), 1)
+        self.assertTrue(np.all(deposit_wps == 10))
+        spread = sample_harvest_deposit_waypoints(
+            mixed, pull_index=4, n_waypoints=11, rng=np.random.default_rng(2), tail=3)
+        spread_wps = spread[mixed == RESET_DEPOSIT]
+        self.assertTrue(np.all(spread_wps >= 8))
+        self.assertTrue(np.all(spread_wps < 11))
+        self.assertGreater(int(np.unique(spread_wps).size), 1)
         fallback = sample_harvest_deposit_waypoints(
             np.array([RESET_DEPOSIT], dtype=np.int32), pull_index=4, n_waypoints=4,
             rng=np.random.default_rng(3))
@@ -628,6 +633,9 @@ class CurriculumTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             sample_harvest_deposit_waypoints(mixed, pull_index=-1, n_waypoints=4,
                                             rng=np.random.default_rng(0))
+        with self.assertRaises(ValueError):
+            sample_harvest_deposit_waypoints(mixed, pull_index=4, n_waypoints=11,
+                                            rng=np.random.default_rng(0), tail=0)
 
     def test_apply_stage_mixes_harvest_deposit_starts(self):
         import sys
