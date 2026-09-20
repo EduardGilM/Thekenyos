@@ -283,6 +283,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _privileged_carry_action', src)
         self.assertIn('def set_carry_progress', src)
         self.assertIn('def _build_carry_catalog', src)
+        self.assertIn('safe_hover_arm_q', src)
         self.assertIn('def _sample_grasp_locals', src)
         self.assertIn('random_grasp_offset_local_m', src)
         self.assertIn('_tcp_local_host', src)

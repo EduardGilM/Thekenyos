@@ -1239,6 +1239,12 @@ class FastRuntime:
         chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
         chassis_R = np.asarray(data.xmat[self.chassis], dtype=np.float64).reshape(3, 3)
         q_home = qpos[qids].copy()
+        safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+        if (safe.shape == (6,) and np.isfinite(safe).all()
+                and np.all(safe >= ranges[:, 0]) and np.all(safe <= ranges[:, 1])):
+            q_seed = safe.copy()
+        else:
+            q_seed = q_home.copy()
         accept = float(IK_DEMO_PRESET['ik_accept_err_m'])
         n = int(IK_DEMO_PRESET['n_start_poses'])
         n_hard = int(round(float(IK_DEMO_PRESET['hard_start_frac']) * n))
@@ -1249,7 +1255,7 @@ class FastRuntime:
         release_local = release_tcp_local_m(release_c)
         drop_q, drop_err = solve_tcp_axis(
             self.model, qpos, self.tcp_site, chassis_p + chassis_R @ release_local,
-            approach, qids, dofs, q_home, ranges)
+            approach, qids, dofs, q_seed, ranges)
         data.qpos[:] = qpos
         data.qpos[qids] = drop_q
         if (not np.isfinite(drop_q).all() or not np.isfinite(drop_err)
@@ -1257,13 +1263,13 @@ class FastRuntime:
                     self.model, data, self.tcp_site, self.chassis, tcp_local=release_local)):
             drop_q, drop_err = solve_tcp_hover(
                 self.model, qpos, self.tcp_site, chassis_p + chassis_R @ release_local,
-                qids, dofs, q_home, ranges)
+                qids, dofs, q_seed, ranges)
         drop_q = np.asarray(drop_q, dtype=np.float32).reshape(6)
         starts, paths, hard_flags = [], [], []
         rng = np.random.default_rng(11)
         attempts = 0
         max_attempts = n * 24
-        q_init = q_home.copy()
+        q_init = q_seed.copy()
         while len(starts) < n and attempts < max_attempts:
             attempts += 1
             want_hard = len([flag for flag in hard_flags if flag]) < n_hard and (
