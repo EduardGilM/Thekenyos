@@ -159,6 +159,9 @@ IK_DEMO_PRESET = {
     'rl_updates': 4,
     'updates': 20,
     'bc_epochs': 6,
+    # 2048-world collect already fills a 32 GB card; BC backward stays
+    # inside this world slice so the RGB-D tape is not one full batch.
+    'bc_minibatch_worlds': 64,
     'teacher_mix': 1.0,
     'entropy_coef': 0.001,
     'shaping_coef': 15.0,

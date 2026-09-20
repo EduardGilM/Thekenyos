@@ -791,9 +791,11 @@ hard** physics-safe poses, and each reset samples the kiwi COM across the
 physically allowed pad pocket (mouth-axis inset plus a pad-plane disk; not a
 single TCP spawn). A privileged IK teacher follows a lift / high-slide /
 centre-drop path that is rejected if any waypoint touches the crate liner.
-Those rollouts behaviour-clone the compact actor for 16 updates (~4 M
-transitions at 4096 worlds × 64 steps), then four PPO updates run with the
-teacher off on the same random starts.
+Those rollouts behaviour-clone the compact actor for 16 updates (~2 M
+transitions at 2048 worlds × 64 steps), then four PPO updates run with the
+teacher off on the same random starts. On a 32 GB card, 4096-world collect and
+a full-batch 2048-world BC backward both OOM; the recipe minibatches BC worlds
+(`bc_minibatch_worlds=64`) like PPO.
 Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or
 field harvest; `training_ready` stays false. The arm must not clip through the
 crate: catalog poses with arm/basket contacts are discarded.
@@ -801,7 +803,7 @@ crate: catalog poses with arm/basket contacts are discarded.
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-demo-run \
-  --stage deposit_pixels --worlds 4096 --steps 64 --minibatch-worlds 512 \
+  --stage deposit_pixels --worlds 2048 --steps 64 --minibatch-worlds 64 \
   --speedrun --ik-demo --video-every 0 --seed 7
 ```
 

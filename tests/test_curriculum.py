@@ -415,6 +415,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['grasp_inset_span_m'], 0.05)
         self.assertEqual(preset['grasp_lateral_span_m'], 0.018)
         self.assertEqual(preset['release_target_inset_x_m'], 0.0)
+        self.assertEqual(preset['bc_minibatch_worlds'], 64)
         self.assertGreater(preset['transit_clearance_m'], preset['release_clearance_m'])
         self.assertEqual(preset['gate_success_rate'], 0.90)
         self.assertNotIn('weld', IK_DEMO_PRESET)

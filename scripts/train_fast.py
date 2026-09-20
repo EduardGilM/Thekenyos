@@ -462,21 +462,33 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 fail_return_sum=fail_mass)
 
 
-def imitation_update(policy, optimizer, rows, epochs=6, dim_mask=None, grad_clip=0.5):
-    """Behavior-clone the privileged IK teacher. Fruit stays a free body."""
+def imitation_update(policy, optimizer, rows, epochs=6, dim_mask=None, grad_clip=0.5,
+                    minibatch_worlds=64):
+    """Behavior-clone the privileged IK teacher. Fruit stays a free body.
+
+    Unrolls time inside a world minibatch so the backward graph is not one
+    full-batch 64-step RGB-D tape. Recurrent memory stays per-world.
+    """
     import torch
+    if rows and rows[0]['r84'].is_cuda:
+        torch.cuda.empty_cache()
     if not rows or 'teacher_applied' not in rows[0]:
         raise ValueError('imitation_update requires teacher_applied labels')
     if not isinstance(epochs, int) or isinstance(epochs, bool) or not 1 <= epochs <= 32:
         raise ValueError('epochs must be an integer in [1, 32]')
     if not np_finite(grad_clip) or not 0.1 <= grad_clip <= 20.0:
         raise ValueError('grad_clip must be finite in [0.1, 20]')
+    if not isinstance(minibatch_worlds, int) or isinstance(minibatch_worlds, bool):
+        raise ValueError('minibatch_worlds must be a positive integer')
+    if not 1 <= minibatch_worlds <= 1024:
+        raise ValueError('minibatch_worlds must be an integer in [1, 1024]')
     if 'memory0' in rows[0]:
         memory_root = rows[0]['memory0']
     else:
         memory_root = torch.zeros(rows[0]['r84'].shape[0], 64, device=rows[0]['r84'].device,
                                   dtype=rows[0]['r84'].dtype)
     worlds = int(rows[0]['r84'].shape[0])
+    batch_size = min(int(minibatch_worlds), worlds)
     if dim_mask is None:
         arm_mask = None
     else:
@@ -484,31 +496,42 @@ def imitation_update(policy, optimizer, rows, epochs=6, dim_mask=None, grad_clip
         if arm_mask.shape[-1] == 10:
             arm_mask = arm_mask[3:10]
     losses = []
+    n_minibatches = 0
     before = {name: p.detach().clone() for name, p in policy.named_parameters()}
     for _ in range(epochs):
-        memory = memory_root.clone()
-        pred, label, weights = [], [], []
-        for row in rows:
-            memory = memory * (~row['reset'])[:, None]
-            mean, _, _, memory = policy(row['rgbd'], row['r84'], memory)
-            applied = mean.tanh()[:, 3:10] if mean.shape[-1] == 10 else mean.tanh()
-            target = row['teacher_applied']
-            if applied.shape != target.shape:
-                raise ValueError('teacher labels must match the arm action width')
-            pred.append(applied)
-            label.append(target)
-            weights.append(torch.ones(worlds, device=applied.device)
-                           if arm_mask is None else arm_mask.reshape(1, -1).expand(worlds, -1))
-        stacked_w = torch.stack(weights)
-        err = (torch.stack(pred) - torch.stack(label)) * stacked_w
-        loss = err.square().sum() / stacked_w.sum().clamp_min(1.0)
-        if not torch.isfinite(loss):
-            raise RuntimeError('Nonfinite imitation loss')
+        order = torch.randperm(worlds, device=rows[0]['r84'].device)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        epoch_loss = 0.0
+        for start in range(0, worlds, batch_size):
+            idx = order[start:start + batch_size]
+            memory = memory_root[idx].clone()
+            pred, label, weights = [], [], []
+            for row in rows:
+                memory = memory * (~row['reset'][idx])[:, None]
+                mean, _, _, memory = policy(row['rgbd'][idx], row['r84'][idx], memory)
+                applied = mean.tanh()[:, 3:10] if mean.shape[-1] == 10 else mean.tanh()
+                target = row['teacher_applied'][idx]
+                if applied.shape != target.shape:
+                    raise ValueError('teacher labels must match the arm action width')
+                pred.append(applied)
+                label.append(target)
+                n_batch = int(idx.numel())
+                weights.append(torch.ones(n_batch, device=applied.device)
+                               if arm_mask is None else arm_mask.reshape(1, -1).expand(n_batch, -1))
+            stacked_w = torch.stack(weights)
+            err = (torch.stack(pred) - torch.stack(label)) * stacked_w
+            loss = err.square().sum() / stacked_w.sum().clamp_min(1.0)
+            if not torch.isfinite(loss):
+                raise RuntimeError('Nonfinite imitation loss')
+            (loss * (idx.numel() / float(worlds))).backward()
+            epoch_loss += float(loss.detach()) * (idx.numel() / float(worlds))
+            n_minibatches += 1
+            del pred, label, weights, stacked_w, err, loss
         grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip, error_if_nonfinite=True)
         optimizer.step()
-        losses.append(float(loss.detach()))
+        losses.append(float(epoch_loss))
+        if rows[0]['r84'].is_cuda:
+            torch.cuda.empty_cache()
     changed = [name for name, p in policy.named_parameters() if not torch.equal(p, before[name])]
     if not any(name.startswith('vision.') for name in changed) or 'mean.weight' not in changed:
         raise RuntimeError('Imitation update did not change both vision and action weights')
@@ -519,7 +542,7 @@ def imitation_update(policy, optimizer, rows, epochs=6, dim_mask=None, grad_clip
         entropy=0.0, entropy_gaussian=0.0, entropy_per_dim=0.0,
         entropy_kind='tanh_gaussian_differential_nats',
         logstd_mean=float(policy.logstd.detach().mean()),
-        minibatches=int(epochs), optimized_transitions=int(len(rows) * worlds * epochs),
+        minibatches=int(n_minibatches), optimized_transitions=int(len(rows) * worlds * epochs),
         ppo_epochs_completed=0, ppo_clip=0.0, ppo_grad_clip=float(grad_clip),
         ppo_value_coef=0.0, ppo_target_kl=0.0, ppo_adv_std_cap=None,
         ppo_unclip_positive=0, ppo_success_repeat=1, ppo_imitation_coef=0.0,
@@ -850,11 +873,19 @@ def run(args):
                                              carry=carry, reset_all=False, dim_mask=dim_mask,
                                              teacher_mix=mix)
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             rollout_seconds = time.monotonic() - began
             if demo_phase:
+                for row in rows:
+                    for key in ('raw', 'logp', 'value'):
+                        row.pop(key, None)
+                del bootstrap
+                bootstrap = None
+                bc_batch = min(int(args.minibatch_worlds), int(IK_DEMO_PRESET['bc_minibatch_worlds']))
                 metrics = imitation_update(
                     policy, optimizer, rows, epochs=int(IK_DEMO_PRESET['bc_epochs']),
-                    dim_mask=dim_mask, grad_clip=float(knobs['ppo_grad_clip']))
+                    dim_mask=dim_mask, grad_clip=float(knobs['ppo_grad_clip']),
+                    minibatch_worlds=bc_batch)
             else:
                 if easy:
                     ppo_clip = float(knobs['ppo_clip'])

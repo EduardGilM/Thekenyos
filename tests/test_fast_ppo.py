@@ -66,6 +66,9 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('--easy', source)
         self.assertIn('--ik-demo', source)
         self.assertIn('imitation_update', source)
+        self.assertIn('minibatch_worlds', inspect.getsource(train_fast.imitation_update))
+        self.assertIn('empty_cache', inspect.getsource(train_fast.imitation_update))
+        self.assertIn('bc_minibatch_worlds', inspect.getsource(train_fast.run))
         self.assertIn('set_carry_progress', inspect.getsource(train_fast.run))
         self.assertIn('should_persist_checkpoint', source)
         run_src = inspect.getsource(train_fast.run)
@@ -147,6 +150,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('easy_far_frac', run_src)
         self.assertIn('grasp_offset_std_m', run_src)
         self.assertIn('empty_cache', run_src)
+        self.assertIn("row.pop(key, None)", run_src)
+        self.assertIn('bc_minibatch_worlds', run_src)
         self.assertIn('easy_teacher_mix', run_src)
         self.assertIn('teacher_anneal_after', run_src)
         self.assertIn('teacher_mask', collect_src)
@@ -318,11 +323,12 @@ class FastTrainerCLITest(unittest.TestCase):
                     reward=torch.zeros(2)))
         before = policy.mean.weight.detach().clone()
         result = imitation_update(policy, torch.optim.Adam(policy.parameters(), lr=3e-3),
-                                  rows, epochs=2)
+                                  rows, epochs=2, minibatch_worlds=1)
         self.assertFalse(torch.equal(before, policy.mean.weight))
         self.assertIn('bc_loss', result)
         self.assertEqual(result['demo_phase'], 1)
         self.assertEqual(result['bc_epochs_completed'], 2)
+        self.assertEqual(result['minibatches'], 4)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):
