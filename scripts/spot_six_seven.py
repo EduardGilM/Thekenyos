@@ -64,6 +64,33 @@ def _visual_rgba(filename: str) -> tuple[float, float, float, float]:
     return _YELLOW
 
 
+def _opaque_obj_copy(src: Path, cache: Path) -> Path:
+    """Drop mtllib/usemtl so a missing wrap PNG cannot punch holes in the mesh."""
+    rel = Path(*src.parts[-3:]) if len(src.parts) >= 3 else Path(src.name)
+    dst = cache / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    text = src.read_text(encoding='utf-8', errors='ignore')
+    kept = [line for line in text.splitlines(True)
+            if not line.startswith(('mtllib', 'usemtl'))]
+    dst.write_text(''.join(kept), encoding='utf-8')
+    return dst
+
+
+def _add_solid_core(body, kind: str, size, pos, rgba) -> None:
+    """Opaque filler so CAD vents and backfaces cannot show the stage through Spot."""
+    import mujoco
+    geom = body.add_geom()
+    geom.name = f'core_{body.name}_{kind}'
+    geom.type = (mujoco.mjtGeom.mjGEOM_BOX if kind == 'box'
+                 else mujoco.mjtGeom.mjGEOM_CAPSULE)
+    geom.size[:len(size)] = size
+    geom.pos[:] = pos
+    geom.group = 2
+    geom.contype = 0
+    geom.conaffinity = 0
+    geom.rgba[:] = rgba
+
+
 def _attach_urdf_visuals(spec, urdf: Path) -> int:
     """Keep collision geoms off-screen and attach the URDF visual meshes.
 
@@ -76,6 +103,8 @@ def _attach_urdf_visuals(spec, urdf: Path) -> int:
     spec.compiler.fusestatic = False
     for geom in spec.geoms:
         geom.group = 3
+    cache = Path('/tmp/spot-six-seven-meshes')
+    cache.mkdir(parents=True, exist_ok=True)
     attached = 0
     for link in ET.parse(urdf).getroot().findall('link'):
         name = link.get('name')
@@ -95,7 +124,7 @@ def _attach_urdf_visuals(spec, urdf: Path) -> int:
             mesh_name = f'vis_{name}_{attached}'
             mesh = spec.add_mesh()
             mesh.name = mesh_name
-            mesh.file = str(mesh_path)
+            mesh.file = str(_opaque_obj_copy(mesh_path, cache))
             geom = body.add_geom()
             geom.name = mesh_name
             geom.type = mujoco.mjtGeom.mjGEOM_MESH
@@ -111,6 +140,13 @@ def _attach_urdf_visuals(spec, urdf: Path) -> int:
                 geom.pos[:] = xyz
                 geom.quat[:] = rpy_to_wxyz(*rpy)
             attached += 1
+    yellow = _YELLOW
+    black = _BLACK
+    _add_solid_core(spec.body('body'), 'box', (0.22, 0.08, 0.055), (0.0, 0.0, -0.01), yellow)
+    for leg in ('fl', 'fr', 'hl', 'hr'):
+        _add_solid_core(spec.body(f'{leg}_uleg'), 'capsule', (0.032, 0.11), (0.0, 0.0, -0.16), yellow)
+        _add_solid_core(spec.body(f'{leg}_lleg'), 'capsule', (0.022, 0.12), (0.0, 0.0, -0.16), yellow)
+        _add_solid_core(spec.body(f'{leg}_hip'), 'box', (0.025, 0.025, 0.025), (0.0, 0.0, 0.0), black)
     return attached
 
 
@@ -172,6 +208,19 @@ def _foot_geom_ids(model, names: tuple[str, ...]) -> list[int]:
     return ids
 
 
+def _configure_renderer(renderer) -> None:
+    """Draw both triangle sides so CAD shells do not look like missing panels."""
+    import mujoco
+    renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = 0
+
+
+def _hind_mid_xy(model, data) -> np.ndarray | None:
+    hind = _foot_geom_ids(model, ('hl_foot', 'hr_foot'))
+    if not hind:
+        return None
+    return np.mean(np.stack([data.geom_xpos[i, :2] for i in hind], axis=0), axis=0)
+
+
 def _plant_feet(model, data, hind_only: bool, plant_xy: np.ndarray | None) -> np.ndarray | None:
     import mujoco
     hind = _foot_geom_ids(model, ('hl_foot', 'hr_foot'))
@@ -183,17 +232,16 @@ def _plant_feet(model, data, hind_only: bool, plant_xy: np.ndarray | None) -> np
     zs = [float(data.geom_xpos[i, 2]) for i in support]
     data.qpos[adr + 2] -= min(zs) - 0.002
     mujoco.mj_forward(model, data)
-    if not hind:
-        return plant_xy
-    mid = np.mean(np.stack([data.geom_xpos[i, :2] for i in hind], axis=0), axis=0)
-    if plant_xy is None and hind_only:
-        plant_xy = np.array(mid, dtype=np.float64)
+    if plant_xy is None:
+        plant_xy = _hind_mid_xy(model, data)
     if plant_xy is not None and hind_only:
-        data.qpos[adr:adr + 2] += plant_xy - mid
-        mujoco.mj_forward(model, data)
-        zs = [float(data.geom_xpos[i, 2]) for i in hind]
-        data.qpos[adr + 2] -= min(zs) - 0.002
-        mujoco.mj_forward(model, data)
+        mid = _hind_mid_xy(model, data)
+        if mid is not None:
+            data.qpos[adr:adr + 2] += plant_xy - mid
+            mujoco.mj_forward(model, data)
+            zs = [float(data.geom_xpos[i, 2]) for i in hind]
+            data.qpos[adr + 2] -= min(zs) - 0.002
+            mujoco.mj_forward(model, data)
     return plant_xy
 
 
@@ -212,13 +260,13 @@ def apply_pose(model, data, pose: dict, home: dict[str, float], plant_xy=None):
     return _plant_feet(model, data, hind_only=bool(pose['hind_support']), plant_xy=plant_xy)
 
 
-def look_at(model, data, cam, *, distance=2.5) -> None:
-    """Front-ish view so the reared chest and two 'hands' face the camera."""
+def look_at(model, data, cam, *, distance=2.7) -> None:
+    """Three-quarter view so the hind-leg columns and the waving hands both read."""
     body = np.array(data.xpos[model.body('body').id], dtype=np.float64)
     cam.lookat[:] = body
     cam.distance = distance
-    cam.azimuth = 28.0
-    cam.elevation = -12.0 + 10.0 * float(np.clip(body[2] - 0.50, 0.0, 0.5))
+    cam.azimuth = 52.0
+    cam.elevation = -8.0
 
 
 def run(args) -> None:
@@ -245,6 +293,7 @@ def run(args) -> None:
     if args.video:
         args.video.parent.mkdir(parents=True, exist_ok=True)
         renderer = mujoco.Renderer(model, height=720, width=1280)
+        _configure_renderer(renderer)
         cam = mujoco.MjvCamera()
         mujoco.mjv_defaultCamera(cam)
         encoder = subprocess.Popen(
@@ -267,6 +316,7 @@ def run(args) -> None:
             continue
         look_at(model, data, cam)
         renderer.update_scene(data, camera=cam)
+        _configure_renderer(renderer)
         pixels = np.array(renderer.render(), copy=True, dtype=np.uint8)
         if pose['caption']:
             colour = (255, 220, 40) if pose['caption'] == 'SIX' else (80, 210, 255)

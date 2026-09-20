@@ -14,12 +14,13 @@ LEGS = [f'{leg}_{axis}' for axis in ('hx', 'hy', 'kn')
 ARM = ['arm_sh0', 'arm_sh1', 'arm_el0', 'arm_el1', 'arm_wr0', 'arm_wr1', 'arm_f1x']
 
 STAND_Z_M = 0.55
-# Magnitude of the wheelie. Applied as negative pitch so +X (nose) points up.
-REAR_PITCH_RAD = 1.12
+# Sit-up pitch: body nearly vertical, nose up. Hind legs then fold under the hips
+# so the pose reads as standing on two legs, not a frozen quadruped tilted over.
+REAR_PITCH_RAD = 1.35
 HIND_HIP_X_M = -0.29785
 DANCE_HZ = 1.2
 STAND_S = 1.0
-REAR_S = 2.2
+REAR_S = 2.6
 DANCE_S = 6.5
 
 # URDF revolute limits from spot_with_arm.urdf.
@@ -71,21 +72,23 @@ def stand_joints(home: dict[str, float]) -> dict[str, float]:
 
 
 def rear_joints(home: dict[str, float]) -> dict[str, float]:
-    """Hind legs planted, front legs out like two hands."""
+    """Hind legs as support columns under the hips; front legs as two hands."""
     pose = stand_joints(home)
     pose.update({
-        'hl_hx': 0.20,
-        'hr_hx': -0.20,
-        'hl_hy': 0.70,
-        'hr_hy': 0.70,
-        'hl_kn': -1.15,
-        'hr_kn': -1.15,
-        'fl_hx': 0.62,
-        'fr_hx': -0.62,
-        'fl_hy': 0.90,
-        'fr_hy': 0.90,
-        'fl_kn': -2.20,
-        'fr_kn': -2.20,
+        'hl_hx': 0.14,
+        'hr_hx': -0.14,
+        # hy ~ 1.85 points the hind legs along body -X, which is world-down
+        # once the chassis is sat up. Quadruped hy (~0.5) would just tilt the dog.
+        'hl_hy': 1.85,
+        'hr_hy': 1.85,
+        'hl_kn': -1.20,
+        'hr_kn': -1.20,
+        'fl_hx': 0.58,
+        'fr_hx': -0.58,
+        'fl_hy': 0.75,
+        'fr_hy': 0.75,
+        'fl_kn': -2.15,
+        'fr_kn': -2.15,
         'arm_sh0': 0.45,
         'arm_sh1': -0.35,
         'arm_el0': 1.15,
@@ -138,13 +141,13 @@ def pose_at(time_s: float, home: dict[str, float]) -> dict:
     stand = stand_joints(home)
     rear = rear_joints(home)
     dance_t0 = STAND_S + REAR_S
-    if t <= STAND_S:
+    if t < STAND_S:
         pitch = 0.0
         joints = stand
         caption = ''
         phase = 0.0
         bounce = 0.0
-    elif t <= dance_t0:
+    elif t < dance_t0:
         u = smoothstep((t - STAND_S) / REAR_S)
         pitch = -u * REAR_PITCH_RAD
         joints = lerp_joints(stand, rear, u)
@@ -157,8 +160,8 @@ def pose_at(time_s: float, home: dict[str, float]) -> dict:
         joints = dance_joints(home, phase)
         caption = caption_for_phase(phase)
         bounce = 0.04 * abs(math.sin(phase))
-    roll = 0.12 * math.sin(phase) if t > dance_t0 else 0.0
-    yaw = 0.08 * math.sin(2.0 * phase) if t > dance_t0 else 0.0
+    roll = 0.06 * math.sin(phase) if t > dance_t0 else 0.0
+    yaw = 0.04 * math.sin(2.0 * phase) if t > dance_t0 else 0.0
     return {
         'time_s': t,
         'xyz_m': chassis_xyz_m(pitch, bounce),

@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 
 from treesim.six_seven import (
-    ARM, DANCE_HZ, HIND_HIP_X_M, LEGS, REAR_PITCH_RAD, STAND_Z_M,
+    ARM, DANCE_HZ, HIND_HIP_X_M, LEGS, REAR_PITCH_RAD, REAR_S, STAND_S, STAND_Z_M,
     caption_for_phase, chassis_xyz_m, clamp_joint, duration_s, pose_at,
     rear_joints, rpy_to_wxyz, stand_joints,
 )
@@ -32,7 +32,7 @@ class SixSevenTest(unittest.TestCase):
         self.assertGreater(mid['rpy_rad'][1], -REAR_PITCH_RAD)
         self.assertGreater(mid['xyz_m'][2], stand['xyz_m'][2])
         self.assertTrue(mid['hind_support'])
-        reared = pose_at(3.3, HOME)
+        reared = pose_at(STAND_S + REAR_S + 0.05, HOME)
         self.assertTrue(reared['reared'])
         self.assertAlmostEqual(reared['rpy_rad'][1], -REAR_PITCH_RAD)
         self.assertIn(reared['caption'], {'SIX', 'SEVEN'})
@@ -40,10 +40,13 @@ class SixSevenTest(unittest.TestCase):
         self.assertGreater(reared['joints']['fl_hy'], stand['joints']['fl_hy'])
         self.assertGreater(reared['joints']['fl_hx'], stand['joints']['fl_hx'])
         self.assertLess(reared['joints']['fr_hx'], stand['joints']['fr_hx'])
+        # Hind hips swing back so the calves stand under the pelvis, not out behind a tilted chassis.
+        self.assertGreater(reared['joints']['hl_hy'], 1.5)
+        self.assertGreater(reared['joints']['hl_hy'], stand['joints']['hl_hy'] + 0.8)
         # Front knees fold so the paws sit at shoulder height, not on the floor.
         self.assertLess(reared['joints']['fl_kn'], stand['joints']['fl_kn'] - 0.8)
-        six = pose_at(3.3, HOME)
-        seven = pose_at(3.3 + 0.5 / DANCE_HZ, HOME)
+        six = pose_at(STAND_S + REAR_S, HOME)
+        seven = pose_at(STAND_S + REAR_S + 0.6 / DANCE_HZ, HOME)
         self.assertEqual(six['caption'], 'SIX')
         self.assertEqual(seven['caption'], 'SEVEN')
         self.assertNotAlmostEqual(six['joints']['arm_sh0'], seven['joints']['arm_sh0'])
@@ -51,7 +54,7 @@ class SixSevenTest(unittest.TestCase):
 
     def test_rear_pitch_is_nose_up(self):
         # R_y maps body +X to (cos, 0, -sin). Negative pitch => world z > 0.
-        pitch = pose_at(3.3, HOME)['rpy_rad'][1]
+        pitch = pose_at(STAND_S + REAR_S, HOME)['rpy_rad'][1]
         self.assertLess(pitch, 0.0)
         self.assertGreater(-math.sin(pitch), 0.8)
         xyz = chassis_xyz_m(pitch)
