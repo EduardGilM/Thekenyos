@@ -87,6 +87,34 @@ release over the basket. Success requires the fruit to settle inside the
 collision liner. It uses rigid fruit and an artificial grasp, so it validates
 workspace and deposit geometry, not grip strength or fruit safety.
 
+### Kiwi street still and animation (native MuJoCo)
+
+Five bays by three aisles with render-only curved leaf meshes, timber posts
+and a ground map aligned to the post rows. Fruit hang stays `place_fruit`
+plus `STEM_LENGTH`. With `--relic` the animation adds five Spot robots
+imported from the RELIC URDF and driven by a **scripted** kinematic trot with
+a sum-of-sines arm: joint values are written into `qpos`, so it is neither
+the RELIC gait policy, a learned behaviour nor contact physics. Stance feet
+are locked to the drawn floor (smoothed sample plus ruts and pads, sampled
+under each foot); the arm wander is bounded by a planar FK check so the hand
+stays under the beams.
+Shoot leaves that would hang below the canes are dropped so the roof sits
+above the wires and the `place_fruit` crop hangs visible beneath it. The
+directional shadow eye follows the camera (MuJoCo clips casters upstream of
+the light `pos` and covers `shadowclip*extent` laterally and in depth), which
+gives ~6 mm shadow texels under the roof. The frame is graded (contrast,
+warmth, bloom, vignette, 2.39:1 bars) and captioned.
+
+```bash
+MUJOCO_GL=osmesa python scripts/render_kiwi_street.py \
+    --snapshot output/kiwi-street.png
+MUJOCO_GL=osmesa python scripts/render_kiwi_street.py --relic ../relic \
+    --video output/kiwi-street.mp4 --seconds 12 --fps 30
+python -B -m unittest tests.test_kiwi_street_render -v
+```
+
+Not Newton GL, not a harvest demo, not a training result.
+
 ### Native stem extraction bench
 
 ```bash
