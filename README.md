@@ -218,6 +218,8 @@ python -m unittest tests.test_sequence_curriculum tests.test_scripted_deposit \
 The dashboard serves `http://127.0.0.1:8765`, polls the training host over
 SSH and renders the best evaluated checkpoint with the arm-camera inset.
 
+<img width="1624" height="979" alt="image" src="https://github.com/user-attachments/assets/1aa53ab0-1220-4caf-8a46-30c0c65c4ade" />
+
 ## Layout
 
 | Path | Purpose |
