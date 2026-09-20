@@ -807,6 +807,7 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     easy = bool(config.get('easy', False))
     ik_demo = bool(config.get('ik_demo', False))
     ik_grasp = bool(config.get('ik_grasp', False))
+    ik_harvest = bool(config.get('ik_harvest', False))
     far_frac = 0.0
     hold_frac = 0.75
     preview_hard = False
@@ -825,22 +826,25 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
         # "this one-world CPU clip is a hard start". Default the preview to
         # an easy physics-safe pose so a deposit is visible.
         preview_hard = bool(not ik_demo and far_frac >= 0.5)
-    if ik_grasp:
-        raw_hold = config.get('hold_close_frac', 0.45)
+    if ik_grasp or ik_harvest:
+        raw_hold = config.get('hold_close_frac', 0.32 if ik_harvest else 0.45)
         if raw_hold is None:
-            raw_hold = 0.45
+            raw_hold = 0.32 if ik_harvest else 0.45
         hold_frac = float(raw_hold)
         if not math.isfinite(hold_frac) or not 0.0 <= hold_frac <= 1.0:
             raise ValueError('hold_close_frac must be finite in [0, 1]')
     if not name:
-        return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
-                    ik_demo=ik_demo, ik_grasp=ik_grasp, easy_far_frac=far_frac,
-                    hold_close_frac=hold_frac, preview_hard=preview_hard)
+        return dict(stage=None, reset_mode=2 if ik_harvest else 0, allow_locomotion=False, easy=easy,
+                    ik_demo=ik_demo, ik_grasp=ik_grasp, ik_harvest=ik_harvest,
+                    easy_far_frac=far_frac, hold_close_frac=hold_frac, preview_hard=preview_hard)
     stage = stage_named(str(name))
-    return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
+    reset_mode = int(reset_mode_for_goal(stage.goal, stage))
+    if ik_harvest:
+        reset_mode = 2
+    return dict(stage=stage.name, reset_mode=reset_mode,
                 allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy,
-                ik_demo=ik_demo, ik_grasp=ik_grasp, easy_far_frac=far_frac,
-                hold_close_frac=hold_frac, preview_hard=preview_hard)
+                ik_demo=ik_demo, ik_grasp=ik_grasp, ik_harvest=ik_harvest,
+                easy_far_frac=far_frac, hold_close_frac=hold_frac, preview_hard=preview_hard)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -972,6 +976,7 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
                              approach_offset_m: float = 1.0, easy: bool = False,
                              far_frac: float = 0.0, hold_close_frac: float | None = None,
                              ik_demo: bool = False, ik_grasp: bool = False,
+                             ik_harvest: bool = False,
                              preview_hard: bool = False) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
@@ -1039,7 +1044,7 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         opened, _closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
         data.qpos[int(controller.qids[18])] = opened
         controller.targets[18] = opened
-        if ik_grasp:
+        if ik_grasp or ik_harvest:
             apply_native_grasp_start(
                 model, data, controller, tcp_site, fruit_body, hard=False)
     if reset_mode == 3:
@@ -1140,6 +1145,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                              hold_close_frac=preview.get('hold_close_frac'),
                              ik_demo=bool(preview.get('ik_demo')),
                              ik_grasp=bool(preview.get('ik_grasp')),
+                             ik_harvest=bool(preview.get('ik_harvest')),
                              preview_hard=bool(preview.get('preview_hard')))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
@@ -1170,7 +1176,10 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     command = np.zeros(3, dtype=np.float32)
     easy_hold_q = None
     stage_label = preview['stage'] or 'hanging'
-    if preview.get('ik_demo'):
+    if preview.get('ik_harvest'):
+        easy_tag = (
+            'ik-harvest; teacher off; scripted pick then liner deposit ')
+    elif preview.get('ik_demo'):
         easy_tag = (
             'ik-demo easy start; teacher off; success = fruit in liner ')
     elif preview.get('easy'):
@@ -1192,19 +1201,37 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
-            if preview.get('ik_grasp'):
-                from treesim.kiwi_rl.curriculum import IK_GRASP_PRESET
-                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, jaw_open_closed_q
+            if preview.get('ik_harvest') or preview.get('ik_grasp'):
+                from treesim.kiwi_rl.curriculum import IK_GRASP_PRESET, IK_HARVEST_PRESET
+                from treesim.kiwi_rl.reach_teacher import (
+                    fruit_in_release_zone, jaw_hold_q, jaw_open_closed_q,
+                )
+                knobs = IK_HARVEST_PRESET if preview.get('ik_harvest') else IK_GRASP_PRESET
                 opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
                 frac = preview.get('hold_close_frac')
                 hold = jaw_hold_q(
-                    IK_GRASP_PRESET['jaw_close_frac'] if frac is None else float(frac),
+                    knobs['jaw_close_frac'] if frac is None else float(frac),
                     opened, closed)
                 tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
                 fruit_com = np.asarray(data.xipos[fruit_body], dtype=np.float64)
                 near = float(np.linalg.norm(tcp_xyz - fruit_com)) < float(
-                    IK_GRASP_PRESET['jaw_close_radius_m'])
+                    knobs['jaw_close_radius_m'])
                 desired = hold if near else opened
+                if preview.get('ik_harvest'):
+                    basket_xyz = (
+                        np.asarray(data.xpos[chassis], dtype=np.float64)
+                        + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3)
+                        @ basket_local)
+                    rotation = np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3)
+                    over = fruit_in_release_zone(
+                        fruit_com, basket_xyz, open_xy_m=float(knobs['open_xy_m']),
+                        rim_z_m=float(SIZE[2]), tcp_xyz=tcp_xyz,
+                        release_at_center=bool(knobs.get('release_at_center')),
+                        rotation=rotation,
+                        release_over_opening=bool(knobs.get('release_over_opening')),
+                        inset_m=float(knobs.get('release_opening_inset_m', 0.04)),
+                        max_above_rim_m=knobs.get('release_max_above_rim_m'))
+                    desired = opened if over else desired
                 arm = np.asarray(arm, dtype=np.float64).copy()
                 arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
             elif preview.get('easy'):
@@ -1260,7 +1287,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             controller.targets[12:] = np.clip(
                 controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
-                if preview.get('easy') or preview.get('ik_grasp'):
+                if preview.get('easy') or preview.get('ik_grasp') or preview.get('ik_harvest'):
                     data.qpos[int(controller.qids[18])] = desired
                     data.qvel[int(controller.dofs[18])] = 0.0
                     controller.targets[18] = desired
@@ -1328,6 +1355,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                   fruit_inside_crate_frames=int(sum(int(flag) for flag in in_crate)),
                   preview_hard=bool(preview.get('preview_hard')),
                   ik_demo=bool(preview.get('ik_demo')),
+                  ik_grasp=bool(preview.get('ik_grasp')),
+                  ik_harvest=bool(preview.get('ik_harvest')),
                   output=str(output))
     output.with_suffix('.json').write_text(json.dumps(result, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     return result

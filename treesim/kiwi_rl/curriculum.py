@@ -268,6 +268,66 @@ IK_GRASP_PRESET = {
     'default_shaping_length_m': 0.25,
 }
 
+# Stage-3 full cycle: privileged IK picks hanging fruit, holds, then carries
+# into the liner. Fruit stays free; scripted jaw; eval keeps teacher_mix=0.
+# Collect needs a long horizon so BC can see settle, so the recipe uses
+# fewer worlds than the 2048×64 grasp tape. Not a weld or field harvest.
+IK_HARVEST_PRESET = {
+    'demo_updates': 32,
+    'rl_updates': 4,
+    'updates': 36,
+    'bc_epochs': 6,
+    'bc_minibatch_worlds': 64,
+    'worlds': 512,
+    'steps': 256,
+    'teacher_mix': 1.0,
+    'entropy_coef': 0.001,
+    'shaping_coef': 10.0,
+    'shaping_length_m': 0.50,
+    'n_start_poses': 48,
+    'hard_start_frac': 0.5,
+    'easy_standoff_min_m': 0.01,
+    'easy_standoff_max_m': 0.03,
+    'hard_standoff_min_m': 0.08,
+    'hard_standoff_max_m': 0.15,
+    'pregrasp_standoff_m': 0.03,
+    'pull_distance_m': 0.08,
+    'n_approach': 3,
+    'n_transit': 6,
+    'transit_clearance_m': 0.28,
+    'release_clearance_m': 0.16,
+    'release_target_inset_x_m': 0.0,
+    'release_target_clearance_m': 0.16,
+    'hover_clearance_m': 0.28,
+    'release_max_above_rim_m': 0.30,
+    'release_over_opening': True,
+    'release_at_center': True,
+    'release_opening_inset_m': 0.04,
+    'open_xy_m': 0.15,
+    'ik_accept_err_m': 0.025,
+    'waypoint_advance_rad': 0.08,
+    # Gentler than the 0.45 grasp pin that sat at 24 N over the 15 N fail.
+    'jaw_close_frac': 0.32,
+    'jaw_close_radius_m': 0.045,
+    'eval_every': 8,
+    'checkpoint_every': 4,
+    'deposit_reward': 30.0,
+    'fail_reward': -30.0,
+    'ppo_clip': 0.2,
+    'ppo_lr': 3e-4,
+    'ppo_epochs': 2,
+    'ppo_grad_clip': 0.5,
+    'ppo_adv_std_cap': None,
+    'ppo_value_coef': 0.5,
+    'ppo_target_kl': 0.05,
+    'ppo_unclip_positive': False,
+    'ppo_success_repeat': 4,
+    'ppo_imitation_coef': 0.25,
+    'ppo_success_epochs': 2,
+    'default_shaping_coef': 2.0,
+    'default_shaping_length_m': 0.25,
+}
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -534,6 +594,15 @@ def apply_ik_grasp_preset(values: dict) -> dict:
         raise TypeError('values must be a dict')
     out = dict(values)
     out.update(IK_GRASP_PRESET)
+    return out
+
+
+def apply_ik_harvest_preset(values: dict) -> dict:
+    """Overlay the pick-and-deposit IK teacher. Does not enable --easy or weld."""
+    if not isinstance(values, dict):
+        raise TypeError('values must be a dict')
+    out = dict(values)
+    out.update(IK_HARVEST_PRESET)
     return out
 
 

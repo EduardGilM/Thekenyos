@@ -148,7 +148,7 @@ class FastTrainerCLITest(unittest.TestCase):
         skipped = apply_easy_cli(argparse.Namespace(
             ik_demo=True, easy=True, teacher_mix=1.0, shaping_coef=15.0, updates=20))
         self.assertEqual(skipped.updates, 20)
-        from train_fast import apply_ik_grasp_cli
+        from train_fast import apply_ik_grasp_cli, apply_ik_harvest_cli
         grasp = apply_ik_grasp_cli(argparse.Namespace(
             ik_grasp=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
@@ -173,7 +173,24 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('enable_ik_grasp', run_src)
         self.assertIn('ik_grasp', run_src)
         self.assertIn('primary_only', run_src)
-        self.assertIn('scripted_jaw=(easy or ik_grasp)', run_src)
+        self.assertIn('scripted_jaw=(easy or ik_grasp or ik_harvest)', run_src)
+        self.assertIn('enable_ik_harvest', run_src)
+        self.assertIn('privileged_harvest_action', collect_src)
+        self.assertNotIn('privileged_harvest_action', inspect.getsource(train_fast.evaluate_mission))
+        harvest = apply_ik_harvest_cli(argparse.Namespace(
+            ik_harvest=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/latest.pt', demo_updates=None, easy=True,
+            ik_demo=True, ik_grasp=True, worlds=4096, steps=64,
+            minibatch_worlds=512, stage='deposit_pixels'))
+        self.assertFalse(harvest.easy)
+        self.assertFalse(harvest.ik_demo)
+        self.assertFalse(harvest.ik_grasp)
+        self.assertEqual(harvest.demo_updates, 32)
+        self.assertEqual(harvest.updates, 36)
+        self.assertEqual(harvest.stage, 'stationary_harvest')
+        self.assertEqual(harvest.worlds, 512)
+        self.assertEqual(harvest.steps, 256)
         self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
         self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)

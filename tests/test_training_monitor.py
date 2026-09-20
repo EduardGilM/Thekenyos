@@ -197,6 +197,14 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertFalse(grasp['easy'])
         self.assertEqual(grasp['reset_mode'], 2)
         self.assertAlmostEqual(grasp['hold_close_frac'], 0.45)
+        harvest = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'stationary_harvest'},
+            'config': {'ik_harvest': True, 'easy': False},
+        })
+        self.assertTrue(harvest['ik_harvest'])
+        self.assertFalse(harvest['easy'])
+        self.assertEqual(harvest['reset_mode'], 2)
+        self.assertAlmostEqual(harvest['hold_close_frac'], 0.32)
         from treesim.kiwi_rl.training_monitor import (
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
@@ -212,6 +220,7 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('arm_basket_contact_pairs', inspect.getsource(apply_native_carry_start))
         self.assertIn('ik_demo', inspect.getsource(apply_native_skill_reset))
         self.assertIn('ik_grasp', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('ik_harvest', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_grasp_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('preview_hard', inspect.getsource(apply_native_skill_reset))
         self.assertIn('random_grasp_offset_local_m', inspect.getsource(apply_native_skill_reset))
@@ -236,7 +245,9 @@ class TrainingMonitorTests(unittest.TestCase):
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
         self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
         self.assertIn("preview.get('ik_grasp')", inspect.getsource(_record_progress_video_locked))
+        self.assertIn("preview.get('ik_harvest')", inspect.getsource(_record_progress_video_locked))
         self.assertIn('IK_GRASP_PRESET', inspect.getsource(_record_progress_video_locked))
+        self.assertIn('IK_HARVEST_PRESET', inspect.getsource(_record_progress_video_locked))
         self.assertIn('fruit_in_release_zone', inspect.getsource(_record_progress_video_locked))
         self.assertIn('rim_z_m', inspect.getsource(_record_progress_video_locked))
         self.assertIn('adapt_scripted_hold_q', inspect.getsource(_record_progress_video_locked))

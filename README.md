@@ -832,6 +832,27 @@ python scripts/train_fast.py --scene /path/to/fast-scene \
   --eval-profile speedrun --ik-grasp --video-every 5 --seed 7
 ```
 
+`--ik-harvest` is the stage-3 recipe: the kiwi **stays hanging**, a privileged
+IK teacher reaches it (easy 1–3 cm / hard 8–15 cm starts), the **same scripted
+jaw pin** closes at `jaw_close_frac=0.32` when the live TCP is within 4.5 cm,
+the arm **waits for the grasp latch** before the 8 cm pull and for
+`retained_detach` before the crate path, then follows the liner-free high
+slide to the opening and opens. Catalog rows that clip the crate or miss the
+hanging COM by more than ~3 cm are discarded. The floating base is pinned so
+gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
+`--easy` and does not weld the fruit. Behaviour-clone 32 updates on 512 worlds
+× 256 steps, then four PPO updates with the teacher off. Evaluation keeps
+`teacher_mix=0` and `guidance_weight=0`. Success is a settled liner deposit,
+not a wall touch. This is not a paper picking angle or a tissue-safe grasp;
+`training_ready` stays false.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-harvest-run \
+  --stage stationary_harvest --worlds 512 --steps 256 --minibatch-worlds 64 \
+  --eval-profile speedrun --ik-harvest --video-every 0 --seed 7
+```
+
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-demo-run \
