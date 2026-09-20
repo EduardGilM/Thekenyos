@@ -187,7 +187,7 @@ class FastTrainerCLITest(unittest.TestCase):
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
-            initialize_from='/tmp/latest.pt', demo_updates=None, easy=True,
+            initialize_from=None, demo_updates=None, easy=True,
             ik_demo=True, ik_grasp=True, worlds=4096, steps=64,
             minibatch_worlds=512, stage='deposit_pixels'))
         self.assertFalse(harvest.easy)
@@ -195,9 +195,20 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertFalse(harvest.ik_grasp)
         self.assertEqual(harvest.demo_updates, 10)
         self.assertEqual(harvest.updates, 36)
+        self.assertEqual(harvest.teacher_mix, 1.0)
         self.assertEqual(harvest.stage, 'stationary_harvest')
         self.assertEqual(harvest.worlds, 512)
         self.assertEqual(harvest.steps, 256)
+        continued_harvest = apply_ik_harvest_cli(argparse.Namespace(
+            ik_harvest=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/latest.pt', demo_updates=None, easy=True,
+            ik_demo=True, ik_grasp=True, worlds=4096, steps=64,
+            minibatch_worlds=512, stage='deposit_pixels'))
+        self.assertEqual(continued_harvest.demo_updates, 0)
+        self.assertEqual(continued_harvest.updates, 40)
+        self.assertEqual(continued_harvest.teacher_mix, 0.0)
+        self.assertEqual(continued_harvest.eval_every, 8)
         self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
         self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)

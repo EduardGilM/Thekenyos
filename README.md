@@ -841,7 +841,9 @@ slide to the opening and opens. Catalog rows that clip the crate or miss the
 hanging COM by more than ~3 cm are discarded. The floating base is pinned so
 gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 10 updates on 512 worlds
-× 256 steps, then teacher-off PPO. A held pick (`grasped`, 0.12 s hand
+× 256 steps, then teacher-off PPO. `--initialize-from` with `--ik-harvest`
+skips IK (`demo_updates=0`) and runs 40 teacher-off PPO updates on the
+same hanging-fruit catalog. A held pick (`grasped`, 0.12 s hand
 contact) pays a one-shot `+100` during RL; eval keeps `guidance_weight=0`
 so that jackpot stays off the score. A slam-detach without the hold does
 not pay. During those RL

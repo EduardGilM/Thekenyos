@@ -87,17 +87,23 @@ def apply_ik_harvest_cli(args):
     args.ik_demo = False
     args.ik_grasp = False
     preset = apply_ik_harvest_preset({})
+    continuing = bool(getattr(args, 'initialize_from', None))
     demo_updates = getattr(args, 'demo_updates', None)
     if demo_updates is None:
-        demo_updates = int(preset['demo_updates'])
+        demo_updates = 0 if continuing else int(preset['demo_updates'])
     args.demo_updates = int(demo_updates)
     if getattr(args, 'teacher_mix', None) is None:
         args.teacher_mix = 1.0 if int(args.demo_updates) > 0 else 0.0
     if getattr(args, 'shaping_coef', None) is None:
         args.shaping_coef = float(preset['shaping_coef'])
-    args.updates = int(preset['updates'])
-    args.eval_every = int(preset['eval_every'])
-    args.checkpoint_every = int(preset['checkpoint_every'])
+    if continuing and int(args.demo_updates) == 0:
+        args.updates = int(preset['rl_continue_updates'])
+        args.eval_every = min(int(preset['eval_every']), 8)
+        args.checkpoint_every = min(int(preset['checkpoint_every']), 4)
+    else:
+        args.updates = int(preset['updates'])
+        args.eval_every = int(preset['eval_every'])
+        args.checkpoint_every = int(preset['checkpoint_every'])
     args.entropy_coef = float(preset['entropy_coef'])
     args.ppo_epochs = int(preset['ppo_epochs'])
     if int(getattr(args, 'worlds', 4096)) == 4096:
@@ -1309,7 +1315,7 @@ def main():
     p.add_argument('--ik-harvest', action='store_true',
                    help='Stage 3: hanging fruit; IK pick, hold and liner deposit; then short RL')
     p.add_argument('--demo-updates', type=int, default=None,
-                   help='IK behaviour-clone updates; 0 with --initialize-from is RL only for --ik-demo')
+                   help='IK behaviour-clone updates; 0 with --initialize-from is RL-only')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,

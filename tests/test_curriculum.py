@@ -511,6 +511,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['demo_updates'], 10)
         self.assertEqual(preset['rl_updates'], 26)
         self.assertEqual(preset['updates'], 36)
+        self.assertEqual(preset['rl_continue_updates'], 40)
         self.assertEqual(preset['worlds'], 512)
         self.assertEqual(preset['steps'], 256)
         self.assertEqual(preset['n_start_poses'], 48)

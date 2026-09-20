@@ -278,6 +278,8 @@ IK_HARVEST_PRESET = {
     'demo_updates': 10,
     'rl_updates': 26,
     'updates': 36,
+    # Fine-tune from a harvest checkpoint: skip IK, keep hanging-fruit starts.
+    'rl_continue_updates': 40,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
