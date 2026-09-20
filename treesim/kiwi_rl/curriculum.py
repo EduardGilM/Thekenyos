@@ -305,6 +305,13 @@ IK_HARVEST_PRESET = {
     # event. Both are training assists; eval keeps guidance at 0.
     'rl_continue_pull_close_frac': 0.40,
     'rl_continue_detach_reward': 40.0,
+    # Harvest8 finished 48 hanging-only updates at 0 harvest: eval grasp
+    # 94 → 0 % and basket distance stayed ~1.0 m. The continue now keeps
+    # the HARVEST goal but restores a fraction of worlds already held and
+    # detached on a post-pull catalog waypoint so carry/release gets a
+    # gradient. Eval stays hanging-only. Fruit stays free; not a weld.
+    'rl_continue_deposit_start_frac': 0.50,
+    'rl_continue_shape_hand_fruit': True,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -654,6 +661,8 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out.setdefault('slip_max_close_frac', 0.0)
     out.setdefault('pull_close_frac', 0.0)
     out.setdefault('detach_reward', W_DETACH_HELD)
+    out.setdefault('deposit_start_frac', 0.0)
+    out.setdefault('shape_hand_fruit', False)
     if not continuing:
         return out
     entropy = float(out['rl_continue_entropy_coef'])
@@ -683,6 +692,9 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
         raise ValueError('rl_continue_shaping_coef must be finite in [0, 50]')
     if not np.isfinite(line) or not 0.0 < line <= 20.0:
         raise ValueError('rl_continue_carry_line_bonus must be finite in (0, 20]')
+    deposit_frac = float(out['rl_continue_deposit_start_frac'])
+    if not np.isfinite(deposit_frac) or not 0.0 <= deposit_frac <= 0.85:
+        raise ValueError('rl_continue_deposit_start_frac must be finite in [0, 0.85]')
     out['entropy_coef'] = entropy
     out['ppo_lr'] = lr
     out['ppo_epochs'] = epochs
@@ -695,7 +707,59 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out['slip_max_close_frac'] = slip_cap
     out['pull_close_frac'] = pull_frac
     out['detach_reward'] = detach_w
+    out['deposit_start_frac'] = deposit_frac
+    out['shape_hand_fruit'] = bool(out['rl_continue_shape_hand_fruit'])
     return out
+
+
+def mix_harvest_reset_modes(reset_mode, deposit_frac, rng):
+    """Hanging pregrasp plus a fraction of in-hand deposit starts.
+
+    HARVEST's default reset is the authored hang, which skips the catalog.
+    Training keeps those worlds on RESET_PREGRASP and only then overwrites
+    a fraction to RESET_DEPOSIT. Goals stay HARVEST. Eval should not call
+    this. Fruit stays a free body.
+    """
+    n = np.asarray(reset_mode, dtype=np.int32).reshape(-1).size
+    modes = np.full(n, RESET_PREGRASP, dtype=np.int32)
+    frac = float(deposit_frac)
+    if not np.isfinite(frac) or not 0.0 <= frac <= 0.85:
+        raise ValueError('deposit_frac must be finite in [0, 0.85]')
+    if not hasattr(rng, 'choice'):
+        raise TypeError('rng must be a NumPy Generator')
+    count = int(round(frac * n))
+    if count:
+        selected = np.asarray(rng.choice(n, size=count, replace=False), dtype=np.int64)
+        modes[selected] = RESET_DEPOSIT
+    return modes
+
+
+def sample_harvest_deposit_waypoints(reset_mode, pull_index, n_waypoints, rng):
+    """Post-pull catalog rows for in-hand harvest starts. Hanging worlds stay 0.
+
+    Samples uniformly in ``[pull_index + 1, n_waypoints)`` so some worlds
+    begin the high slide and others start over the opening. Not a weld.
+    """
+    modes = np.asarray(reset_mode, dtype=np.int32).reshape(-1)
+    pull = int(pull_index)
+    n_wp = int(n_waypoints)
+    if isinstance(pull_index, bool) or isinstance(n_waypoints, bool):
+        raise ValueError('pull_index and n_waypoints must be integers')
+    if n_wp < 1 or pull < 0:
+        raise ValueError('n_waypoints must be >= 1 and pull_index >= 0')
+    if not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    lo = min(n_wp - 1, max(0, pull + 1))
+    hi = n_wp
+    if hi <= lo:
+        lo = n_wp - 1
+        hi = n_wp
+    waypoints = np.zeros(modes.size, dtype=np.int32)
+    deposit = modes == RESET_DEPOSIT
+    count = int(deposit.sum())
+    if count:
+        waypoints[deposit] = np.asarray(rng.integers(lo, hi, size=count), dtype=np.int32)
+    return waypoints
 
 
 def sample_carry_start_indices(worlds, catalog_n, rng):

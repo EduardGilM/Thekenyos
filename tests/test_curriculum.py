@@ -283,11 +283,17 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _privileged_carry_action', src)
         self.assertIn('def _privileged_grasp_action', src)
         self.assertIn('def _apply_grasp_start', src)
+        self.assertIn('def _apply_harvest_start', src)
+        self.assertIn('def _sample_harvest_deposit_waypoints', src)
+        self.assertIn('sample_harvest_deposit_waypoints', src)
         self.assertIn('def _build_grasp_catalog', src)
         self.assertIn('def enable_ik_grasp', src)
         self.assertIn('def enable_ik_harvest', src)
         self.assertIn('knobs=None', src)
-        self.assertIn('def harvest_run_knobs', (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'curriculum.py').read_text(encoding='utf-8'))
+        curriculum_src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'curriculum.py').read_text(encoding='utf-8')
+        self.assertIn('def harvest_run_knobs', curriculum_src)
+        self.assertIn('def mix_harvest_reset_modes', curriculum_src)
+        self.assertIn('def sample_harvest_deposit_waypoints', curriculum_src)
         self.assertIn('def _privileged_harvest_action', src)
         self.assertIn('def _build_harvest_catalog', src)
         self.assertIn('def _pay_carry_line', src)
@@ -315,6 +321,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('detach_w[0]', src)
         self.assertIn("knobs.get('pull_close_frac'", src)
         self.assertIn("knobs.get('detach_reward'", src)
+        self.assertIn("knobs.get('shape_hand_fruit'", src)
         self.assertIn('retained_detach[world] != 0', src)
         self.assertIn('grasped[world] != 0', src)
         self.assertIn('close_radius', src)
@@ -549,6 +556,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertLess(continued['pull_close_frac'], 0.45)
         self.assertAlmostEqual(continued['detach_reward'], 40.0)
         self.assertLess(continued['detach_reward'], continued['pick_reward'])
+        self.assertAlmostEqual(continued['deposit_start_frac'], 0.50)
+        self.assertTrue(continued['shape_hand_fruit'])
+        self.assertLessEqual(continued['deposit_start_frac'], 0.85)
         fresh = harvest_run_knobs(continuing=False)
         self.assertAlmostEqual(fresh['entropy_coef'], 0.001)
         self.assertAlmostEqual(fresh['ppo_lr'], 3e-4)
@@ -560,6 +570,8 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(fresh['slip_max_close_frac'], 0.0)
         self.assertEqual(fresh['pull_close_frac'], 0.0)
         self.assertAlmostEqual(fresh['detach_reward'], 2.0)
+        self.assertEqual(fresh['deposit_start_frac'], 0.0)
+        self.assertFalse(fresh['shape_hand_fruit'])
         self.assertEqual(preset['worlds'], 512)
         self.assertEqual(preset['steps'], 256)
         self.assertEqual(preset['n_start_poses'], 48)
@@ -578,6 +590,60 @@ class CurriculumTest(unittest.TestCase):
                                     primary_only=True)
         self.assertTrue(np.all(skills['goal_id'] == 2))
         self.assertTrue(np.all(skills['guidance_weight'] == 1.0))
+
+    def test_harvest_deposit_start_mix_keeps_harvest_goal(self):
+        from treesim.kiwi_rl.curriculum import (
+            RESET_DEPOSIT, RESET_PREGRASP, mix_harvest_reset_modes,
+            sample_harvest_deposit_waypoints,
+        )
+        hanging = np.full(200, RESET_PREGRASP, dtype=np.int32)
+        mixed = mix_harvest_reset_modes(hanging, 0.5, np.random.default_rng(0))
+        self.assertEqual(int((mixed == RESET_DEPOSIT).sum()), 100)
+        self.assertEqual(int((mixed == RESET_PREGRASP).sum()), 100)
+        again = mix_harvest_reset_modes(hanging, 0.0, np.random.default_rng(1))
+        self.assertTrue(np.all(again == RESET_PREGRASP))
+        with self.assertRaises(ValueError):
+            mix_harvest_reset_modes(hanging, 0.9, np.random.default_rng(0))
+        waypoints = sample_harvest_deposit_waypoints(mixed, pull_index=4, n_waypoints=11,
+                                                    rng=np.random.default_rng(2))
+        self.assertEqual(waypoints.shape, (200,))
+        self.assertTrue(np.all(waypoints[mixed == RESET_PREGRASP] == 0))
+        deposit_wps = waypoints[mixed == RESET_DEPOSIT]
+        self.assertTrue(np.all(deposit_wps >= 5))
+        self.assertTrue(np.all(deposit_wps < 11))
+        self.assertGreater(int(np.unique(deposit_wps).size), 1)
+        fallback = sample_harvest_deposit_waypoints(
+            np.array([RESET_DEPOSIT], dtype=np.int32), pull_index=4, n_waypoints=4,
+            rng=np.random.default_rng(3))
+        self.assertEqual(int(fallback[0]), 3)
+        with self.assertRaises(ValueError):
+            sample_harvest_deposit_waypoints(mixed, pull_index=-1, n_waypoints=4,
+                                            rng=np.random.default_rng(0))
+
+    def test_apply_stage_mixes_harvest_deposit_starts(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        import train_fast
+        from treesim.kiwi_rl.curriculum import RESET_DEPOSIT, RESET_PREGRASP
+
+        class _Runtime:
+            worlds = 40
+
+            def configure_skills(self, skills):
+                self.skills = skills
+
+        runtime = _Runtime()
+        skills = train_fast.apply_stage(
+            runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
+            primary_only=True, deposit_start_frac=0.5)
+        self.assertTrue(np.all(skills['goal_id'] == 2))
+        self.assertEqual(int((skills['reset_mode'] == RESET_DEPOSIT).sum()), 20)
+        self.assertEqual(int((skills['reset_mode'] == RESET_PREGRASP).sum()), 20)
+        hanging = train_fast.apply_stage(
+            runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
+            evaluate_only=True, force_pregrasp=True, deposit_start_frac=0.5)
+        self.assertTrue(np.all(hanging['reset_mode'] == RESET_PREGRASP))
 
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')

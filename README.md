@@ -842,11 +842,19 @@ hanging COM by more than ~3 cm are discarded. The floating base is pinned so
 gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 10 updates on 512 worlds
 × 256 steps, then teacher-off PPO. `--initialize-from` with `--ik-harvest`
-skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates on the
-same hanging-fruit catalog, with entropy 0.004 (harvest6/7 forgot the
-grasp, eval 62 → 20 → 0 %, at lr `5e-4`, four epochs and unclipped
-positive advantages with KL pinned at the 0.05 target; the continue now
-keeps lr `3e-4`, two clipped epochs). Harvest3/4 grasped (eval 49–87 %) but never deposited:
+skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates. Harvest8
+kept every world on a hanging start: eval grasp 94 → 0 % and
+`harvest_successes` stayed 0 because a held detach was ~1 % and the
+carry never began. The continue still uses entropy 0.004 and lr `3e-4`
+with two clipped epochs (harvest6/7 forgot the grasp at lr `5e-4`, four
+epochs and unclipped positive advantages). Training now keeps the
+HARVEST goal but restores half the worlds already held and detached on a
+post-pull catalog waypoint (high slide through the opening) so carry and
+release get a gradient; eval stays hanging-only with
+`force_pregrasp`. After detach, hover/opening shaping
+(`shape_hand_fruit`) replaces the old basket-centre pull that aimed the
+wrist into the liner. Fruit stays free; this is not a weld.
+Harvest3/4 grasped (eval 49–87 %) but never deposited:
 the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
 no signal once held, and 180 s episodes let a frozen hold run ~35 updates.
 The continue therefore uses a **30 s training timeout** (eval keeps its own

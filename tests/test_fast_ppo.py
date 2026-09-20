@@ -187,10 +187,15 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('harvest_run_knobs', run_src)
         self.assertIn('knobs=knobs', inspect.getsource(train_fast.run))
         self.assertIn('retained_detach_events', run_src)
-        self.assertIn('train_timeout_s=train_timeout_s', run_src)
+        self.assertIn('mix_harvest_reset_modes', inspect.getsource(train_fast))
+        self.assertIn('deposit_start_frac', run_src)
+        self.assertIn('deposit_start_worlds', run_src)
+        self.assertIn('stage_kwargs', run_src)
         stage_src = inspect.getsource(train_fast.apply_stage)
         self.assertIn('train_timeout_s', stage_src)
         self.assertIn('not evaluate_only', stage_src)
+        self.assertIn('deposit_start_frac', stage_src)
+        self.assertIn('mix_harvest_reset_modes', stage_src)
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
@@ -219,6 +224,10 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertAlmostEqual(continued_harvest.entropy_coef, 0.004)
         self.assertEqual(continued_harvest.ppo_epochs, 2)
         self.assertAlmostEqual(continued_harvest.shaping_coef, 15.0)
+        from treesim.kiwi_rl.curriculum import harvest_run_knobs
+        continued_knobs = harvest_run_knobs(continuing=True)
+        self.assertAlmostEqual(continued_knobs['deposit_start_frac'], 0.50)
+        self.assertTrue(continued_knobs['shape_hand_fruit'])
         self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
         self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)
@@ -261,6 +270,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('start_over_opening', runtime_src)
         self.assertIn('easy_over_opening_local_m', runtime_src)
         self.assertIn('shape_hand_fruit', runtime_src)
+        self.assertIn('def _apply_harvest_start', runtime_src)
+        self.assertIn('_sample_harvest_deposit_waypoints', runtime_src)
         self.assertIn('release_at_center', runtime_src)
         self.assertIn('release_over_opening', runtime_src)
         self.assertIn('open_max_above_rim_m', runtime_src)
@@ -432,6 +443,30 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(float(mixed10[0, 0]), 0.25)
         self.assertAlmostEqual(float(mixed10[0, 3]), float(torch.atanh(torch.tensor(0.5))), places=5)
         self.assertEqual(float(mixed10[1, 3]), 0.0)
+
+    def test_apply_stage_mixes_harvest_deposit_starts(self):
+        import numpy as np
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        import train_fast
+        from treesim.kiwi_rl.curriculum import RESET_DEPOSIT, RESET_PREGRASP, stage_named
+
+        class _Runtime:
+            worlds = 40
+
+            def configure_skills(self, skills):
+                self.skills = skills
+
+        runtime = _Runtime()
+        skills = train_fast.apply_stage(
+            runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
+            primary_only=True, deposit_start_frac=0.5)
+        self.assertTrue(np.all(skills['goal_id'] == 2))
+        self.assertEqual(int((skills['reset_mode'] == RESET_DEPOSIT).sum()), 20)
+        self.assertEqual(int((skills['reset_mode'] == RESET_PREGRASP).sum()), 20)
+        hanging = train_fast.apply_stage(
+            runtime, stage_named('stationary_harvest'), np.random.default_rng(0),
+            evaluate_only=True, force_pregrasp=True, deposit_start_frac=0.5)
+        self.assertTrue(np.all(hanging['reset_mode'] == RESET_PREGRASP))
 
 
 class FastRuntimeFaultTest(unittest.TestCase):
