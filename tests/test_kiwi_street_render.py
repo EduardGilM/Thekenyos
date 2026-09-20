@@ -128,6 +128,15 @@ class KiwiStreetRenderTest(unittest.TestCase):
             prev = cur
         self.assertAlmostEqual(street.trot_foot_offset(0.75, stride, lift)[1], lift)
 
+    def test_stance_foot_stays_planted_in_world_frame(self):
+        speed, freq = 0.72, 1.58
+        stride = speed / freq
+        world = []
+        for t in np.linspace(0.0, 0.5 / freq, 25):
+            dx, _dz = street.trot_foot_offset(freq * t, stride, 0.09)
+            world.append(speed * t + dx)
+        self.assertLess(np.ptp(world), 1e-9)
+
     def test_camera_path_stays_under_the_roof(self):
         _, _, aisles = street.row_layout()
         for t in np.linspace(0.0, 12.0, 49):

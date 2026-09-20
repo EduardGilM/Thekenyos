@@ -170,6 +170,18 @@ def _value_field(rng, shape, waves, dtype=np.float32):
     return field / peak
 
 
+def _iso_field(rng, n: int, sigmas_px, weights, dtype=np.float32) -> np.ndarray:
+    """Isotropic band-limited noise (blurred white noise); no lattice grid."""
+    from scipy.ndimage import gaussian_filter
+    field = np.zeros((n, n), dtype=dtype)
+    for sigma, weight in zip(sigmas_px, weights):
+        white = rng.standard_normal((n, n)).astype(dtype)
+        field += weight * gaussian_filter(white, max(float(sigma), 0.5), mode="wrap")
+    field -= field.min()
+    peak = float(field.max()) or 1.0
+    return field / peak
+
+
 def _block_field(rng, shape, cell: int, dtype=np.float32) -> np.ndarray:
     """Nearest-neighbour clumps that survive hfield filtering."""
     gy = max(shape[0] // cell, 2)
@@ -196,12 +208,12 @@ def ground_texture(floor, xs, ys, seed: int, n: int = 3072) -> bytes:
     def px(metres):
         return max(2, int(round(metres / m_per_px)))
 
-    broad = _value_field(rng, (n, n), ((px(2.6), 1.0), (px(1.1), 0.5)))
-    patch = _value_field(rng, (n, n), ((px(0.55), 1.0), (px(0.24), 0.5)))
-    tuft = _block_field(rng, (n, n), px(0.11))
-    fine = _value_field(rng, (n, n), ((px(0.06), 1.0), (px(0.03), 0.5)))
-    wander = _value_field(rng, (n, n), ((px(0.7), 1.0), (px(0.3), 0.4)))
-    blades = _value_field(rng, (n, n), ((px(0.02), 1.0), (px(0.01), 0.6)))
+    broad = _iso_field(rng, n, (px(0.9), px(0.4)), (1.0, 0.5))
+    patch = _iso_field(rng, n, (px(0.2), px(0.09)), (1.0, 0.5))
+    tuft = _iso_field(rng, n, (px(0.045),), (1.0,))
+    fine = _iso_field(rng, n, (px(0.02), px(0.01)), (1.0, 0.5))
+    wander = _iso_field(rng, n, (px(0.25), px(0.1)), (1.0, 0.4))
+    blades = _iso_field(rng, n, (1.2,), (1.0,))
     speck = rng.random((n, n), dtype=np.float32)
 
     dark = np.array([0.11, 0.18, 0.05], np.float32)
@@ -535,8 +547,8 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
     <global offwidth="1920" offheight="1080" fovy="42"/>
     <headlight ambient=".34 .33 .30" diffuse=".36 .36 .34" specular=".06 .06 .05"/>
     <rgba haze=".88 .84 .76 1" fog=".84 .82 .76 1"/>
-    <map znear=".004" zfar="6" shadowclip="1.2"/>
-    <quality shadowsize="8192" offsamples="4"/>
+    <map znear=".004" zfar="6" shadowclip="0.5"/>
+    <quality shadowsize="4096" offsamples="4"/>
   </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1=".34 .50 .70" rgb2=".92 .86 .76"
@@ -568,10 +580,11 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
   </asset>
   <worldbody>
     <light name="key" directional="true" pos="12 -16 12" dir="-0.34 0.58 -0.74"
-           ambient=".30 .30 .27" diffuse=".84 .76 .62" specular=".26 .22 .16"
+           ambient=".33 .33 .30" diffuse=".88 .80 .64" specular=".26 .22 .16"
            castshadow="true"/>
     <light name="rim" directional="true" pos="-10 10 8" dir="0.40 -0.30 -0.86"
-           ambient=".07 .08 .10" diffuse=".24 .27 .32" specular=".06 .06 .08"/>
+           castshadow="false" ambient=".07 .08 .10" diffuse=".24 .27 .32"
+           specular=".06 .06 .08"/>
 {chr(10).join(_aisle_lights(xs, ys))}
     <geom name="ground" type="hfield" hfield="orchard_ground" material="orchard"
           pos="0 0 {min_z:.5f}" rgba="1 1 1 1"
@@ -592,8 +605,8 @@ def _aisle_lights(xs, ys):
             x = xs[0] + frac * span
             out.append(
                 f'    <light name="aisle{i}{k}" pos="{x:.2f} {y:.2f} 1.40" dir="0 0 -1" '
-                f'cutoff="88" exponent="0.4" attenuation="0.70 0.05 0.004" '
-                f'diffuse=".95 .84 .64" specular=".10 .09 .06"/>'
+                f'cutoff="88" exponent="0.4" attenuation="0.90 0.06 0.006" '
+                f'castshadow="false" diffuse=".55 .50 .40" specular=".06 .05 .04"/>'
             )
     return out[:6]
 
@@ -675,16 +688,19 @@ def leg_ik(v1, v2, target, guess, hy_range, kn_range, iterations: int = 8) -> np
 def trot_foot_offset(phase: float, stride: float, lift: float):
     """Foot x/z offset (body frame) for one gait phase in [0, 1).
 
-    Stance for the first half: the planted foot slides backwards under the
-    body at constant speed. Swing lifts on a half-sine and returns forward.
+    ``stride`` is the body travel per full gait cycle (speed / frequency).
+    Stance occupies half the cycle, so the planted foot must move back by
+    exactly ``stride / 2`` at body speed to stay locked on the ground; swing
+    lifts on a half-sine and returns it forward.
     """
     phase = phase % 1.0
+    half = 0.5 * stride
     if phase < 0.5:
         u = phase / 0.5
-        return 0.5 * stride - stride * u, 0.0
+        return 0.5 * half - half * u, 0.0
     u = (phase - 0.5) / 0.5
     smooth = u * u * (3.0 - 2.0 * u)
-    return -0.5 * stride + stride * smooth, lift * np.sin(np.pi * u)
+    return -0.5 * half + half * smooth, lift * np.sin(np.pi * u)
 
 
 def style_spot(scene) -> None:
@@ -801,7 +817,7 @@ def default_walkers(model, aisles, xs, ground_z, seed: int):
         (0, 0.45, -0.36 * span, +1, 0.72),
         (0, -0.75, 0.30 * span, -1, 0.66),
         (1, 0.35, -0.30 * span, +1, 0.70),
-        (1, -0.85, 0.36 * span, -1, 0.64),
+        (1, -0.85, 0.15 * span, -1, 0.64),
         (2, 0.20, -0.12 * span, +1, 0.68),
     ]
     walkers = []
@@ -902,9 +918,29 @@ def build_scene(args):
         canopy_spacing_m=args.canopy_spacing,
     )
     leaves = place_leaves(skeleton, foliage, seed=args.seed)
-    leaves.extend(place_canopy_leaves(skeleton, foliage, seed=args.seed))
+    leaves.extend(sun_gaps(place_canopy_leaves(skeleton, foliage, seed=args.seed),
+                           seed=args.seed, fraction=args.sun_gaps))
     xs, ys, aisles = row_layout()
     return floor, skeleton, fruit, leaves, xs, ys, aisles
+
+
+def sun_gaps(leaves, seed: int, fraction: float, cell_m: float = 1.0):
+    """Drop render-only infill leaves inside coherent low-frequency pools so
+    the aisle gets metre-scale sun patches instead of confetti dapples."""
+    if not leaves or fraction <= 0.0:
+        return leaves
+    if not 0.0 <= fraction < 0.6:
+        raise ValueError("sun gap fraction must be in [0, 0.6)")
+    xy = np.array([leaf.attach[:2] for leaf in leaves])
+    lo = xy.min(axis=0) - cell_m
+    span = xy.max(axis=0) - lo + cell_m
+    n = 256
+    rng = np.random.default_rng(seed + 515)
+    field = _iso_field(rng, n, (n * cell_m / float(span.max()),), (1.0,))
+    idx = np.clip(((xy - lo) / span * (n - 1)).astype(int), 0, n - 1)
+    values = field[idx[:, 1], idx[:, 0]]
+    threshold = float(np.quantile(values, 1.0 - fraction))
+    return [leaf for leaf, v in zip(leaves, values) if v < threshold]
 
 
 def main():
@@ -921,6 +957,8 @@ def main():
     p.add_argument("--fruit-count", type=int, default=600)
     p.add_argument("--leaves", type=int, default=28)
     p.add_argument("--canopy-spacing", type=float, default=0.09)
+    p.add_argument("--sun-gaps", type=float, default=0.14,
+                   help="fraction of canopy infill removed in coherent sun pools")
     p.add_argument("--no-grade", action="store_true")
     p.add_argument("--gl", choices=("auto", "egl", "osmesa"), default="auto")
     p.add_argument("--require-gpu", action="store_true")
@@ -991,7 +1029,8 @@ def main():
         for walker in walkers:
             walker.write(data, t)
         if walkers:
-            mujoco.mj_kinematics(model, data)
+            # mj_forward also refreshes light_xpos/xdir; mj_kinematics alone does not.
+            mujoco.mj_forward(model, data)
         camera.lookat[:] = lookat
         camera.distance = distance
         camera.azimuth = azimuth
