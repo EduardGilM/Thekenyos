@@ -420,6 +420,25 @@ def _apply_grasp_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtyp
 
 
 @wp.kernel
+def _hold_stationary_base(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
+                          initial_qpos: wp.array(dtype=float),
+                          targets: wp.array2d(dtype=float), home: wp.array(dtype=float),
+                          chassis_qposadr: int, chassis_dofadr: int):
+    """Keep the floating base at the authored pose. Fruit stays world-fixed.
+
+    The grasp catalog is world-frame joint IK. Idle gait still drifts the
+    chassis; that turns a 5 mm grasp into a 20 cm miss. Not a weld.
+    """
+    world = wp.tid()
+    for i in range(7):
+        qpos[world, chassis_qposadr + i] = initial_qpos[chassis_qposadr + i]
+    for i in range(6):
+        qvel[world, chassis_dofadr + i] = 0.0
+    for i in range(12):
+        targets[world, i] = home[i]
+
+
+@wp.kernel
 def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
                          qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
                          jaw_qposadr: int, jaw_hold: wp.array(dtype=float)):
@@ -678,7 +697,7 @@ def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype
                              jaw_hold: wp.array(dtype=float), jaw_open: float,
                              max_delta: float, advance_rad: float,
                              site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
-                             xpos: wp.array2d(dtype=wp.vec3),
+                             xipos: wp.array2d(dtype=wp.vec3),
                              fruit_bodies: wp.array(dtype=int),
                              active_fruit: wp.array(dtype=int),
                              close_radius: float,
@@ -706,7 +725,7 @@ def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype
     if idx < 0 or idx >= MAX_FRUITS:
         idx = 0
     fruit = fruit_bodies[idx]
-    dist = wp.length(site_xpos[world, tcp_site] - xpos[world, fruit])
+    dist = wp.length(site_xpos[world, tcp_site] - xipos[world, fruit])
     near = 1 if dist < close_radius else 0
     closing = 1 if (wp_idx >= close_index or near != 0 or detached[world] != 0) else 0
     if joint < 6:
@@ -842,6 +861,7 @@ class FastRuntime:
             self._fruit_dofadrs = wp.array(_pad_ids(dofadrs, fill=0), dtype=int, device=self.device)
             chassis_joint = int(self.model.body_jntadr[self.control.chassis])
             self._chassis_qposadr = int(self.model.jnt_qposadr[chassis_joint])
+            self._chassis_dofadr = int(self.model.jnt_dofadr[chassis_joint])
             self._jaw_qposadr = int(self.control.contract.qids[18])
             self._jaw_dofadr = int(self.control.contract.dofs[18])
             from .reach_teacher import jaw_open_closed_q
@@ -1026,6 +1046,12 @@ class FastRuntime:
         import mujoco_warp as mw
         with wp.ScopedDevice(self.device):
             wp.copy(self._actions, action_wp)
+            if self._ik_grasp:
+                wp.launch(_hold_stationary_base, dim=self.worlds, inputs=[
+                    self.data.qpos, self.data.qvel, self._initial_qpos,
+                    self.control.targets, self.control.home,
+                    int(self._chassis_qposadr), int(self._chassis_dofadr)],
+                    device=self.device)
             if self._easy:
                 wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
                     self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
@@ -1493,15 +1519,15 @@ class FastRuntime:
         data.qpos[:] = qpos
         mujoco.mj_forward(self.model, data)
         chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
-        fruit_p = np.asarray(data.xpos[self.fruit_body], dtype=np.float64)
+        fruit_p = np.asarray(data.xipos[self.fruit_body], dtype=np.float64)
         fruit_source = 'cpu_mj_forward'
         gpu_fruit = self._gpu_fruit_world_m()
-        # Training steps the GPU hanging fruit. Target that pose whenever the
-        # device buffer is finite so the close/pull joints are not aimed at
-        # an unset CPU kinematics COM (~21 cm off in grasp1).
+        # Training rewards TCP-to-COM. Target that pose whenever the device
+        # buffer is finite so close/pull joints are not aimed at an unset
+        # body origin or a drifted chassis (~21 cm off in grasp1/grasp2).
         if gpu_fruit is not None:
             fruit_p = gpu_fruit
-            fruit_source = 'gpu_xpos'
+            fruit_source = 'gpu_xipos'
         q_home = qpos[qids].copy()
         safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
         if (safe.shape == (6,) and np.isfinite(safe).all()
@@ -1600,9 +1626,9 @@ class FastRuntime:
         }
 
     def _gpu_fruit_world_m(self):
-        """Settled hanging fruit from the GPU state. None if the buffer is empty."""
+        """Settled hanging fruit COM from the GPU state. None if the buffer is empty."""
         try:
-            host = np.asarray(self.data.xpos.numpy(), dtype=np.float64)
+            host = np.asarray(self.data.xipos.numpy(), dtype=np.float64)
         except (AttributeError, RuntimeError, ValueError):
             return None
         if host.ndim == 3 and host.shape[0] >= 1:
@@ -2006,7 +2032,7 @@ class FastRuntime:
                 int(self._n_waypoints), int(self._grasp_close_index),
                 self._easy_jaw_hold, self._jaw_open,
                 float(max_delta), float(IK_GRASP_PRESET['waypoint_advance_rad']),
-                self.data.site_xpos, int(self.tcp_site), self.data.xpos,
+                self.data.site_xpos, int(self.tcp_site), self.data.xipos,
                 self.task.fruit_body, self.task.active_fruit,
                 float(IK_GRASP_PRESET['jaw_close_radius_m']),
                 self._teacher_applied],
@@ -2083,6 +2109,11 @@ class FastRuntime:
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self.control.qids, self._easy_start_q, self._easy_start_index,
                     self._jaw_qposadr, float(self._jaw_open)],
+                    device=self.device)
+                wp.launch(_hold_stationary_base, dim=self.worlds, inputs=[
+                    self.data.qpos, self.data.qvel, self._initial_qpos,
+                    self.control.targets, self.control.home,
+                    int(self._chassis_qposadr), int(self._chassis_dofadr)],
                     device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)

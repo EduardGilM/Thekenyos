@@ -814,8 +814,9 @@ crate: catalog poses with arm/basket contacts are discarded.
 open, and a privileged IK teacher reaches the fruit (easy 1–3 cm / hard 8–15 cm
 starts), closes the jaw at the grasp waypoint or when the live TCP is within
 4.5 cm, then pulls down to load the stem. The catalog targets the GPU hanging
-fruit after a device forward, and rebuilds once if that COM moved more than
-2 cm from the first IK target. Catalog rows are rejected if that
+fruit COM after a device forward, rebuilds once if that COM moved more than
+2 cm from the first IK target, and holds the floating base at the authored
+pose so gait drift cannot walk the TCP off a world-fixed kiwi. Catalog rows are rejected if that
 grasp pose leaves the TCP more than ~3 cm from the settled hanging fruit. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 16 updates, then four PPO
 updates with the teacher off. Evaluation keeps `teacher_mix=0` and
