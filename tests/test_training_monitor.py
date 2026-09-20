@@ -196,6 +196,7 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertTrue(grasp['ik_grasp'])
         self.assertFalse(grasp['easy'])
         self.assertEqual(grasp['reset_mode'], 2)
+        self.assertAlmostEqual(grasp['hold_close_frac'], 0.45)
         from treesim.kiwi_rl.training_monitor import (
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
@@ -234,6 +235,8 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertNotIn('easy_airdrop_world_m', inspect.getsource(apply_native_skill_reset))
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked
         self.assertIn('scripted_jaw_target', inspect.getsource(_record_progress_video_locked))
+        self.assertIn("preview.get('ik_grasp')", inspect.getsource(_record_progress_video_locked))
+        self.assertIn('IK_GRASP_PRESET', inspect.getsource(_record_progress_video_locked))
         self.assertIn('fruit_in_release_zone', inspect.getsource(_record_progress_video_locked))
         self.assertIn('rim_z_m', inspect.getsource(_record_progress_video_locked))
         self.assertIn('adapt_scripted_hold_q', inspect.getsource(_record_progress_video_locked))

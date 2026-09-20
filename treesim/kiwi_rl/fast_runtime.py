@@ -420,6 +420,58 @@ def _apply_grasp_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtyp
 
 
 @wp.kernel
+def _mark_scripted_grasp_open(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                              released: wp.array(dtype=int)):
+    """DETACH reset: treat `_easy_released=1` as still-open so the graph pin stays open."""
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 2:
+        return
+    released[world] = 1
+
+
+@wp.kernel
+def _latch_scripted_grasp_close(goal: wp.array(dtype=int),
+                                waypoint_index: wp.array(dtype=int),
+                                close_index: int,
+                                site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
+                                xipos: wp.array2d(dtype=wp.vec3),
+                                fruit_bodies: wp.array(dtype=int),
+                                active_fruit: wp.array(dtype=int),
+                                close_radius: float,
+                                grasped: wp.array(dtype=wp.uint8),
+                                detached: wp.array(dtype=wp.uint8),
+                                released: wp.array(dtype=int),
+                                actions: wp.array2d(dtype=float),
+                                targets: wp.array2d(dtype=float),
+                                jaw_hold: wp.array(dtype=float), jaw_open: float,
+                                max_delta: float):
+    """Scripted pick: open until the TCP is on the kiwi, then the same hold pin.
+
+    `_easy_released=0` means hold (the captured `_pin_scripted_jaw` contract).
+    Once latched, the hold stays on. Not a weld; fruit stays a free body.
+    """
+    world = wp.tid()
+    if goal[world] != 1:
+        return
+    wp_idx = waypoint_index[world]
+    if wp_idx < 0:
+        wp_idx = 0
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    dist = wp.length(site_xpos[world, tcp_site] - xipos[world, fruit])
+    closing = 1 if (wp_idx >= close_index or dist < close_radius
+                    or grasped[world] != 0 or detached[world] != 0) else 0
+    if closing != 0:
+        released[world] = 0
+    desired = jaw_hold[world] if released[world] == 0 else jaw_open
+    current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    actions[world, 6] = delta / max_delta
+
+
+@wp.kernel
 def _hold_stationary_base(qpos: wp.array2d(dtype=float), qvel: wp.array2d(dtype=float),
                           initial_qpos: wp.array(dtype=float),
                           targets: wp.array2d(dtype=float), home: wp.array(dtype=float),
@@ -1052,6 +1104,16 @@ class FastRuntime:
                     self.control.targets, self.control.home,
                     int(self._chassis_qposadr), int(self._chassis_dofadr)],
                     device=self.device)
+                wp.launch(_latch_scripted_grasp_close, dim=self.worlds, inputs=[
+                    self.task.goal, self._waypoint_index, int(self._grasp_close_index),
+                    self.data.site_xpos, int(self.tcp_site), self.data.xipos,
+                    self.task.fruit_body, self.task.active_fruit,
+                    float(IK_GRASP_PRESET['jaw_close_radius_m']),
+                    self.task.grasped, self.task.detached, self._easy_released,
+                    self._actions, self.control.targets,
+                    self._easy_jaw_hold, float(self._jaw_open),
+                    float(2.5 * self.control_dt)],
+                    device=self.device)
             if self._easy:
                 wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
                     self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
@@ -1669,17 +1731,18 @@ class FastRuntime:
         self._grasp_catalog_locked = True
 
     def enable_ik_grasp(self, enabled=True, *, shaping_coef=None):
-        """Hanging fruit, open jaw, privileged IK to grasp and pull.
+        """Hanging fruit, privileged IK reach, scripted jaw pick, then pull.
 
-        Does not enable ``--easy``, weld the fruit, or script the jaw for the
-        student. Eval must keep teacher_mix at 0. Jaw close fraction is an
-        engineering hold, not a calibrated tissue-safe force.
+        Does not enable ``--easy`` or weld the fruit. The captured jaw pin
+        holds at ``jaw_close_frac`` once the TCP is on the kiwi; the student
+        jaw action is overwritten. Eval must keep teacher_mix at 0. The hold
+        is an engineering close, not a calibrated tissue-safe force.
         """
         self._ik_grasp = bool(enabled)
         self._easy = False
         self._ik_demo = False
         knobs = IK_GRASP_PRESET
-        self._easy_pin.assign(np.array([0], dtype=np.int32))
+        self._easy_pin.assign(np.array([1 if self._ik_grasp else 0], dtype=np.int32))
         self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
         self._release_at_center.assign(np.array([0], dtype=np.int32))
         self._release_over_opening.assign(np.array([0], dtype=np.int32))
@@ -1724,6 +1787,7 @@ class FastRuntime:
             'deposit_reward': float(knobs['deposit_reward']),
             'fail_reward': float(knobs['fail_reward']),
             'hold_close_frac': close,
+            'scripted_jaw': bool(self._ik_grasp),
             'weld': False,
             'n_start_poses': int(catalog.get('n_start_poses', 0)),
             'n_hard_starts': int(catalog.get('n_hard_starts', 0)),
@@ -1731,8 +1795,8 @@ class FastRuntime:
             'grasp_close_index': int(catalog.get('grasp_close_index', 0)),
             'hover_error_m': 0.0,
             'easy_start_error_m': 0.0,
-            'scope': ('hanging fruit; open jaw; privileged IK reach/grasp/pull; '
-                      'fruit stays attached until stem load; no weld'),
+            'scope': ('hanging fruit; privileged IK reach; scripted jaw pick/hold; '
+                      'pull until stem load; fruit stays attached; no weld'),
             **catalog,
         }
 
@@ -2109,6 +2173,9 @@ class FastRuntime:
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self.control.qids, self._easy_start_q, self._easy_start_index,
                     self._jaw_qposadr, float(self._jaw_open)],
+                    device=self.device)
+                wp.launch(_mark_scripted_grasp_open, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self._easy_released],
                     device=self.device)
                 wp.launch(_hold_stationary_base, dim=self.worlds, inputs=[
                     self.data.qpos, self.data.qvel, self._initial_qpos,

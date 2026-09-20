@@ -812,8 +812,10 @@ crate: catalog poses with arm/basket contacts are discarded.
 
 `--ik-grasp` is the stage-2 recipe: the kiwi **stays hanging**, the jaw starts
 open, and a privileged IK teacher reaches the fruit (easy 1–3 cm / hard 8–15 cm
-starts), closes the jaw at the grasp waypoint or when the live TCP is within
-4.5 cm, then pulls down to load the stem. The catalog targets the GPU hanging
+starts). The **same scripted jaw pin** as `--easy` then holds at
+`jaw_close_frac` when the grasp waypoint is reached or the live TCP is within
+4.5 cm; the student jaw action is overwritten. Then the arm pulls down to load
+the stem. The catalog targets the GPU hanging
 fruit COM after a device forward, rebuilds once if that COM moved more than
 2 cm from the first IK target, and holds the floating base at the authored
 pose so gait drift cannot walk the TCP off a world-fixed kiwi. Catalog rows are rejected if that

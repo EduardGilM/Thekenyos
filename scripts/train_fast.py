@@ -78,7 +78,7 @@ def apply_speedrun_cli(args, *, video_default=10):
 def apply_ik_grasp_cli(args):
     """Hanging-fruit IK reach/grasp demos, then a short RL fine-tune.
 
-    Does not imply --easy. Fruit stays attached. Eval keeps teacher_mix=0.
+    Does not imply --easy. Fruit stays attached. Scripted jaw pick; eval keeps teacher_mix=0.
     """
     if not getattr(args, 'ik_grasp', False):
         return args
@@ -888,6 +888,7 @@ def run(args):
             config['catalog_fruit_source'] = grasp_info.get('catalog_fruit_source')
             config['catalog_fruit_world_m'] = grasp_info.get('catalog_fruit_world_m')
             config['jaw_close_radius_m'] = float(IK_GRASP_PRESET['jaw_close_radius_m'])
+            config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])
             config['ppo_epochs'] = int(knobs['ppo_epochs'])
@@ -903,7 +904,7 @@ def run(args):
         if not np_finite(ppo_lr) or not 1e-5 <= ppo_lr <= 1e-2:
             raise ValueError('ppo_lr must be finite in [1e-5, 1e-2]')
         optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
-        dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle, scripted_jaw=easy)
+        dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle, scripted_jaw=(easy or ik_grasp))
         apply_stage(runtime, stage, numpy_rng, primary_only=ik_grasp)
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
@@ -1116,7 +1117,7 @@ def run(args):
                         if nxt is not None:
                             stage = nxt
                             dim_mask = policy_dim_mask(
-                                stage, 'cuda:0', mask_idle, scripted_jaw=easy)
+                                stage, 'cuda:0', mask_idle, scripted_jaw=(easy or ik_grasp))
                             config['curriculum'] = summarise_stage(stage, profile=eval_profile)
                             config['stage'] = stage.name
                             config['curriculum_blocked_reason'] = fruit_block_reason(stage, n_fruits)

@@ -221,7 +221,7 @@ IK_DEMO_PRESET = {
     'default_shaping_length_m': 0.25,
 }
 
-# IK reach/grasp/detach then a short RL fine-tune. Fruit stays hanging on
+# IK reach then a scripted-jaw pick/hold and pull. Fruit stays hanging on
 # its stem equality. The teacher is privileged; eval keeps teacher_mix=0.
 # This is not --easy, a weld, or a paper picking angle.
 IK_GRASP_PRESET = {

@@ -825,6 +825,13 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
         # "this one-world CPU clip is a hard start". Default the preview to
         # an easy physics-safe pose so a deposit is visible.
         preview_hard = bool(not ik_demo and far_frac >= 0.5)
+    if ik_grasp:
+        raw_hold = config.get('hold_close_frac', 0.45)
+        if raw_hold is None:
+            raw_hold = 0.45
+        hold_frac = float(raw_hold)
+        if not math.isfinite(hold_frac) or not 0.0 <= hold_frac <= 1.0:
+            raise ValueError('hold_close_frac must be finite in [0, 1]')
     if not name:
         return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
                     ik_demo=ik_demo, ik_grasp=ik_grasp, easy_far_frac=far_frac,
@@ -1185,7 +1192,22 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
-            if preview.get('easy'):
+            if preview.get('ik_grasp'):
+                from treesim.kiwi_rl.curriculum import IK_GRASP_PRESET
+                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, jaw_open_closed_q
+                opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
+                frac = preview.get('hold_close_frac')
+                hold = jaw_hold_q(
+                    IK_GRASP_PRESET['jaw_close_frac'] if frac is None else float(frac),
+                    opened, closed)
+                tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+                fruit_com = np.asarray(data.xipos[fruit_body], dtype=np.float64)
+                near = float(np.linalg.norm(tcp_xyz - fruit_com)) < float(
+                    IK_GRASP_PRESET['jaw_close_radius_m'])
+                desired = hold if near else opened
+                arm = np.asarray(arm, dtype=np.float64).copy()
+                arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
+            elif preview.get('easy'):
                 from treesim.kiwi_rl.curriculum import EASY_PRESET, IK_DEMO_PRESET
                 from treesim.kiwi_rl.reach_teacher import (
                     adapt_scripted_hold_q, fruit_in_release_zone, jaw_hold_q,
@@ -1238,7 +1260,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             controller.targets[12:] = np.clip(
                 controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
-                if preview.get('easy'):
+                if preview.get('easy') or preview.get('ik_grasp'):
                     data.qpos[int(controller.qids[18])] = desired
                     data.qvel[int(controller.dofs[18])] = 0.0
                     controller.targets[18] = desired
