@@ -72,7 +72,9 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
-                     basket_center: wp.vec3, hover_offset: wp.vec3, dt: float, gamma_step: float,
+                     basket_center: wp.vec3, hover_offset: wp.vec3,
+                     release_offset: wp.vec3, open_half_xy: wp.vec2,
+                     dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
                      fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
                      w_grasp: float, w_detach: float, w_loss: float,
@@ -102,19 +104,28 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     length = shaping_length[world]
     if length <= 0.0:
         length = 0.25
+    potential_ref = use_basket
     if use_basket != 0 and shape_hand_fruit[0] != 0:
-        hover_world = basket_world + rotation @ hover_offset
-        d_hover = wp.length(fruit_world - hover_world)
+        local_fruit = wp.transpose(rotation) @ (fruit_world - basket_world)
+        local_tcp = wp.transpose(rotation) @ (tcp - basket_world)
+        aligned = (wp.abs(local_fruit[0]) < open_half_xy[0]
+                   and wp.abs(local_fruit[1]) < open_half_xy[1]
+                   and wp.abs(local_tcp[0]) < open_half_xy[0]
+                   and wp.abs(local_tcp[1]) < open_half_xy[1])
+        target_offset = release_offset if aligned else hover_offset
+        target_world = basket_world + rotation @ target_offset
+        d_target = wp.length(fruit_world - target_world)
         tcp_diff = tcp - basket_world
         d_hand_xy = wp.sqrt(tcp_diff[0] * tcp_diff[0] + tcp_diff[1] * tcp_diff[1])
-        phi = 0.25 * wp.exp(-d_hover / length) + 0.75 * wp.exp(-d_hand_xy / length)
+        phi = 0.25 * wp.exp(-d_target / length) + 0.75 * wp.exp(-d_hand_xy / length)
+        potential_ref = 2 if aligned else 1
     else:
         phi = wp.exp(-d_shape / length)
     shaped = float(0.)
-    if shaping_ref[world] == use_basket and easy_released[world] == 0:
+    if shaping_ref[world] == potential_ref and easy_released[world] == 0:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
     previous_potential[world] = phi
-    shaping_ref[world] = use_basket
+    shaping_ref[world] = potential_ref
     r = shaped
     if grasped[world] != 0 and grasp_paid[world] == 0:
         r = r + w_grasp
@@ -233,6 +244,7 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
                           site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                           xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                           chassis: int, basket_center: wp.vec3, hover_offset: wp.vec3,
+                          release_offset: wp.vec3, open_half_xy: wp.vec2,
                           shape_hand_fruit: wp.array(dtype=int),
                           fruit_bodies: wp.array(dtype=int), active_fruit: wp.array(dtype=int)):
     world = wp.tid()
@@ -245,17 +257,26 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
         length = 0.25
     if use_basket != 0 and shape_hand_fruit[0] != 0:
         basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
-        hover_world = basket_world + xmat[world, chassis] @ hover_offset
         idx = active_fruit[world]
         if idx < 0 or idx >= MAX_FRUITS:
             idx = 0
         fruit = fruit_bodies[idx]
-        d_hover = wp.length(xpos[world, fruit] - hover_world)
         tcp = site_xpos[world, tcp_site]
+        rotation = xmat[world, chassis]
+        local_fruit = wp.transpose(rotation) @ (xpos[world, fruit] - basket_world)
+        local_tcp = wp.transpose(rotation) @ (tcp - basket_world)
+        aligned = (wp.abs(local_fruit[0]) < open_half_xy[0]
+                   and wp.abs(local_fruit[1]) < open_half_xy[1]
+                   and wp.abs(local_tcp[0]) < open_half_xy[0]
+                   and wp.abs(local_tcp[1]) < open_half_xy[1])
+        target_offset = release_offset if aligned else hover_offset
+        target_world = basket_world + rotation @ target_offset
+        d_target = wp.length(xpos[world, fruit] - target_world)
         d_hand_xy = wp.sqrt((tcp[0] - basket_world[0]) * (tcp[0] - basket_world[0])
                             + (tcp[1] - basket_world[1]) * (tcp[1] - basket_world[1]))
         previous_potential[world] = (
-            0.25 * wp.exp(-d_hover / length) + 0.75 * wp.exp(-d_hand_xy / length))
+            0.25 * wp.exp(-d_target / length) + 0.75 * wp.exp(-d_hand_xy / length))
+        use_basket = 2 if aligned else 1
     else:
         previous_potential[world] = wp.exp(-d_shape / length)
     shaping_ref[world] = use_basket
@@ -677,14 +698,17 @@ class FastRuntime:
             if (not np.isfinite(self._open_max_above_rim_m)
                     or not 0.0 <= self._open_max_above_rim_m <= 0.4):
                 raise ValueError('release_max_above_rim_m must be finite in [0, 0.4] m')
-            # Reset IK stays at the collision-safe 28 cm hover. Shaping targets
-            # 14 cm, inside the <=16 cm scripted release band, so its optimum
-            # no longer asks the student to keep holding above the open gate.
+            # Outside the opening, shaping first targets the collision-safe
+            # 28 cm hover. Once fruit and TCP XY are over the hole, it switches
+            # to 14 cm inside the <=16 cm scripted release band.
             release_target = float(EASY_PRESET['release_target_clearance_m'])
             if (not np.isfinite(release_target) or release_target < 0.05
                     or release_target > self._open_max_above_rim_m):
                 raise ValueError('release_target_clearance_m must be finite in [0.05, release cap]')
-            self._hover_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + release_target))
+            self._hover_offset = wp.vec3(
+                0.0, 0.0, float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
+            self._release_offset = wp.vec3(
+                0.0, 0.0, float(SIZE[2] + release_target))
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -789,7 +813,8 @@ class FastRuntime:
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
                           self.task.deposited, self.task.loss_paid, self._basket_center,
-                          self._hover_offset, self.control_dt,
+                          self._hover_offset, self._release_offset, self._open_half_xy,
+                          self.control_dt,
                           self._gamma_step, self._deposit_w, self._fail_w, self.task.fail_paid,
                           W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
@@ -1327,7 +1352,8 @@ class FastRuntime:
                               self._basket_distance, self._episode_time, self._timed_out,
                               self._shaping_length, self.data.site_xpos, int(self.tcp_site),
                               self.data.xpos, self.data.xmat, self.chassis, self._basket_center,
-                              self._hover_offset, self._shape_hand_fruit,
+                              self._hover_offset, self._release_offset, self._open_half_xy,
+                              self._shape_hand_fruit,
                               self.task.fruit_body, self.task.active_fruit], device=self.device)
         return self.observe()
 

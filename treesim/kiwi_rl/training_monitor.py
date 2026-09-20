@@ -774,6 +774,13 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
     frac = float(far_frac)
     if not np.isfinite(frac) or not 0.0 <= frac <= 1.0:
         raise ValueError('far_frac must be finite in [0, 1]')
+    rng = np.random.default_rng(7 + int(round(frac * 10_000)))
+    # Match the GPU hover-first mixture for this one-world preview. At the
+    # current <=25% outside fraction the seeded preview remains on hover.
+    if not EASY_PRESET.get('start_over_opening') and float(rng.random()) >= frac:
+        return apply_native_easy_hover(
+            model, data, controller, tcp_site,
+            clearance_m=float(EASY_PRESET['hover_clearance_m']))
     mujoco.mj_kinematics(model, data)
     qids = np.asarray(controller.qids[12:18], dtype=int)
     dofs = np.asarray(controller.dofs[12:18], dtype=int)
@@ -785,7 +792,6 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
     chassis_R = np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3)
     home_tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
     home_local = chassis_R.T @ (home_tcp - chassis_p)
-    rng = np.random.default_rng(7 + int(round(frac * 10_000)))
     if EASY_PRESET.get('start_over_opening'):
         local = easy_over_opening_local_m(rng)
         if not tcp_over_opening_above_rim(local):

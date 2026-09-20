@@ -13,6 +13,7 @@ DETACH_FORCE_N = 8.0  # Engineering approximation; not a calibrated stem thresho
 SETTLE_SPEED_M_S = .05
 SETTLE_JITTER_SPEED_M_S = .10
 SETTLE_TIME_S = .5
+SETTLE_TIME_EPSILON_STEPS = .5
 JAW_FORCE_LIMIT_N = 15.0
 # The coarse 5 ms rigid solver settles the 36 mm-radius fruit 7–10 mm into
 # the simplified liner. Basket contact is still mandatory; this tolerance
@@ -195,7 +196,8 @@ def _record(
     jaw_overload = (goal[world] != 0) and (jaws > JAW_FORCE_LIMIT_N)
     if ground_contact[world] != 0 or fallen or jaw_overload or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
-    elif settle_time[world] >= SETTLE_TIME_S and detached[world] != 0 and hand_contact[world] == 0:
+    elif (settle_time[world] >= SETTLE_TIME_S - SETTLE_TIME_EPSILON_STEPS * dt
+          and detached[world] != 0 and hand_contact[world] == 0):
         if deposited[world, idx] == 0:
             deposited[world, idx] = wp.uint8(1)
             harvested[world] = harvested[world] + 1

@@ -750,8 +750,10 @@ promotion gates do not change and `training_ready` stays false.
 The current easy release curriculum starts at the collision-safe high hover and
 introduces the outside-crate catalog as `easy_far_frac` grows to 0.25; it is no
 longer a logging-only anneal. Reward shaping targets 14 cm above the rim, inside
-the scripted ≤16 cm release band, while the reset IK remains at 28 cm. Once the
-jaw script opens it stays open and dense hover shaping stops. PPO excludes that
+the scripted ≤16 cm release band only after fruit and TCP XY are over the
+opening; outside it first targets the collision-safe 28 cm hover. The CPU
+dashboard preview uses the same hover-first reset instead of showing a stale
+side-wall approach. Once the jaw script opens it stays open and shaping stops. PPO excludes that
 scripted jaw dimension, whitens advantages normally, and self-imitates only the
 causal episode prefix ending in success. The easy optimizer uses clip 0.2,
 learning rate 5e-4, four epochs and target KL 0.05. These are student-side

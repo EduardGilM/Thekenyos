@@ -39,10 +39,12 @@ class FastTaskGpuTest(unittest.TestCase):
 
     def setUp(self):
         from treesim.kiwi_rl.fast_task import (
-            CONTAINMENT_JITTER_TOL_M, CONTAINMENT_TOL_M, FastHarvestTask,
+            CONTAINMENT_JITTER_TOL_M, CONTAINMENT_TOL_M,
+            SETTLE_TIME_EPSILON_STEPS, FastHarvestTask,
         )
         self.assertEqual(CONTAINMENT_TOL_M, 0.012)
         self.assertEqual(CONTAINMENT_JITTER_TOL_M, 0.020)
+        self.assertEqual(SETTLE_TIME_EPSILON_STEPS, 0.5)
         self.model = self.mujoco.MjModel.from_xml_string(self.xml)
         native = self.mujoco.MjData(self.model)
         self.mujoco.mj_forward(self.model, native)
