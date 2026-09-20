@@ -285,6 +285,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _apply_grasp_start', src)
         self.assertIn('def _apply_harvest_start', src)
         self.assertIn('def _mark_scripted_deposit_open', src)
+        self.assertIn('def _apply_harvest_deposit_retract', src)
         self.assertIn('def _sample_harvest_deposit_waypoints', src)
         self.assertIn('sample_harvest_deposit_waypoints', src)
         self.assertIn('def _build_grasp_catalog', src)

@@ -851,14 +851,16 @@ epochs and unclipped positive advantages). Training now restores half
 the worlds already held and detached on a post-pull catalog waypoint
 (high slide through the opening) so carry and release get a gradient.
 Those in-hand worlds are `DEPOSIT_ONLY` at the last catalog waypoint
-(the liner-free release pose) with the scripted pin already open so the
-kiwi can drop and settle. Harvest9/10 kept HARVEST or started mid-slide
-with the 0.32 pin closed: overlap sat at 97–350 N and
-`harvest_successes` stayed 0 even when `inside_basket` matched the
-deposit cohort. Hanging worlds stay HARVEST; eval stays hanging-only
-with `force_pregrasp`. After detach, hover/opening shaping
-(`shape_hand_fruit`) replaces the old basket-centre pull that aimed the
-wrist into the liner. Fruit stays free; this is not a weld.
+(the liner-free release pose) with the scripted pin already open and the
+arm then parked at the validated robot-side hover so the ~20 cm wrist
+leaves the liner. Harvest11 had 512/512 `inside_basket` and liner
+contact with 0 harvest: the 16 cm release TCP put the wrist in the
+crate, so hand contact never cleared the 0.5 s settle. Harvest9/10 kept
+HARVEST or started mid-slide with the 0.32 pin closed. Hanging worlds
+stay HARVEST; eval stays hanging-only with `force_pregrasp`. After
+detach, hover/opening shaping (`shape_hand_fruit`) replaces the old
+basket-centre pull that aimed the wrist into the liner. Fruit stays
+free; this is not a weld.
 Harvest3/4 grasped (eval 49–87 %) but never deposited:
 the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
 no signal once held, and 180 s episodes let a frozen hold run ~35 updates.

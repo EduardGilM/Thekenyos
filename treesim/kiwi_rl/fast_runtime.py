@@ -564,6 +564,30 @@ def _mark_scripted_deposit_open(mask: wp.array(dtype=wp.uint8), reset_mode: wp.a
 
 
 @wp.kernel
+def _apply_harvest_deposit_retract(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                                   qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
+                                   qids: wp.array(dtype=int), hover_q: wp.array(dtype=float),
+                                   jaw_qposadr: int, jaw_open: float):
+    """Park the arm at the validated robot-side hover after the dump spawn.
+
+    The last catalog TCP is 16 cm over the opening; the ~20 cm wrist then
+    occupies the liner so a fallen kiwi stays in hand contact and never
+    settles. Fruit qpos is already written; this only moves the arm.
+    Not a weld.
+    """
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 1:
+        return
+    for joint in range(6):
+        qid = qids[joint + 12]
+        value = hover_q[joint]
+        qpos[world, qid] = value
+        targets[world, joint + 12] = value
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
+
+
+@wp.kernel
 def _tighten_on_grasp(goal: wp.array(dtype=int), grasped: wp.array(dtype=wp.uint8),
                       released: wp.array(dtype=int), jaw_hold: wp.array(dtype=float),
                       pull_hold: float, jaw_open: float, jaw_closed: float):
@@ -2860,6 +2884,11 @@ class FastRuntime:
                 wp.launch(_mark_scripted_deposit_open, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self._easy_released,
                     self.data.qpos, self.control.targets,
+                    int(self._jaw_qposadr), float(self._jaw_open)],
+                    device=self.device)
+                wp.launch(_apply_harvest_deposit_retract, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
+                    self.control.qids, self._hover_q,
                     int(self._jaw_qposadr), float(self._jaw_open)],
                     device=self.device)
             mw.forward(self.gpu_model, self.data)

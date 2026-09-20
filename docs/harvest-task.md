@@ -52,10 +52,11 @@ arm an optional straight detach→opening breadcrumb line: eight one-shot
 COM spheres from the detach position to the crate opening, paid at most
 once each while the fruit is still held. A harvest-continue mix may also
 restore some training worlds already held and detached at the last
-post-pull catalog waypoint (open pin over the opening) so release and
-settle are not starved. Those in-hand starts use the DEPOSIT_ONLY
-jaw-overlap exemption; hanging worlds stay HARVEST. Evaluation stays
-hanging-only. A slam that breaks the stem
+post-pull catalog waypoint, then open the pin and park the arm at the
+robot-side hover so the wrist leaves the liner before the 0.5 s settle.
+Those in-hand starts use the DEPOSIT_ONLY jaw-overlap exemption;
+hanging worlds stay HARVEST. Evaluation stays hanging-only. A slam that
+breaks the stem
 without the 0.12 s hold is not a pick. That line is
 not a required grasp sequence, not a paper angle, and not part of the
 oracle. Set this weight between episodes; anneal to **zero** as unguided
