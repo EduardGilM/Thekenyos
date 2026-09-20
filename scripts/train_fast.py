@@ -997,6 +997,8 @@ def run(args):
             config['train_timeout_s'] = train_timeout_s
             config['stem_shaping'] = bool(harvest_info.get('stem_shaping'))
             config['slip_max_close_frac'] = harvest_info.get('slip_max_close_frac')
+            config['pull_close_frac'] = harvest_info.get('pull_close_frac')
+            config['detach_reward'] = harvest_info.get('detach_reward')
             config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])

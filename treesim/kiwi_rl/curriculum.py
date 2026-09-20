@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import schemas as S
+from .rewards import W_DETACH_HELD
 
 GOALS = S.GOALS
 GOAL_ID = {name: i for i, name in enumerate(GOALS)}
@@ -295,6 +296,12 @@ IK_HARVEST_PRESET = {
     'rl_continue_timeout_s': 30.0,
     'rl_continue_stem_shaping': True,
     'rl_continue_slip_max_close_frac': 0.40,
+    # Harvest5 still lost the pull to slip (retained detach 0–9/512 per
+    # update): pin at the pull hold as soon as `grasped` latches instead of
+    # waiting for 3 cm of slip, and pay the held detach as the bottleneck
+    # event. Both are training assists; eval keeps guidance at 0.
+    'rl_continue_pull_close_frac': 0.40,
+    'rl_continue_detach_reward': 40.0,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -642,6 +649,8 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out.setdefault('train_timeout_s', None)
     out.setdefault('stem_shaping', False)
     out.setdefault('slip_max_close_frac', 0.0)
+    out.setdefault('pull_close_frac', 0.0)
+    out.setdefault('detach_reward', W_DETACH_HELD)
     if not continuing:
         return out
     entropy = float(out['rl_continue_entropy_coef'])
@@ -655,6 +664,12 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
         raise ValueError('rl_continue_timeout_s must be finite in [5, 900] s')
     if not np.isfinite(slip_cap) or not float(out['jaw_close_frac']) <= slip_cap <= 0.85:
         raise ValueError('rl_continue_slip_max_close_frac must be in [jaw_close_frac, 0.85]')
+    pull_frac = float(out['rl_continue_pull_close_frac'])
+    detach_w = float(out['rl_continue_detach_reward'])
+    if not np.isfinite(pull_frac) or not float(out['jaw_close_frac']) <= pull_frac <= 0.85:
+        raise ValueError('rl_continue_pull_close_frac must be in [jaw_close_frac, 0.85]')
+    if not np.isfinite(detach_w) or not 0.0 <= detach_w <= 200.0:
+        raise ValueError('rl_continue_detach_reward must be finite in [0, 200]')
     if not np.isfinite(entropy) or not 0.0 <= entropy <= 0.1:
         raise ValueError('rl_continue_entropy_coef must be finite in [0, 0.1]')
     if not np.isfinite(lr) or not 1e-5 <= lr <= 1e-2:
@@ -675,6 +690,8 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out['train_timeout_s'] = timeout
     out['stem_shaping'] = bool(out['rl_continue_stem_shaping'])
     out['slip_max_close_frac'] = slip_cap
+    out['pull_close_frac'] = pull_frac
+    out['detach_reward'] = detach_w
     return out
 
 
