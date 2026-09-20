@@ -190,7 +190,7 @@ class FastRuntime:
         from mujoco_warp._src import collision_convex
         self.epa_horizon_capacity = _configure_epa_horizon(mw, collision_convex)
         self.initial_jaw_rad = None if initial_jaw_rad is None else float(initial_jaw_rad)
-        if not np.isfinite(fruit_damping) or fruit_damping < 0:
+        if not np.isfinite(fruit_damping) or fruit_damping < 0 or fruit_damping > .5:
             raise ValueError('fruit_damping must be finite and nonnegative')
         self.fruit_damping = float(fruit_damping)
         self.fruit_jitter_m = tuple(float(x) for x in fruit_jitter_m)
@@ -226,11 +226,12 @@ class FastRuntime:
             # fruit's free joint dissipates that energy; rotational damping is
             # scaled by a nominal squared radius. Values above ~0.05 destabilise
             # the implicit integrator at 100 solver iterations.
-            fruit_body = self.model.body(self.manifest['fruits'][0]['body']).id
-            joint = self.model.body_jntadr[fruit_body]
-            dof = self.model.jnt_dofadr[joint]
-            self.model.dof_damping[dof:dof + 3] = self.fruit_damping
-            self.model.dof_damping[dof + 3:dof + 6] = self.fruit_damping * .02
+            for fruit in self.manifest['fruits']:   # every fruit, not only the first target
+                fruit_body = self.model.body(fruit['body']).id
+                joint = self.model.body_jntadr[fruit_body]
+                dof = self.model.jnt_dofadr[joint]
+                self.model.dof_damping[dof:dof + 3] = self.fruit_damping
+                self.model.dof_damping[dof + 3:dof + 6] = self.fruit_damping * .02
         if self.initial_jaw_rad is not None:
             # A wider authored start aperture: the approach stage then has no
             # reason to learn opening, and closing is the only jaw skill left.
