@@ -316,3 +316,26 @@ comparison continued from the current checkpoint. Preserve actor, critic and
 factual Adam state via `--continue-from`; reset physical episodes explicitly.
 No curriculum or evaluation rollback. Keep archived v4 replay. Read the v5
 section of docs/reward-graph.md and run its reward and CTI replay checks.
+
+## Progressive sequence curriculum
+
+The user's newest request supersedes v4/v5: start a fresh PPO teacher without CTI,
+progressively unlocking longer valid sequences from the initial pose. Read the
+sequence section of README.md and docs/reward-graph.md. Use
+`scripts/train_sequence_fast.py`; preserve physical event validity and per-episode
+checkpoint history. Promotion requires repeated varied-pose evaluation, not
+individual frames. Prefix completion must never be reported as a full harvest.
+Run `tests.test_sequence_curriculum`, affected PPO/task/teacher tests, and a
+full-size GPU smoke before launch. `FAST_STATES` supplies the recorded checkpoint
+111 qpos fixture for native/GPU surface-distance regression. Surface measurement
+changes must not change actual collision meshes. Rendering must read the saved
+sequence schema and objective. No CTI, demonstrations or stage-state resets.
+
+The current sequence-v2 contract supersedes earlier timeout/bootstrap and reward
+instructions for this profile only. Use fixed +1 event payments, separate live
+credit bounded by 0.25, gamma 1, time cost bounded by 0.1 per episode, and 0.25
+failure cost. A 30-second deadline is terminal; report timeout separately. Keep
+20% of training worlds on earlier objectives after unlock; evaluation remains on
+the current objective. Preserve the frozen sequence-001 release for v1 replay.
+The user has established grasp feasibility: do not repeat physical feasibility
+tests for reward changes. Validate reward ordering and the learner integration.

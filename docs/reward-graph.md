@@ -291,3 +291,73 @@ The graph uses the existing approximate rigid-fruit physics and engineering
 load limits; it does not establish calibrated biological damage or hardware
 performance. Physical task outcomes, not graph score alone, determine harvest
 success and readiness for sensor-only distillation.
+
+## Sequence curriculum v1
+
+The current user-approved system is implemented in `sequence_curriculum.py` and
+launched by `scripts/train_sequence_fast.py`. It supersedes v5 training without
+changing archived replay. `Rx = Rx-1 + y` means ordered achievements in the same
+episode, not simultaneous satisfaction or a sum of permanent occupancy rewards.
+
+An episode remembers five ordered checkpoints. Positioning needs fruit between
+opposed physical jaw surfaces; grasp needs 100 ms of loaded bilateral contact and
+low slip. Detachment records whether a safe sustained grasp existed at the exact
+200 Hz stem-break event and retains control for 100 ms afterwards. Transport needs
+maintained grasp and 100 ms above the
+basket. Release is allowed there; settled containment for two seconds completes
+the task. Unheld extraction, a ground drop, or more than 120 ms without control
+outside a valid release invalidates the sequence. Contact recovery before those
+failures remains trainable. Position and transport tolerances are 40 mm; these
+are engineering choices, not calibrated guarantees.
+
+Sequence v2 separates the event ledger from live guidance. Each first valid
+unlocked checkpoint pays +1 immediately, unchanged after curriculum promotion.
+Live quality q is in [0,1], with credit L = 0.25 q. The per-step reward is
+new checkpoint payments + L(next) - L(current) - 0.1/max_steps - 0.25*failure.
+Gamma is 1 for the finite task. Success and physical/task failure clear L; safe
+timeouts retain bounded live partial credit. All three end the task without
+critic bootstrap. PPO buffer boundaries still bootstrap. The inactivity clock
+is diagnostic. Event history is never discounted into the shaping balance.
+
+The grip quality includes continuous insertion and opposing-jaw alignment even
+after positioning has been achieved. Extraction requires current grasp, carry
+requires held valid extraction, and deposit allows a valid release. Losing
+required live conditions reduces guidance; history does not erase that cost.
+No hard alignment threshold masks the dense grip signal. Holding still pays only
+the small time cost, and a recovered quality loop cannot pay net positive reward.
+The remaining live quality at a timeout is intentional partial-task credit, so
+this reward is not claimed to satisfy the PBRS optimal-policy theorem.
+
+For the same initial state, total return is checkpoint payments plus final live
+credit minus initial live credit, elapsed time cost, and failure cost. Even a
+30-second valid full harvest earns 4.9 before the common initial-credit offset;
+a failed incomplete sequence earns at most 3.75. Aborting solely to avoid the
+remaining time cost is unprofitable. Tests exercise production reward traces for
+late grasp/full success, early invalid extraction/drop, waiting, regression,
+recovery, event uniqueness, deadline bootstrap, and reset accounting.
+
+The closure guide uses actual mesh/ellipsoid GJK separation, clamped to zero on
+penetration. Compression cannot improve it. The regression fixture compares GPU
+measurements with native `mj_geomDistance` at the recorded false optimum. No new
+collision geometry, artificial grasp attachment, demonstration, or scripted
+harvesting controller is introduced. A separate curriculum level is visible to
+both actor and critic. At promotion the learner and Adam persist while unfinished
+episodes reset at a PPO boundary. Every future rollout repeats the prior sequence.
+Twenty percent of training worlds keep earlier objectives after promotion, to
+continue training those skills. All start at home; no demonstration or stage-state
+reset is used. Current-objective outcomes are logged separately from rehearsal.
+Evaluation uses the current objective exclusively. Reward checks do not establish
+learning convergence or guarantee retention across PPO updates.
+
+The distance regression uses CPU native CCD to match MJWarp, which uses that
+backend regardless of the exported legacy `nativeccd` disable flag. At the fixed
+checkpoint-111 pose, the old closure score falls from 0.986 to 0.715 as the true
+finger clearance falls from about 33 mm to 13 mm. Legacy CPU libccd returned a
+2 mm distance with a witness outside the jaw hull; that is not the training
+backend and must not serve as the distance reference.
+
+Promotion uses two independent 32-episode trials from the training distribution,
+both at least 90%, in two consecutive evaluations. Held-out-scene evaluation is
+reported separately; it does not block learning the next skill on the training
+task. Best-recording selection ranks validated training-task outcomes first and
+held-out outcomes second. Neither selection nor promotion rolls back weights.

@@ -5,6 +5,35 @@ import unittest
 
 @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
 class FastPPOTest(unittest.TestCase):
+    def test_real_minibatches_update_more_than_once_and_verify_all_rows_before_mutation(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import update
+        from treesim.kiwi_rl.fast_teacher import build_privileged_policy
+        from treesim.kiwi_rl.ppo import tanh_logprob
+        policy = build_privileged_policy()
+        memory, obs, state = torch.zeros(8, 64), torch.randn(8, 84), torch.randn(8, 32)
+        rows = []
+        with torch.no_grad():
+            for t in range(4):
+                mean, logstd, value, memory = policy(state, obs, memory)
+                raw = mean + logstd.exp() * torch.randn_like(mean)
+                rows.append(dict(role='teacher', privileged=state, r84=obs, raw=raw,
+                    logp=tanh_logprob(raw, mean, logstd), value=value, reward=torch.randn(8),
+                    reset=torch.full((8,), t == 0), terminated=torch.full((8,), t == 3)))
+        optimizer = torch.optim.Adam(policy.parameters(), lr=1e-5)
+        original = {k:v.clone() for k,v in policy.state_dict().items()}
+        rows[-1]['logp'][-1] += 1.
+        with self.assertRaisesRegex(RuntimeError, 'Rollout/replay'):
+            update(policy, optimizer, rows, torch.zeros(8), 2, minibatch_updates=True)
+        for k,v in original.items(): torch.testing.assert_close(policy.state_dict()[k], v)
+        self.assertFalse(optimizer.state)
+        rows[-1]['logp'][-1] -= 1.
+        result = update(policy, optimizer, rows, torch.zeros(8), 2, minibatch_updates=True)
+        self.assertEqual(result['optimizer_steps'], 4)
+        self.assertEqual(result['optimized_transitions'], 32)
+        self.assertEqual(next(iter(optimizer.state.values()))['step'].item(), 4)
+
     def test_recurrent_replay_resets_individual_world(self):
         import torch
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))

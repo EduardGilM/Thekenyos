@@ -54,7 +54,7 @@ try:
     if isinstance(pid,int) and not isinstance(pid,bool) and pid > 0:
         os.kill(pid, 0)
         cmd=pathlib.Path('/proc/%d/cmdline'%pid).read_bytes().replace(b'\0',b' ').decode(errors='replace')
-        alive='train_harvest_fast.py' in cmd and run in cmd
+        alive=('train_harvest_fast.py' in cmd or 'train_sequence_fast.py' in cmd) and run in cmd
 except (OSError, FileNotFoundError): pass
 def tail_jsonl(name, limit):
     try:

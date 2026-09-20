@@ -269,7 +269,7 @@ _CONTROL_WORLD = ('targets', 'commands', 'previous', 'jaw_cap', 'effort', 'obser
 _CONTROL_SHARED = ('qids', 'dofs', 'actuators', 'obs_order', 'home', 'kp', 'kd', 'limits', 'knee_table')
 _TASK_WORLD = ('_hand_hits', '_basket_hits', '_ground_hits', '_finger_hits', '_jaw_hits',
                'detached', 'hand_contact', 'basket_contact', 'ground_contact',
-               'bilateral_contact', 'stable_grasp', 'ever_grasped', 'grasp_time',
+               'bilateral_contact', 'stable_grasp', 'ever_grasped', 'grasp_time', 'held_at_detach',
                'stem_force', 'hand_load', 'finger_load', 'jaw_load', 'palm_load',
                'damage_proxy', 'settle_time', 'success', 'failed')
 _TASK_SHARED = ('fruit_geom', 'fruit_body', 'equality_index', 'kind')

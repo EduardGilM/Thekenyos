@@ -35,7 +35,7 @@ def validate_teacher_report(report_path, checkpoint_path, *, training_model_sha2
     return report
 
 
-def privileged_observation(runtime, r84=None):
+def privileged_observation(runtime, r84=None, *, progress=None):
     """Build a differentiable-free GPU tensor from true state and R84 proprioception."""
     import warp as wp
     if r84 is None:
@@ -77,19 +77,28 @@ def privileged_observation(runtime, r84=None):
         hand_orientation[:, :, :2].flatten(1), relative_velocity, contact), dim=-1)
     if tuple(state.shape) != (runtime.worlds, PRIVILEGED_DIM):
         raise RuntimeError('Invalid privileged teacher observation')
+    from .reward_graph import SEQUENCE_PROFILE
+    if getattr(runtime, 'task_profile', None) == SEQUENCE_PROFILE:
+        if progress is None or progress.reward_profile != SEQUENCE_PROFILE:
+            raise ValueError('Sequence teacher requires matching episode history')
+        state = torch.cat((state, progress.observation()), -1)
     return state
 
 
-def build_privileged_policy():
+def build_privileged_policy(*, sequence=False):
     """Return the same recurrent actor/critic interface as the RGB-D policy."""
     nn = torch.nn
+    input_dim = PRIVILEGED_DIM
+    if sequence:
+        from .sequence_curriculum import SEQUENCE_OBSERVATION_DIM
+        input_dim += SEQUENCE_OBSERVATION_DIM
 
     class PrivilegedPolicy(nn.Module):
         observation_kind = 'privileged'
 
         def __init__(self):
             super().__init__()
-            self.encoder = nn.Sequential(nn.Linear(PRIVILEGED_DIM + 84, 128), nn.SiLU(),
+            self.encoder = nn.Sequential(nn.Linear(input_dim + 84, 128), nn.SiLU(),
                 nn.Linear(128, 128), nn.SiLU())
             self.belief = nn.GRUCell(128, 64)
             self.mean = nn.Linear(64, 7)
@@ -97,8 +106,8 @@ def build_privileged_policy():
             self.logstd = nn.Parameter(torch.full((7,), -1.6))
 
         def forward(self, privileged, r84, memory):
-            if privileged.ndim != 2 or privileged.shape[-1] != PRIVILEGED_DIM:
-                raise ValueError(f'Expected privileged observations [batch, {PRIVILEGED_DIM}]')
+            if privileged.ndim != 2 or privileged.shape[-1] != input_dim:
+                raise ValueError(f'Expected privileged observations [batch, {input_dim}]')
             if r84.shape != (privileged.shape[0], 84) or memory.shape != (privileged.shape[0], 64):
                 raise ValueError('Privileged policy received incompatible R84 or recurrent state')
             memory = self.belief(self.encoder(torch.cat((privileged, r84), dim=-1)), memory)

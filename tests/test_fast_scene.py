@@ -97,6 +97,28 @@ class FastSceneTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             assemble_fast_scene(self.base)
 
+    def test_fixed_base_preserves_fruit_dynamics_and_home_geometry(self):
+        import mujoco
+        from treesim.kiwi_rl.fast_scene import assemble_fast_scene, load_fast_scene, fixed_base_scene
+        xml, manifest = assemble_fast_scene(self.base, fruit_count=1, timestep_s=.005)
+        manifest['robot']['chassis'] = 'robot'
+        source = Path(self.tmp.name)/'source'; source.mkdir()
+        (source/'scene.xml').write_text(xml)
+        (source/'manifest.json').write_text(json.dumps(manifest))
+        original, before, _ = load_fast_scene(source)
+        xml, manifest = fixed_base_scene(source)
+        target = Path(self.tmp.name)/'fixed'; target.mkdir()
+        (target/'scene.xml').write_text(xml)
+        (target/'manifest.json').write_text(json.dumps(manifest))
+        fixed, after, _ = load_fast_scene(target)
+        self.assertEqual(fixed.nq, original.nq-7)
+        self.assertEqual(fixed.nu, original.nu)
+        self.assertEqual(fixed.joint('fruit_0_free').type, mujoco.mjtJoint.mjJNT_FREE)
+        self.assertEqual(fixed.neq, original.neq)
+        np.testing.assert_allclose(after.geom_xpos, before.geom_xpos, atol=1e-7)
+        np.testing.assert_allclose(fixed.geom_size, original.geom_size, atol=0)
+        np.testing.assert_allclose(fixed.body_mass, original.body_mass, atol=0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,10 +7,11 @@ CONTINUOUS_GRAPH_PROFILE = 'graph-harvest/v2'
 GRAPH_PROFILE = 'graph-harvest/v3'
 SOFT_GRAPH_PROFILE = 'graph-harvest/v4'
 CONTROL_GRAPH_PROFILE = 'graph-harvest/v5'
+SEQUENCE_PROFILE = 'sequence-harvest/v2'
 PREREQUISITE_GRAPH_PROFILES = (GRAPH_PROFILE, SOFT_GRAPH_PROFILE, CONTROL_GRAPH_PROFILE)
 REGRESSION_WEIGHTS = dict(position=1., grip=1.5, extract=2., carry=2., deposit=2., complete=2.)
 CONTINUOUS_GRAPH_PROFILES = (CONTINUOUS_GRAPH_PROFILE, *PREREQUISITE_GRAPH_PROFILES)
-GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, *CONTINUOUS_GRAPH_PROFILES)
+GRAPH_PROFILES = (LEGACY_GRAPH_PROFILE, *CONTINUOUS_GRAPH_PROFILES, SEQUENCE_PROFILE)
 STAGE_NAMES = ('position', 'grip', 'extract', 'carry', 'deposit', 'complete')
 GRAPH_CONSTANTS = dict(approach_radius_m=.5, approach_outer_m=1.5,
     enclosure_tolerance_m=.008, enclosure_core_radius_fraction=.25, insertion_range_m=.15, slip_enter_m_s=.05,
@@ -61,13 +62,20 @@ def enclosure_features(center, extent, finger, jaw, *, continuous=False):
     return enclosed, insertion, closure
 
 
-def release_position_distance(local, extent):
-    """Distance to the valid center region above the open basket, not its base."""
+def basket_frame_errors(local, extent):
+    """Per-axis horizontal overshoot beyond the open footprint, and fruit height above the rim."""
     from treesim.basket import CENTER, SIZE, WALL
     center = local.new_tensor(CENTER); size = local.new_tensor(SIZE)
-    target_z = center[2] + size[2] + extent[:, 2] + GRAPH_CONSTANTS['release_clearance_m']
     horizontal_error = ((local[:, :2]-center[:2]).abs()+extent[:, :2]-(size[:2]/2-WALL)).clamp_min(0)
-    return torch.cat((horizontal_error, (local[:, 2]-target_z)[:, None]), -1).norm(dim=-1)
+    rim_z = center[2] + size[2]
+    return horizontal_error, local[:, 2] - rim_z
+
+
+def release_position_distance(local, extent):
+    """Distance to the valid center region above the open basket, not its base."""
+    horizontal_error, height = basket_frame_errors(local, extent)
+    target = extent[:, 2] + GRAPH_CONSTANTS['release_clearance_m']
+    return torch.cat((horizontal_error, (height-target)[:, None]), -1).norm(dim=-1)
 
 
 class CollisionGeometry:
@@ -96,7 +104,7 @@ class CollisionGeometry:
             # All vertices retained: a rotated AABB would overestimate supports.
             self.parts.append((body, torch.tensor(np.concatenate(vertices), dtype=torch.float32,
                                                   device=runtime.device_name)))
-        geom = int(m.geom(runtime.manifest['fruits'][0]['geom']).id)
+        geom = int(m.geom(runtime.manifest['fruits'][getattr(runtime.task, 'target_index', 0)]['geom']).id)
         self.radii = torch.tensor(m.geom_size[geom], dtype=torch.float32, device=runtime.device_name)
 
     def signals(self, runtime):
@@ -112,7 +120,7 @@ class CollisionGeometry:
             points += (inv @ (p[:, body] - p[:, self.hand])[..., None])
             bounds.append(torch.stack((points.amin(-1), points.amax(-1)), dim=1))
         enclosed, insertion, closure = enclosure_features(local, extent, *bounds,
-            continuous=runtime.task_profile in CONTINUOUS_GRAPH_PROFILES)
+            continuous=runtime.task_profile in (*CONTINUOUS_GRAPH_PROFILES, SEQUENCE_PROFILE))
         cvel = wp.to_torch(runtime.data.cvel)
         com = wp.to_torch(runtime.data.subtree_com)
         point = wp.to_torch(runtime.data.xipos)[:, fruit]
@@ -124,8 +132,23 @@ class CollisionGeometry:
         basket_local = (bi @ (p[:, fruit]-p[:, runtime.chassis])[..., None]).squeeze(-1)
         be = ellipsoid_extent(bi @ r[:, fruit], self.radii)
         release_error = release_position_distance(basket_local, be)
-        return dict(enclosed=enclosed, insertion=insertion, closure=closure, slip=slip,
-                    release_distance=release_error)
+        horizontal, height = basket_frame_errors(basket_local, be)
+        result = dict(enclosed=enclosed, insertion=insertion, closure=closure, slip=slip,
+                      release_distance=release_error, basket_horizontal=horizontal.norm(dim=-1),
+                      basket_height=height)
+        if runtime.task_profile == SEQUENCE_PROFILE:
+            from .surface_distance import JawSurfaceDistance
+            if not hasattr(self, 'surface'):
+                self.surface = JawSurfaceDistance(runtime)
+            result.update(self.surface.signals(runtime))
+            # The old AABB aperture score is never used by the new curriculum.
+            result['closure'] = 1 / (1 + (result['finger_gap'] + result['jaw_gap']) / .04)
+            # Seating depth: fruit centre along the wrist's reach axis relative to the
+            # TCP. Positive = out toward the fingertips. Tip grasps do not survive the
+            # post-detachment swing; seated grasps (near zero) do.
+            tcp_x = float(runtime.manifest['robot'].get('tcp_offset_m', (0.195, 0., 0.005))[0])
+            result['grasp_depth'] = local[:, 0] - tcp_x
+        return result
 
 
 def graph_step(progress, now):

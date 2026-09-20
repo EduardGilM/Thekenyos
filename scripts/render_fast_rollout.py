@@ -42,9 +42,12 @@ def main():
         stream = torch.cuda.Stream()
         states = []
         with torch.cuda.stream(stream), wp.ScopedStream(wp.stream_from_torch(stream)):
+            checkpoint_meta = json.loads(Path(str(a.checkpoint)+'.json').read_text())
+            from treesim.kiwi_rl.reward_graph import GRAPH_PROFILES, SEQUENCE_PROFILE
+            sequence = checkpoint_meta.get('config', {}).get('reward_profile') == SEQUENCE_PROFILE
             if a.role == 'teacher':
                 from treesim.kiwi_rl.fast_teacher import build_privileged_policy, privileged_observation
-                policy = build_privileged_policy().cuda().eval()
+                policy = build_privileged_policy(sequence=sequence).cuda().eval()
             else:
                 policy = build_policy().cuda().eval()
             scene_manifest = json.loads((a.scene/'manifest.json').read_text())
@@ -56,14 +59,29 @@ def main():
             solver_iterations = saved['meta'].get('config', {}).get('solver_iterations', 20)
             jaw_cap = saved['meta'].get('config', {}).get('jaw_cap_Nm', .3)
             reward_profile=saved['meta'].get('config',{}).get('reward_profile','potential-harvest/v1')
-            graph_profile=reward_profile in ('graph-harvest/v1','graph-harvest/v2','graph-harvest/v3','graph-harvest/v4','graph-harvest/v5')
+            graph_profile=reward_profile in GRAPH_PROFILES
             rt = FastRuntime(a.scene, worlds=1, camera='hand_camera',arm_speed_rad_s=arm_speed,
                              solver_iterations=solver_iterations, jaw_cap_Nm=jaw_cap,
-                             task_profile=reward_profile if graph_profile else None)
+                             task_profile=reward_profile if graph_profile else None,
+                             absolute_jaw=bool(saved['meta'].get('config', {}).get('absolute_jaw', False)),
+                             initial_jaw_rad=saved['meta'].get('config', {}).get('initial_jaw_rad'),
+                             jaw_rate_rad_s=saved['meta'].get('config', {}).get('jaw_rate_rad_s', 1.),
+                             fruit_damping=saved['meta'].get('config', {}).get('fruit_damping', 0.),
+                             fruit_jitter_m=tuple(saved['meta'].get('config', {}).get('fruit_jitter_m', (0., 0., 0.))),
+                             fruit_reach_fraction=tuple(saved['meta'].get('config', {}).get('fruit_reach_fraction', (0., 0.))),
+                             fruit_sector_deg=saved['meta'].get('config', {}).get('fruit_sector_deg', 70.))
             gait = load_gait_artifact(a.gait_checkpoint).cuda().eval()
             rt.prepare_settled_reset(gait)
+            if sequence:
+                rt.freeze_legs = True
             from treesim.kiwi_rl.harvest_training import EpisodeProgress, signals
-            progress=EpisodeProgress(signals(rt), reward_profile=reward_profile, guidance=0.,
+            progress_type = EpisodeProgress
+            progress_kwargs = {}
+            if sequence:
+                from treesim.kiwi_rl.sequence_curriculum import SequenceProgress
+                progress_type = SequenceProgress
+                progress_kwargs['curriculum_stage'] = saved['meta']['render_objective']
+            progress=progress_type(signals(rt), reward_profile=reward_profile, guidance=0., **progress_kwargs,
                 stall_steps=round(saved['meta'].get('config',{}).get('stall_seconds',4.)/.02),
                 max_steps=round(saved['meta'].get('config',{}).get('max_episode_seconds',30.)/.02))
             memory = torch.zeros(1,64,device='cuda')
@@ -73,7 +91,7 @@ def main():
                         rgbd = rt.pixels()
                         states.append(rt.data.qpos.numpy()[0].copy())
                     obs = rt.observe()
-                    inputs = privileged_observation(rt) if a.role == 'teacher' else rgbd
+                    inputs = privileged_observation(rt, progress=progress) if a.role == 'teacher' else rgbd
                     mean, _, _, memory = policy(inputs, obs, memory)
                     rt.set_gait_actions(gait(obs))
                     _, _, done, info = rt.step(mean.tanh())
@@ -89,7 +107,10 @@ def main():
                             numerical=numerical,reward_profile=reward_profile,
                             arm_camera='same sensor pose and FOV; rendered at higher resolution than policy input',
                             arm_speed_rad_s=arm_speed,solver_iterations=solver_iterations)
-            if reward_profile in ('graph-harvest/v3','graph-harvest/v4','graph-harvest/v5'): metadata['success']=bool(progress.graph_success[0])
+            if reward_profile in ('graph-harvest/v3','graph-harvest/v4','graph-harvest/v5') or sequence: metadata['success']=bool(progress.graph_success[0])
+            if sequence:
+                metadata.update(prefix_success=bool(progress.prefix_success[0]),
+                    objective=progress.curriculum_stage, completed={k:bool(v[0]) for k,v in progress.graph_completed.items()})
             if graph_profile:
                 metadata.update(graph_score=float(progress.graph_score[0]),
                     graph_stage=int(progress.graph_stage[0]),ground_drop=bool(progress.graph_ground_drop[0]))

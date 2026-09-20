@@ -129,6 +129,24 @@ class FastTaskGpuTest(unittest.TestCase):
             np.testing.assert_array_equal(self.task.detached.numpy(), [0, 0])
             np.testing.assert_array_equal(self.data.eq_active.numpy(), [[True], [True]])
 
+    def test_grasp_at_detachment_is_latched_at_the_physics_event(self):
+        with self.wp.ScopedDevice('cuda:0'):
+            self._set_pad_contacts()
+            for _ in range(20): self.task.record()
+            self.task.grasp_time.assign(np.array([.12, 0.], np.float32))
+            kinds = np.ones((2, 256), np.int32); kinds[:, 1] = 0
+            self.data.efc.type.assign(kinds)
+            self.data.efc.id.assign(np.zeros((2, 256), np.int32))
+            self.data.nefc.assign(np.array([2, 2], np.int32))
+            forces = np.zeros((2, 256), np.float32)
+            forces[:, 0] = .3; forces[:, 1] = 9.
+            self.data.efc.force.assign(forces)
+            self.task.record()
+            np.testing.assert_array_equal(self.task.detached.numpy(), [1, 1])
+            np.testing.assert_array_equal(self.task.held_at_detach.numpy(), [1, 0])
+            self.task.reset(self.wp.array(np.array([1, 0], np.uint8), dtype=self.wp.uint8))
+            np.testing.assert_array_equal(self.task.held_at_detach.numpy(), [0, 0])
+
     def test_forced_release_and_masked_reset_are_world_local(self):
         with self.wp.ScopedDevice('cuda:0'):
             self._set_equality_forces([9., 1.])

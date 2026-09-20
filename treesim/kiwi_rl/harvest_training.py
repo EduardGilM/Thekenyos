@@ -3,6 +3,7 @@ import torch
 import warp as wp
 from treesim.basket import CENTER
 from .reward_graph import GRAPH_PROFILE, SOFT_GRAPH_PROFILE, CONTROL_GRAPH_PROFILE, PREREQUISITE_GRAPH_PROFILES, REGRESSION_WEIGHTS, CONTINUOUS_GRAPH_PROFILES, GRAPH_PROFILES, STAGE_NAMES, CollisionGeometry, graph_step
+from .reward_graph import SEQUENCE_PROFILE
 
 HARVEST_GAMMA = .999
 REWARD_PROFILE = 'potential-harvest/v1'
@@ -34,6 +35,11 @@ def signals(runtime):
             max_load=torch.stack([wp.to_torch(x) for x in (task.finger_load, task.jaw_load, task.palm_load)]).amax(0),
             damage=wp.to_torch(task.damage_proxy).clone(),
             ground_contact=wp.to_torch(task.ground_contact).bool().clone())
+        if runtime.task_profile == SEQUENCE_PROFILE:
+            arm_qids = torch.as_tensor(runtime.control.contract.qids[12:18], device=pos.device)
+            result.update(grasp_time=wp.to_torch(task.grasp_time).clone(),
+                          held_at_detach=wp.to_torch(task.held_at_detach).bool().clone(),
+                          arm_q=wp.to_torch(runtime.data.qpos)[:, arm_qids].clone())
     return result
 
 
@@ -305,7 +311,8 @@ class EpisodeProgress:
 class HarvestCollector:
     """Keep simulation state and GRU memory across optimizer batch boundaries."""
     def __init__(self, runtime, *, stall_seconds=4., max_episode_seconds=30., guidance=1.,
-                 role='student', teacher_policy=None, reward_profile=REWARD_PROFILE, curriculum_stage=0):
+                 role='student', teacher_policy=None, reward_profile=REWARD_PROFILE, curriculum_stage=0,
+                 rehearse=False):
         if role not in ('teacher', 'student'):
             raise ValueError("role must be 'teacher' or 'student'")
         if role == 'teacher' and teacher_policy is not None:
@@ -319,10 +326,15 @@ class HarvestCollector:
         self.teacher_memory = (torch.zeros_like(self.memory) if teacher_policy is not None else None)
         self.reset_mask = torch.ones(runtime.worlds,dtype=torch.bool,device=runtime.device_name)
         self.episode_ids = torch.zeros(runtime.worlds,dtype=torch.long,device=runtime.device_name)
-        self.progress = EpisodeProgress(signals(runtime),
+        progress_type = EpisodeProgress
+        if reward_profile == SEQUENCE_PROFILE:
+            from .sequence_curriculum import SequenceProgress
+            progress_type = SequenceProgress
+        self.progress = progress_type(signals(runtime),
             stall_steps=round(stall_seconds/runtime.control_dt),
             max_steps=round(max_episode_seconds/runtime.control_dt), guidance=guidance,
-            reward_profile=reward_profile, curriculum_stage=curriculum_stage, control_dt=runtime.control_dt)
+            reward_profile=reward_profile, curriculum_stage=curriculum_stage, control_dt=runtime.control_dt,
+            **({'rehearse': rehearse} if reward_profile == SEQUENCE_PROFILE else {}))
         self.tick = 0
         self.rgbd = None
         self.practice = None
@@ -343,7 +355,7 @@ class HarvestCollector:
             initial_memory = self.memory.clone()
             for _ in range(steps):
                 obs = rt.observe().clone()
-                privileged = privileged_observation(rt, obs) if self.role == 'teacher' or self.teacher_policy is not None else None
+                privileged = privileged_observation(rt, obs, progress=self.progress) if self.role == 'teacher' or self.teacher_policy is not None else None
                 if self.role == 'student' and (self.rgbd is None or self.tick % 2 == 0):
                     self.rgbd = rt.pixels().clone()
                 self.memory *= (~self.reset_mask)[:,None]
@@ -383,7 +395,7 @@ class HarvestCollector:
                 timeout_value = torch.zeros_like(value)
                 if bool(truncated.any()):
                     final_obs = rt.observe()
-                    final_input = (privileged_observation(rt,final_obs) if self.role == 'teacher'
+                    final_input = (privileged_observation(rt,final_obs,progress=self.progress) if self.role == 'teacher'
                                    else (rt.pixels() if (self.tick + 1) % 2 == 0 else self.rgbd))
                     _,_,timeout_value,_ = policy(final_input,final_obs,self.memory)
                 if store:
@@ -405,6 +417,12 @@ class HarvestCollector:
                         row['stage_losses'] = {k:v.clone() for k,v in self.progress.graph_loss_reward.items()}
                         row['stage_scores'] = {k:v.clone() for k,v in self.progress.graph_components.items()}
                         row['completion_reward'] = 20*(self.progress.graph_success if self.progress.reward_profile in PREREQUISITE_GRAPH_PROFILES else now['success']).float()
+                        if self.progress.reward_profile == SEQUENCE_PROFILE:
+                            row['completion_reward'] = sum(self.progress.milestone_reward.values())
+                            row['milestone_rewards'] = {k:v.clone() for k,v in self.progress.milestone_reward.items()}
+                            row['live_scores'] = {k:v.clone() for k,v in self.progress.live_components.items()}
+                            row['time_reward'] = self.progress.time_reward.clone()
+                            row['failure_reward'] = self.progress.failure_reward.clone()
                         row['joint_velocity'] = wp.to_torch(rt.data.qvel)[:, self.runtime.control.contract.dofs[12:]].clone()
                         row['target_error'] = (wp.to_torch(rt.control.targets)[:,12:] - wp.to_torch(rt.data.qpos)[:,rt.control.contract.qids[12:]]).clone()
                     rows.append(row)
@@ -414,9 +432,10 @@ class HarvestCollector:
                     # Summaries are episode outcomes; each world contributes once.
                     ids = ending.nonzero(as_tuple=False).flatten()
                     outcome_success = self.progress.graph_success if self.progress.reward_profile in PREREQUISITE_GRAPH_PROFILES else now['success']
+                    timeout = self.progress.timeout if self.progress.reward_profile == SEQUENCE_PROFILE else truncated
                     packed = torch.stack((ids, outcome_success[ids],
                         self.progress.ever_grasp[ids],self.progress.ever_detached[ids],self.progress.ever_held_detach[ids],
-                        (done & ~outcome_success)[ids],stalled[ids],truncated[ids],
+                        (done & ~outcome_success)[ids],stalled[ids],timeout[ids],
                         self.progress.age[ids]*rt.control_dt,self.progress.closest[ids]),dim=1).cpu().tolist()
                     for world,success,grasp,detached,held_detach,failure,stall,timeout,duration,closest in packed:
                         episodes.append(dict(world=int(world),practice=bool(self.practice_mask[int(world)]),success=bool(success),grasp=bool(grasp),
@@ -440,6 +459,15 @@ class HarvestCollector:
                                 invalid_extraction=bool(self.progress.graph_invalid_extract[world]),
                                 **{f'completed/{k}':bool(v[world]) for k,v in self.progress.graph_completed.items()},
                                 **{f'regression/{k}':int(v[world]) for k,v in self.progress.graph_regressions.items()})
+                    if self.progress.reward_profile == SEQUENCE_PROFILE:
+                        for entry, world in zip(episodes[-len(ids):], ids.tolist()):
+                            entry.update(success=bool(self.progress.graph_success[world]),
+                                prefix_success=bool(self.progress.prefix_success[world]),
+                                objective=int(self.progress.curriculum_stage_ids[world]),
+                                task_failure=bool(self.progress.failure[world]),
+                                invalid_extraction=bool(self.progress.graph_invalid_extract[world]),
+                                **{f'completed/{k}':bool(v[world]) for k,v in self.progress.graph_completed.items()},
+                                **{f'regression/{k}':int(v[world]) for k,v in self.progress.graph_regressions.items()})
                     rt.reset(ending)
                     self.episode_ids[ending] += 1
                     self.memory[ending] = 0
@@ -456,7 +484,7 @@ class HarvestCollector:
                 self.reset_mask = ending
                 self.tick += 1
             final_obs = rt.observe()
-            final_input = (privileged_observation(rt,final_obs) if self.role == 'teacher'
+            final_input = (privileged_observation(rt,final_obs,progress=self.progress) if self.role == 'teacher'
                            else (rt.pixels() if self.tick % 2 == 0 else self.rgbd))
             _,_,bootstrap,_ = policy(final_input,final_obs,self.memory)
         if cti_batch is not None:
@@ -481,7 +509,7 @@ def episode_metrics(episodes):
             'held_detach':sum(r.get('held_detach',False) for r in episodes)/len(episodes),
             **{k:sum(r[k] for r in episodes)/len(episodes) for k in keys},
             **{k:sum(r.get(k,0) for r in episodes)/len(episodes) for k in
-               ('task_failure','invalid_extraction',*[f'completed/{k}' for k in STAGE_NAMES], *[f'regression/{k}' for k in STAGE_NAMES],
+               ('prefix_success','objective','task_failure','invalid_extraction',*[f'completed/{k}' for k in STAGE_NAMES], *[f'regression/{k}' for k in STAGE_NAMES],
                 'graph_score','graph_stage','enclosure','secure_grip','slip_m_s','ground_drop','forward_transitions','backward_transitions',
                 *[f'reached/{k}' for k in STAGE_NAMES], *[f'time/{k}_seconds' for k in STAGE_NAMES]) if any(k in r for r in episodes)}}
 

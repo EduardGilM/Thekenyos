@@ -244,3 +244,36 @@ def load_fast_scene(directory):
     if not np.isfinite(data.qpos).all() or any(w.number for w in data.warning):
         raise RuntimeError('Invalid restored fast-scene state')
     return model, data, manifest
+
+
+def fixed_base_scene(directory):
+    """Anchor only the robot root at its authored home pose; keep arm physics."""
+    import mujoco
+    directory = Path(directory)
+    model, data, manifest = load_fast_scene(directory)
+    chassis = int(model.body(manifest['robot']['chassis']).id)
+    body = int(model.body_rootid[chassis])
+    joint = int(model.body_jntadr[body])
+    if model.body_jntnum[body] != 1 or model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_FREE:
+        raise ValueError('Expected one free robot root joint')
+    qid = int(model.jnt_qposadr[joint])
+    root = ET.fromstring((directory/'scene.xml').read_text())
+    element = next(b for b in root.iter('body') if b.get('name') == model.body(body).name)
+    root_joint = next(j for j in element if j.tag == 'freejoint' or
+                      (j.tag == 'joint' and j.get('type') == 'free'))
+    element.remove(root_joint)
+    element.set('pos', ' '.join(map(str, data.qpos[qid:qid+3])))
+    element.set('quat', ' '.join(map(str, data.qpos[qid+3:qid+7])))
+    home = next(k for k in root.iter('key') if k.get('name') == 'home')
+    home.set('qpos', ' '.join(map(str, np.delete(data.qpos, np.s_[qid:qid+7]))))
+    xml = ET.tostring(root, encoding='unicode')
+    fixed = mujoco.MjModel.from_xml_string(xml)
+    if fixed.nu != model.nu or fixed.nq != model.nq-7 or fixed.nv != model.nv-6:
+        raise RuntimeError('Fixed-base export changed more than the robot free joint')
+    fixed_chassis = int(fixed.body(manifest['robot']['chassis']).id)
+    if int(fixed.body_rootid[fixed_chassis]) != body:
+        raise RuntimeError('Fixed-base export changed robot contact ownership')
+    updated = dict(manifest, source_model_sha256=manifest['model_sha256'],
+        model_sha256=hashlib.sha256(xml.encode()).hexdigest(), fixed_base=True,
+        base_constraint='robot root fixed at authored home pose; no fruit/hand weld')
+    return xml, updated

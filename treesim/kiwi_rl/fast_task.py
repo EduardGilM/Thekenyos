@@ -112,7 +112,7 @@ def _record(
     stem_force: wp.array(dtype=float), damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
     success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), chassis: int, fruit_radius: wp.vec3,
     basket_center: wp.vec3, basket_size: wp.vec3, wall: float, fruit_root: int, chassis_root: int,
-    settle_seconds: float, ground_is_failure: int,
+    settle_seconds: float, ground_is_failure: int, held_at_detach: wp.array(dtype=wp.uint8),
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
@@ -148,6 +148,8 @@ def _record(
     stem_force[world] = stem
     if detached[world] == 0 and stem > DETACH_FORCE_N:
         detached[world] = wp.uint8(1)
+        held_at_detach[world] = wp.uint8(stable_grasp[world] != 0 and
+            maximum_load <= JAW_FORCE_LIMIT_N and damage_proxy[world] <= .05)
         if target_eq >= 0 and target_eq < eq_active.shape[1]:
             eq_active[world, target_eq] = False
 
@@ -193,7 +195,7 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
            damage_proxy: wp.array(dtype=float), settle_time: wp.array(dtype=float),
            stem_force: wp.array(dtype=float),
            success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8), eq_active: wp.array2d(dtype=wp.bool),
-           target_eq: int):
+           target_eq: int, held_at_detach: wp.array(dtype=wp.uint8)):
     world = wp.tid()
     if mask[world] != 0:
         detached[world] = wp.uint8(0)
@@ -203,6 +205,7 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
         bilateral_contact[world] = wp.uint8(0)
         stable_grasp[world] = wp.uint8(0)
         ever_grasped[world] = wp.uint8(0)
+        held_at_detach[world] = wp.uint8(0)
         grasp_time[world] = 0.
         stem_force[world] = 0.
         hand_load[world] = 0.
@@ -234,14 +237,15 @@ class FastHarvestTask:
         self.model, self.data, self.manifest = model, data, manifest
         self.worlds = int(data.qpos.shape[0])
         self.device = data.qpos.device
-        if len(fruits) != 1:
-            raise ValueError('FastHarvestTask currently supports exactly one target fruit')
+        # One TARGET fruit at a time; the target can be switched with retarget().
+        self.fruits = fruits
         self.chassis = int(model.body(manifest['robot']['chassis']).id)
         fruit = fruits[0]
         self.fruit_geom = wp.array([int(model.geom(fruit['geom']).id)], dtype=int, device=self.device)
         self.fruit_body = wp.array([int(model.body(fruit['body']).id)], dtype=int, device=self.device)
         self.equality_id = int(model.equality(fruit['equality']).id)
         self.equality_index = wp.array([self.equality_id], dtype=int, device=self.device)
+        self.target_index = 0
         groups = np.full(model.ngeom, -1, dtype=np.int32)
         for geom_id in range(model.ngeom):
             name = model.geom(geom_id).name or ''
@@ -273,6 +277,7 @@ class FastHarvestTask:
         self.bilateral_contact = wp.zeros_like(self.detached)
         self.stable_grasp = wp.zeros_like(self.detached)
         self.ever_grasped = wp.zeros_like(self.detached)
+        self.held_at_detach = wp.zeros_like(self.detached)
         self.grasp_time = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.stem_force = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.hand_load = wp.zeros(self.worlds, dtype=float, device=self.device)
@@ -295,6 +300,17 @@ class FastHarvestTask:
         except (ImportError, AttributeError):
             pass
 
+    def retarget(self, index):
+        """Point the evaluator at another fruit of the scene (arrays are read by the captured graph)."""
+        fruit = self.fruits[index]
+        self.fruit_geom.assign(np.array([int(self.model.geom(fruit['geom']).id)], dtype=np.int32))
+        self.fruit_body.assign(np.array([int(self.model.body(fruit['body']).id)], dtype=np.int32))
+        self.equality_id = int(self.model.equality(fruit['equality']).id)
+        self.equality_index.assign(np.array([self.equality_id], dtype=np.int32))
+        self.target_index = index
+        # Fresh per-target state: the new fruit has not been touched yet.
+        self.reset()
+
     def record(self):
         wp.launch(_clear_contacts, dim=self.worlds,
                   inputs=[self._hand_hits, self._basket_hits, self._ground_hits, self._finger_hits, self._jaw_hits,
@@ -314,7 +330,8 @@ class FastHarvestTask:
             self.success, self.failed, self.chassis, wp.vec3(*RADII_M), wp.vec3(*CENTER),
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.model.body(self.manifest['fruits'][0]['body']).id]),
-            int(self.model.body_rootid[self.chassis]), self.settle_seconds, int(self.ground_is_failure)], device=self.device)
+            int(self.model.body_rootid[self.chassis]), self.settle_seconds, int(self.ground_is_failure),
+            self.held_at_detach], device=self.device)
         return self.outputs()
 
     def reset(self, mask=None):
@@ -332,7 +349,7 @@ class FastHarvestTask:
                    self.ground_contact, self.bilateral_contact, self.stable_grasp, self.ever_grasped, self.grasp_time,
                    self.hand_load, self.finger_load, self.jaw_load, self.palm_load, self.damage_proxy,
                    self.settle_time, self.stem_force,
-                   self.success, self.failed, self.eq_active, self.equality_id], device=self.device)
+                   self.success, self.failed, self.eq_active, self.equality_id, self.held_at_detach], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,

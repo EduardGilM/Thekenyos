@@ -1430,3 +1430,68 @@ Use the graph command above with `--stall-seconds 8 --max-episode-seconds 30`
 and a new output directory. Validate with `scripts/check_graph_training.py`
 using FAST_SCENE and GAIT_CHECKPOINT, plus the documented graph and CTI tests.
 The dashboard now renders latest and best evaluations separately.
+
+### Progressive sequence curriculum (current run)
+
+`train_sequence_fast.py` starts a fresh privileged PPO policy with CTI disabled.
+Each episode starts from the ordinary settled pose, with small seeded arm-pose
+variation. The robot base is fixed at its authored home pose; legs hold their
+settled motor targets. Arm and fruit dynamics remain physical.
+There are no demonstrations, scripted harvesting actions, or stage-state resets.
+
+The objectives are: position the kiwi between the jaws; sustain bilateral loaded
+contact; detach while grasping; carry above the basket while holding; release and
+settle inside the basket for two seconds. A rollout must achieve every preceding
+checkpoint in order. Earlier events are remembered; grasp must remain valid during
+extraction and transport, and can end during a valid release. A drop elsewhere
+cannot become a successful harvest. Two fresh validation trials from the training distribution must each reach 90%
+prefix success in two consecutive evaluations before the next objective unlocks.
+Each trial uses 32 varied initial poses. A separate held-out scene measures
+generalization and does not control curriculum promotion.
+
+The old aperture-width closure score is replaced with distances between the
+actual convex jaw collision meshes and the fruit, computed by the pinned MJWarp
+GJK support maps. Sustained contact, slip, load, and the physical detachment event
+still decide validity. Sequence v2 pays one point immediately on each first valid
+unlocked checkpoint. These payments stay unchanged when the next objective unlocks.
+Dense feedback is the change in a separate live-quality balance capped at 0.25;
+grasp guidance retains insertion and opposing-jaw alignment. Failure clears that
+live balance and costs 0.25. The total time cost is at most 0.1 per episode.
+Stationary poses and repeated checkpoints pay nothing. Gamma is 1, and the finite
+30-second deadline is terminal without critic bootstrap. Safe quality remaining
+at the deadline is explicit partial credit, bounded by 0.25. Success clears live
+credit. This is curriculum guidance, not policy-invariant shaping or a guarantee
+that the policy cannot forget. Inactivity remains diagnostic.
+
+```bash
+python scripts/export_fixed_base_scene.py --scene /path/to/harvest-near-001 \
+  --output /path/to/sequence-near-001
+python scripts/export_fixed_base_scene.py --scene /path/to/fast-occlusion-001 \
+  --output /path/to/sequence-holdout-001
+python scripts/train_sequence_fast.py \
+  --scene /path/to/sequence-near-001 --eval-scene /path/to/sequence-holdout-001 \
+  --gait-checkpoint /path/to/g1-cpu.pt --output /path/to/teacher-sequence-002 \
+  --worlds 1024 --steps 128 --minibatch-worlds 128 --train-seconds 28800
+```
+
+Each 131,072-transition rollout receives up to 24 actual Adam steps across three
+shuffled recurrent minibatch epochs, subject to a 0.02 KL guard. Factual replay is
+verified before the first mutation. Observations include the current objective,
+checkpoint history and timers. Checkpoints save the curriculum, actor, critic,
+Adam, counters and RNG. `--resume-from` requires the latest logged checkpoint and,
+for online W&B, its `--wandb-run-id`; it keeps the original total time budget.
+After promotion, 20% of training worlds rehearse earlier objectives, each from
+the normal initial pose. Evaluation always tests the current objective alone.
+`current_objective/*` separates training outcomes from shorter rehearsal episodes.
+`stage_event/*` counts paid achievements per batch; `stage_live/*` shows current
+guidance. `stage_reward/*` includes event payments and live-quality changes.
+`stage_loss/*` measures negative guidance changes, not optimizer loss.
+
+W&B and the dashboard show `curriculum/level`, `evaluation/prefix_success`,
+`evaluation/completed/{position,grip,extract,carry,deposit}`, conditional completion,
+per-stage progress rewards, actual optimizer steps and joint motion. Prefix success
+is distinct from `evaluation/success`, which means a complete physical harvest.
+The renderer reads the saved objective and policy schema. Archived graph profiles
+retain their existing scorer and observation schema. The archived sequence-v1
+run uses its frozen `sequence-001` source release; v2 checkpoints use a new schema
+and cannot resume a v1 optimizer.

@@ -46,7 +46,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False):
 
 
 def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.99, check_replay=True,
-           teacher_coef=0., gae_lambda=.95, entropy_coef=0.):
+           teacher_coef=0., gae_lambda=.95, entropy_coef=0., minibatch_updates=False, target_kl=.03):
     import torch
     from treesim.kiwi_rl.ppo import compute_gae_torch, tanh_logprob
     if any(row.get('kind', 'factual_on_policy') != 'factual_on_policy' for row in rows):
@@ -82,9 +82,27 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
     explained_variance = (1 - (returns - values).var(unbiased=False) / return_variance
                           if float(return_variance) > 1e-12 else returns.new_zeros(()))
     metrics = []
+    optimizer_steps = 0
+    early_stop = False
+    order = torch.randperm(rewards.shape[1], device=rewards.device) if minibatch_updates else None
+    # Verify the entire factual batch before any mutation. After the first
+    # minibatch step, divergence is expected and is controlled by the KL guard.
+    if minibatch_updates and check_replay:
+        with torch.no_grad():
+            for start in range(0, rewards.shape[1], batch_size):
+                sl = slice(start, start + batch_size)
+                memory = rows[0].get('initial_memory', torch.zeros_like(rows[0]['r84'][:, :64]))[sl].detach()
+                for row in rows:
+                    memory = memory * (~row['reset'][sl])[:, None]
+                    mean, logstd, _, memory = policy(row[observation_key][sl], row['r84'][sl], memory)
+                    error = tanh_logprob(row['raw'][sl], mean, logstd) - row['logp'][sl]
+                    if not torch.isfinite(error).all() or float(error.abs().max()) > 2.e-4:
+                        raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
     optimizer.zero_grad(set_to_none=True)
     for start in range(0, rewards.shape[1], batch_size):
-        sl = slice(start, start + batch_size)
+        sl = order[start:start + batch_size] if minibatch_updates else slice(start, start + batch_size)
+        if minibatch_updates:
+            optimizer.zero_grad(set_to_none=True)
         memory = rows[0].get('initial_memory', torch.zeros_like(rows[0]['r84'][:, :64]))[sl].detach()
         logps, predictions, bounded_actions, entropies, action_stds = [], [], [], [], []
         for row in rows:
@@ -104,11 +122,14 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
         kl = ((ratio - 1.) - logratio).mean()
         if not torch.isfinite(kl):
             raise RuntimeError('Nonfinite PPO divergence')
-        if float(kl.detach()) > .03:
-            if check_replay:
+        if float(kl.detach()) > target_kl:
+            if check_replay and not minibatch_updates:
                 raise RuntimeError('Rollout/replay policy mismatch before optimizer step')
             optimizer.zero_grad(set_to_none=True)
-            return dict(kl=float(kl.detach()), early_stop=1)
+            if not minibatch_updates:
+                return dict(kl=float(kl.detach()), early_stop=1, optimizer_steps=0, optimized_transitions=0)
+            early_stop = True
+            break
         actor = -torch.minimum(ratio * advantages[:, sl], ratio.clamp(.8, 1.2) * advantages[:, sl]).mean()
         critic = .5 * (torch.stack(predictions) - returns[:, sl]).square().mean()
         entropy = torch.stack(entropies).mean() if entropies else rewards.new_zeros(())
@@ -123,22 +144,33 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, *, gamma=.9
             loss = loss + teacher_coef * distill
         # Accumulate across every world before stepping: a KL stop after the
         # first tiny minibatch would waste nearly all collected experience.
-        (loss * (rows[0]['reward'][sl].numel() / rewards.shape[1])).backward()
+        weight = 1. if minibatch_updates else rows[0]['reward'][sl].numel() / rewards.shape[1]
+        (loss * weight).backward()
+        if minibatch_updates:
+            grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
+            optimizer.step()
+            optimizer_steps += 1
         metrics.append((float(loss.detach()), float(kl.detach()), float(teacher_loss.detach()),
                         float(actor.detach()), float(critic.detach()), float(entropy.detach()),
                         torch.stack(action_stds).mean(dim=0), rewards[:, sl].numel()))
-    grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
-    optimizer.step()
+    if not metrics:
+        return dict(kl=float(kl.detach()), early_stop=1, optimizer_steps=0, optimized_transitions=0)
+    if not minibatch_updates:
+        grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), .5, error_if_nonfinite=True)
+        optimizer.step()
+        optimizer_steps = 1
+    used = sum(m[7] for m in metrics)
     return dict(loss=sum(m[0] for m in metrics)/len(metrics), kl=max(m[1] for m in metrics),
+                optimizer_steps=optimizer_steps, early_stop=int(early_stop),
                 teacher_mse=sum(m[2] for m in metrics)/len(metrics),
-                grad_norm=float(grad), minibatches=len(metrics), optimized_transitions=int(rewards.numel()),
+                grad_norm=float(grad), minibatches=len(metrics), optimized_transitions=used,
                 reward_mean=float(rewards.mean()), reward_std=float(rewards.std(unbiased=False)),
-                actor_loss=sum(m[3]*m[7] for m in metrics)/rewards.numel(),
-                critic_loss=sum(m[4]*m[7] for m in metrics)/rewards.numel(),
-                entropy=sum(m[5]*m[7] for m in metrics)/rewards.numel(),
+                actor_loss=sum(m[3]*m[7] for m in metrics)/used,
+                critic_loss=sum(m[4]*m[7] for m in metrics)/used,
+                entropy=sum(m[5]*m[7] for m in metrics)/used,
                 explained_variance=float(explained_variance), return_variance=float(return_variance),
                 gae_lambda=gae_lambda, entropy_coef=entropy_coef,
-                **{f'action_std/{i}': float(sum(m[6][i]*m[7] for m in metrics)/rewards.numel())
+                **{f'action_std/{i}': float(sum(m[6][i]*m[7] for m in metrics)/used)
                    for i in range(metrics[0][6].numel())})
 
 
