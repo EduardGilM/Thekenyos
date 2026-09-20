@@ -180,6 +180,15 @@ class TrainingMonitorTests(unittest.TestCase):
             'config': {'easy': True, 'easy_far_frac': 0.25, 'hold_close_frac': 0.9},
         })
         self.assertAlmostEqual(held['hold_close_frac'], 0.9)
+        ik = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'deposit_pixels'},
+            'config': {'easy': True, 'ik_demo': True, 'easy_far_frac': 1.0},
+        })
+        self.assertTrue(ik['ik_demo'])
+        self.assertTrue(ik['easy'])
+        self.assertEqual(ik['easy_far_frac'], 1.0)
+        self.assertFalse(ik['preview_hard'])
+        self.assertEqual(ik['reset_mode'], 1)
         from treesim.kiwi_rl.training_monitor import (
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
@@ -190,7 +199,11 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('apply_native_easy_hover', inspect.getsource(apply_native_easy_start))
         from treesim.kiwi_rl.training_monitor import apply_native_carry_start
         self.assertIn('random_carry_start_local_m', inspect.getsource(apply_native_carry_start))
+        self.assertIn('safe_hover_arm_q', inspect.getsource(apply_native_carry_start))
+        self.assertIn('pose_clears_crate', inspect.getsource(apply_native_carry_start))
+        self.assertIn('arm_basket_contact_pairs', inspect.getsource(apply_native_carry_start))
         self.assertIn('ik_demo', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('preview_hard', inspect.getsource(apply_native_skill_reset))
         self.assertIn('random_grasp_offset_local_m', inspect.getsource(apply_native_skill_reset))
         self.assertIn('tcp_world', inspect.getsource(apply_native_skill_reset))
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked as _rec
@@ -199,6 +212,9 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('release_over_opening', rec_src)
         self.assertIn('max_above_rim_m', rec_src)
         self.assertIn('tcp_xy', rec_src)
+        self.assertIn('IK_DEMO_PRESET', rec_src)
+        self.assertIn('fruit_inside_crate_local', rec_src)
+        self.assertIn('preview_hard', rec_src)
         self.assertIn('easy and reset_mode == 1', inspect.getsource(apply_native_skill_reset))
         self.assertIn('apply_native_easy_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('jaw_hold_q', inspect.getsource(apply_native_skill_reset))

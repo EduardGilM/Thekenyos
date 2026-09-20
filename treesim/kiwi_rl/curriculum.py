@@ -199,6 +199,8 @@ IK_DEMO_PRESET = {
     'waypoint_advance_rad': 0.08,
     'eval_every': 16,
     'checkpoint_every': 4,
+    # Fine-tune from a BC checkpoint: skip demos, keep the random-start catalog.
+    'rl_continue_updates': 16,
     'deposit_reward': 30.0,
     'fail_reward': -30.0,
     'ppo_clip': 0.2,

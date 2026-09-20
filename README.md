@@ -801,7 +801,12 @@ over the opening during settle.
 On a 32 GB card, 4096-world collect and
 a full-batch 2048-world BC backward both OOM; the recipe minibatches BC worlds
 (`bc_minibatch_worlds=64`) like PPO.
-Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or
+`--initialize-from` with `--ik-demo` skips BC (`demo_updates=0`) and runs 16
+PPO updates on the same random-start catalog, teacher off. Deposit success
+latches only while the fruit ellipsoid is inside the liner with basket contact;
+`inside_basket_worlds` is the independent AABB check. CPU progress clips start
+from an easy physics-safe pose seeded like the GPU catalog, not folded home,
+and report `fruit_inside_crate_*` in the sidecar. Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or
 field harvest; `training_ready` stays false. The arm must not clip through the
 crate: catalog poses with arm/basket contacts are discarded.
 

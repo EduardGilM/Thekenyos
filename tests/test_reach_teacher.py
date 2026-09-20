@@ -53,6 +53,23 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertAlmostEqual(float(target[2]), 3.0 + local_top + 0.12)
         self.assertGreater(float(target[2] - xpos[2]), local_top)
 
+    def test_fruit_inside_crate_rejects_wall_touch_and_rim(self):
+        from treesim.basket import CENTER, SIZE, WALL
+        from treesim.native_kiwi import RADII_M
+        from treesim.kiwi_rl.reach_teacher import fruit_inside_crate_local
+        settled = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [0.0, 0.0, WALL / 2.0 + RADII_M[2]], dtype=np.float64)
+        self.assertTrue(fruit_inside_crate_local(settled))
+        outside = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [SIZE[0] / 2.0 + RADII_M[0] + 0.02, 0.0, WALL / 2.0 + RADII_M[2]],
+            dtype=np.float64)
+        self.assertFalse(fruit_inside_crate_local(outside))
+        on_rim = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [0.0, 0.0, SIZE[2] + RADII_M[2]], dtype=np.float64)
+        self.assertFalse(fruit_inside_crate_local(on_rim))
+        with self.assertRaises(ValueError):
+            fruit_inside_crate_local([np.nan, 0.0, 0.0])
+
     def test_easy_start_is_outside_crate_and_recedes(self):
         from treesim.basket import CENTER, SIZE
         from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m, push_tcp_outside_basket

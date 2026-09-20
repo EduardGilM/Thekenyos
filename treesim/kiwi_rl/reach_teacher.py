@@ -998,6 +998,37 @@ def crate_interior_contains(local, *, rim_margin_m=0.0):
     return float(lo[2]) <= float(point[2]) < float(hi[2]) + margin
 
 
+def fruit_inside_crate_local(local, radii=None, *, tol_m=0.012):
+    """True when the fruit ellipsoid sits in the liner AABB, not on the rim.
+
+    Matches the GPU deposit kernel: COM plus radii must clear the inner
+    walls, sit on or above the floor, and stay below the open rim.
+    Touching the outer wall does not count. ``tol_m`` is the same 12 mm
+    coarse-solver penetration allowance as ``CONTAINMENT_TOL_M``.
+    """
+    from treesim.basket import CENTER, SIZE, WALL
+    from treesim.native_kiwi import RADII_M
+    point = np.asarray(local, dtype=np.float64).reshape(3)
+    extent = np.asarray(RADII_M if radii is None else radii, dtype=np.float64).reshape(3)
+    tol = float(tol_m)
+    if point.shape != (3,) or extent.shape != (3,):
+        raise ValueError('fruit local pose and radii must be 3-vectors')
+    if not np.isfinite(point).all() or not np.isfinite(extent).all() or not np.isfinite(tol):
+        raise ValueError('fruit-in-crate inputs must be finite')
+    if not 0.0 <= tol <= 0.05:
+        raise ValueError('containment tol must be in [0, 0.05] m')
+    if np.any(extent <= 0.0) or np.any(extent > 0.12):
+        raise ValueError('fruit radii must be positive and kiwi-sized')
+    center = np.asarray(CENTER, dtype=np.float64).reshape(3)
+    size = np.asarray(SIZE, dtype=np.float64).reshape(3)
+    wall = float(WALL)
+    return bool(
+        abs(float(point[0] - center[0])) + float(extent[0]) < float(size[0]) / 2.0 - wall + tol
+        and abs(float(point[1] - center[1])) + float(extent[1]) < float(size[1]) / 2.0 - wall + tol
+        and float(point[2]) - float(extent[2]) >= float(center[2]) + wall / 2.0 - tol
+        and float(point[2]) + float(extent[2]) < float(center[2]) + float(size[2]))
+
+
 def wrist_clears_crate(tcp_local, approach_local, *, tcp_to_wrist_m=0.195, rim_margin_m=0.12):
     """True if a tool-axis wrist estimate stays out of the liner.
 

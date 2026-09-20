@@ -129,12 +129,22 @@ class FastTrainerCLITest(unittest.TestCase):
         from train_fast import apply_ik_demo_cli
         demo = apply_ik_demo_cli(argparse.Namespace(
             ik_demo=True, teacher_mix=None, shaping_coef=None,
-            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1))
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from=None, demo_updates=None))
         self.assertTrue(demo.easy)
         self.assertEqual(demo.updates, 20)
+        self.assertEqual(demo.demo_updates, 16)
         self.assertEqual(demo.teacher_mix, 1.0)
         self.assertEqual(demo.shaping_coef, 15.0)
         self.assertEqual(demo.eval_every, 16)
+        continued = apply_ik_demo_cli(argparse.Namespace(
+            ik_demo=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/latest.pt', demo_updates=None))
+        self.assertEqual(continued.demo_updates, 0)
+        self.assertEqual(continued.updates, 16)
+        self.assertEqual(continued.teacher_mix, 0.0)
+        self.assertEqual(continued.eval_every, 8)
         skipped = apply_easy_cli(argparse.Namespace(
             ik_demo=True, easy=True, teacher_mix=1.0, shaping_coef=15.0, updates=20))
         self.assertEqual(skipped.updates, 20)
@@ -143,6 +153,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
         collect_src = inspect.getsource(train_fast.collect)
         self.assertIn("row['ground_contact']", collect_src)
+        self.assertIn("row['inside_basket']", collect_src)
         self.assertIn("row['fallen']", collect_src)
         self.assertIn("row['hand_load_N']", collect_src)
         run_src = inspect.getsource(train_fast.run)
@@ -217,7 +228,10 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
         self.assertIn('latest.pt', run_src)
-        self.assertIn('nonfinite_worlds', run_src)
+        self.assertIn('max(dim=0).values > 0).sum()', run_src)
+        self.assertIn('inside_basket_worlds', run_src)
+        self.assertIn('evaluation/inside_basket_worlds', inspect.getsource(train_fast.evaluate_mission))
+        self.assertIn('demo_updates', run_src)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_advantage_std_cap_keeps_jackpot_large(self):

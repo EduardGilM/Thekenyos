@@ -81,15 +81,25 @@ def apply_ik_demo_cli(args):
         return args
     args.easy = True
     preset = apply_ik_demo_preset({})
+    continuing = bool(getattr(args, 'initialize_from', None))
+    demo_updates = getattr(args, 'demo_updates', None)
+    if demo_updates is None:
+        demo_updates = 0 if continuing else int(preset['demo_updates'])
+    args.demo_updates = int(demo_updates)
     if getattr(args, 'teacher_mix', None) is None:
-        args.teacher_mix = float(preset['teacher_mix'])
+        args.teacher_mix = 0.0 if int(args.demo_updates) == 0 else float(preset['teacher_mix'])
     if getattr(args, 'shaping_coef', None) is None:
         args.shaping_coef = float(preset['shaping_coef'])
-    args.updates = int(preset['updates'])
+    if continuing and int(args.demo_updates) == 0:
+        args.updates = int(preset['rl_continue_updates'])
+        args.eval_every = min(int(preset['eval_every']), 8)
+        args.checkpoint_every = min(int(preset['checkpoint_every']), 4)
+    else:
+        args.updates = int(preset['updates'])
+        args.eval_every = int(preset['eval_every'])
+        args.checkpoint_every = int(preset['checkpoint_every'])
     args.entropy_coef = float(preset['entropy_coef'])
     args.ppo_epochs = int(preset['ppo_epochs'])
-    args.eval_every = int(preset['eval_every'])
-    args.checkpoint_every = int(preset['checkpoint_every'])
     return args
 
 
@@ -222,6 +232,10 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['hand_load_N'] = info['hand_load_N'].clone()
             if 'release_fired' in info:
                 row['release_fired'] = info['release_fired'].clone()
+            if 'inside_basket' in info:
+                row['inside_basket'] = info['inside_basket'].clone()
+            if 'basket_contact' in info:
+                row['basket_contact'] = info['basket_contact'].clone()
             if teacher_applied is not None:
                 row['teacher_applied'] = teacher_applied.clone()
             rows.append(row)
@@ -588,6 +602,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     final_distance = torch.zeros(worlds, device='cuda:0')
     final_basket = torch.zeros(worlds, device='cuda:0')
     success_any = torch.zeros(worlds, dtype=torch.bool, device='cuda:0')
+    inside_any = torch.zeros_like(success_any)
+    basket_contact_any = torch.zeros_like(success_any)
     grasp_any = torch.zeros_like(success_any)
     detach_any = torch.zeros_like(success_any)
     harvested_peak = torch.zeros(worlds, device='cuda:0')
@@ -620,6 +636,10 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
                 closest_basket = torch.minimum(closest_basket, info['basket_distance_m'])
                 final_basket = info['basket_distance_m'].clone()
             success_any |= info['success'].bool()
+            if 'inside_basket' in info:
+                inside_any |= info['inside_basket'].bool()
+            if 'basket_contact' in info:
+                basket_contact_any |= info['basket_contact'].bool()
             grasp_any |= info['grasped'].bool()
             detach_any |= info['detached'].bool()
             if 'harvested' in info:
@@ -647,6 +667,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/mean_closest_basket_distance_m': float(closest_basket.mean()),
         'evaluation/terminal_transitions': terminals,
         'evaluation/harvest_successes': int(success_any.sum()),
+        'evaluation/inside_basket_worlds': int(inside_any.sum()),
+        'evaluation/basket_contact_worlds': int(basket_contact_any.sum()),
         'evaluation/success_rate': float(success_any.float().mean()),
         'evaluation/detach_rate': float(detach_any.float().mean()),
         'evaluation/grasp_rate': float(grasp_any.float().mean()),
@@ -722,7 +744,7 @@ def run(args):
     ik_demo = bool(getattr(args, 'ik_demo', False))
     teacher_mix = float(getattr(args, 'teacher_mix', 0.0))
     shaping_coef = float(getattr(args, 'shaping_coef', EASY_PRESET['default_shaping_coef']))
-    demo_updates = int(IK_DEMO_PRESET['demo_updates']) if ik_demo else 0
+    demo_updates = int(getattr(args, 'demo_updates', 0) or 0) if ik_demo else 0
     knobs = IK_DEMO_PRESET if ik_demo else EASY_PRESET
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
@@ -924,7 +946,7 @@ def run(args):
                 distance_closest_m=float(torch.stack([r['distance'] for r in rows]).min()),
                 distance_mean_closest_m=float(torch.stack([r['distance'] for r in rows]).min(dim=0).values.mean()),
                 terminal_transitions=int(torch.stack([r['terminated'] for r in rows]).sum()),
-                harvest_successes=int(torch.stack([r['success'] for r in rows]).sum()),
+                harvest_successes=int((torch.stack([r['success'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvest_jackpot_sum=float(int(metrics['ppo_success_worlds']) * (
                     float(knobs['deposit_reward']) if easy else 20.0)),
                 demo_phase=int(demo_phase),
@@ -982,6 +1004,12 @@ def run(args):
             if 'release_fired' in rows[0]:
                 metrics['release_fired_worlds'] = int(
                     torch.stack([r['release_fired'] for r in rows]).any(dim=0).sum())
+            if 'inside_basket' in rows[0]:
+                metrics['inside_basket_worlds'] = int(
+                    (torch.stack([r['inside_basket'] for r in rows]).max(dim=0).values > 0).sum())
+            if 'basket_contact' in rows[0]:
+                metrics['basket_contact_worlds'] = int(
+                    (torch.stack([r['basket_contact'] for r in rows]).max(dim=0).values > 0).sum())
             if easy and teacher_anneal_after is None and int(metrics['harvest_successes']) >= 8:
                 teacher_anneal_after = iteration + 1
                 config['teacher_anneal_after'] = teacher_anneal_after
@@ -1099,6 +1127,8 @@ def main():
                    help='Kiwi starts in the jaws; scripted hold/open; RL deposits; not a weld')
     p.add_argument('--ik-demo', action='store_true',
                    help='Random easy/hard starts; IK demos to the basket centre; then short RL')
+    p.add_argument('--demo-updates', type=int, default=None,
+                   help='IK-demo behaviour-clone updates; 0 with --initialize-from is RL only')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
@@ -1127,6 +1157,8 @@ def main():
         p.error('Invalid PPO entropy, gamma or epochs')
     if not 0.0 <= a.teacher_mix <= 1.0:
         p.error('Invalid teacher-mix')
+    if getattr(a, 'demo_updates', None) is not None and not 0 <= int(a.demo_updates) <= 10000:
+        p.error('Invalid demo-updates')
     if not 0.0 <= a.shaping_coef <= 50.0:
         p.error('Invalid shaping-coef')
     run(a)

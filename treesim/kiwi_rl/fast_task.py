@@ -114,7 +114,7 @@ def _record(
     grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
     retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
     grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
-    goal: wp.array(dtype=int),
+    goal: wp.array(dtype=int), inside_basket: wp.array(dtype=wp.uint8),
 ):
     world = wp.tid()
     if success[world] != 0 or failed[world] != 0:
@@ -182,6 +182,10 @@ def _record(
     contained_contact = (
         detached[world] != 0 and hand_contact[world] == 0
         and inside and basket_contact[world] != 0)
+    inside_flag = wp.uint8(0)
+    if inside:
+        inside_flag = wp.uint8(1)
+    inside_basket[world] = inside_flag
     if contained_contact and relative_speed < SETTLE_SPEED_M_S:
         settle_time[world] += dt
     elif (detached[world] != 0 and hand_contact[world] == 0 and near_inside
@@ -197,7 +201,7 @@ def _record(
     if ground_contact[world] != 0 or fallen or jaw_overload or damage_proxy[world] > .05:
         failed[world] = wp.uint8(1)
     elif (settle_time[world] >= SETTLE_TIME_S - SETTLE_TIME_EPSILON_STEPS * dt
-          and detached[world] != 0 and hand_contact[world] == 0):
+          and contained_contact):
         if deposited[world, idx] == 0:
             deposited[world, idx] = wp.uint8(1)
             harvested[world] = harvested[world] + 1
@@ -260,13 +264,15 @@ def _reset(mask: wp.array(dtype=wp.uint8), detached: wp.array(dtype=wp.uint8), h
            deposit_paid: wp.array2d(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8), grasp_time: wp.array(dtype=float),
            retain_time: wp.array(dtype=float), retained_detach: wp.array(dtype=wp.uint8),
            grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
-           loss_paid: wp.array(dtype=wp.uint8), fail_paid: wp.array(dtype=wp.uint8)):
+           loss_paid: wp.array(dtype=wp.uint8), fail_paid: wp.array(dtype=wp.uint8),
+           inside_basket: wp.array(dtype=wp.uint8)):
     world = wp.tid()
     if mask[world] != 0:
         detached[world] = wp.uint8(0)
         hand_contact[world] = wp.uint8(0)
         basket_contact[world] = wp.uint8(0)
         ground_contact[world] = wp.uint8(0)
+        inside_basket[world] = wp.uint8(0)
         stem_force[world] = 0.
         hand_load[world] = 0.
         damage_proxy[world] = 0.
@@ -336,6 +342,7 @@ class FastHarvestTask:
         self.hand_contact = wp.zeros_like(self.detached)
         self.basket_contact = wp.zeros_like(self.detached)
         self.ground_contact = wp.zeros_like(self.detached)
+        self.inside_basket = wp.zeros_like(self.detached)
         self.stem_force = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.hand_load = wp.zeros(self.worlds, dtype=float, device=self.device)
         self.damage_proxy = wp.zeros(self.worlds, dtype=float, device=self.device)
@@ -390,7 +397,7 @@ class FastHarvestTask:
             wp.vec3(*SIZE), float(WALL),
             int(self.model.body_rootid[self.chassis]),
             self.grasped, self.grasp_time, self.retain_time, self.retained_detach,
-            self.grasp_paid, self.detach_paid, self.goal], device=self.device)
+            self.grasp_paid, self.detach_paid, self.goal, self.inside_basket], device=self.device)
         wp.launch(_apply_goal, dim=self.worlds, inputs=[
             self.goal, float(self.model.opt.timestep), self.detached, self.hand_contact, self.grasped,
             self.grasp_time, self.retain_time, self.retained_detach, self.success, self.failed],
@@ -413,12 +420,13 @@ class FastHarvestTask:
                    self.success, self.failed, self.eq_active, self.fruit_count, self.equality_index,
                    self.active_fruit, self.deposited, self.harvested, self.deposit_paid, self.grasped, self.grasp_time,
                    self.retain_time, self.retained_detach, self.grasp_paid, self.detach_paid,
-                   self.loss_paid, self.fail_paid], device=self.device)
+                   self.loss_paid, self.fail_paid, self.inside_basket], device=self.device)
 
     def outputs(self):
         return {'detached': self.detached, 'success': self.success, 'failed': self.failed,
                 'damage_proxy': self.damage_proxy, 'grasped': self.grasped,
                 'retained_detach': self.retained_detach, 'hand_contact': self.hand_contact,
-                'ground_contact': self.ground_contact, 'harvested': self.harvested,
+                'ground_contact': self.ground_contact, 'basket_contact': self.basket_contact,
+                'inside_basket': self.inside_basket, 'harvested': self.harvested,
                 'required_harvests': self.required_harvests, 'active_fruit': self.active_fruit,
                 'hand_load_N': self.hand_load}
