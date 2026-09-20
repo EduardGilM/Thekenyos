@@ -281,11 +281,14 @@ IK_HARVEST_PRESET = {
     'updates': 36,
     # Fine-tune from a harvest checkpoint: skip IK, keep hanging-fruit starts.
     # Harvest3 sat after slams (entropy 0.001); continue explores more.
+    # Harvest6/7 forgot the grasp (eval 62 → 20 → 0 %) with lr 5e-4, four
+    # epochs and unclipped positive advantages: KL sat at the 0.05 target
+    # every update. Keep the exploration bump but update conservatively.
     'rl_continue_updates': 48,
-    'rl_continue_entropy_coef': 0.008,
-    'rl_continue_ppo_epochs': 4,
-    'rl_continue_ppo_lr': 5e-4,
-    'rl_continue_ppo_unclip_positive': True,
+    'rl_continue_entropy_coef': 0.004,
+    'rl_continue_ppo_epochs': 2,
+    'rl_continue_ppo_lr': 3e-4,
+    'rl_continue_ppo_unclip_positive': False,
     'rl_continue_shaping_coef': 15.0,
     'rl_continue_carry_line_bonus': 12.0,
     # Harvest3/4 grasped (eval 49–87 %) but never deposited: the 0.32 pin

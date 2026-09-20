@@ -843,9 +843,10 @@ gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 `--easy` and does not weld the fruit. Behaviour-clone 10 updates on 512 worlds
 × 256 steps, then teacher-off PPO. `--initialize-from` with `--ik-harvest`
 skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates on the
-same hanging-fruit catalog, with higher entropy (0.008), learning rate
-`5e-4`, four PPO epochs and unclipped positive advantages so a held pick
-can move the actor. Harvest3/4 grasped (eval 49–87 %) but never deposited:
+same hanging-fruit catalog, with entropy 0.004 (harvest6/7 forgot the
+grasp, eval 62 → 20 → 0 %, at lr `5e-4`, four epochs and unclipped
+positive advantages with KL pinned at the 0.05 target; the continue now
+keeps lr `3e-4`, two clipped epochs). Harvest3/4 grasped (eval 49–87 %) but never deposited:
 the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
 no signal once held, and 180 s episodes let a frozen hold run ~35 updates.
 The continue therefore uses a **30 s training timeout** (eval keeps its own
