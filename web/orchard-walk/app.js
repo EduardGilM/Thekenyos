@@ -75,7 +75,7 @@ async function loadOrchard() {
   skirt.position.z = meta.terrain.min_z - 1.5 - .01;
   scene.add(skirt);
   // far ground beyond the block
-  const far = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: 0x6f8f3a, roughness: 1 }));
+  const far = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: 0x3f6a26, roughness: 1 }));
   far.position.z = meta.terrain.min_z - .02; scene.add(far);
 
   // wood: posts, wires, canes as merged cylinders
@@ -128,6 +128,37 @@ async function loadOrchard() {
     const v = .8 + .4 * Math.random(); colAttr[c][k * 3] = v * .95; colAttr[c][k * 3 + 1] = v; colAttr[c][k * 3 + 2] = v * .9;
   }
   leafMeshes.forEach((im, c) => { im.instanceColor = new THREE.InstancedBufferAttribute(colAttr[c], 3); im.instanceMatrix.needsUpdate = true; });
+
+  // Perimeter hedge: an opaque wall of foliage so the flat world has no visible edge.
+  {
+    const R = half + .9, HGT = 4.2, THK = .8;
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x2e6a1c, roughness: 1 });
+    const walls = [[R, 0, THK, 2 * R + THK], [-R, 0, THK, 2 * R + THK], [0, R, 2 * R + THK, THK], [0, -R, 2 * R + THK, THK]];
+    for (const [x, y, sx, sy] of walls) {
+      const w = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, HGT), wallMat);
+      w.position.set(x, y, HGT / 2 - .1); w.receiveShadow = true; scene.add(w);
+    }
+    const blade = leafMeshes[2].geometry;
+    const perWall = 4800, hedgeLeaves = new THREE.InstancedMesh(blade, leafMat, 4 * perWall);
+    hedgeLeaves.castShadow = true;
+    const cols = new Float32Array(4 * perWall * 3);
+    const e = new THREE.Euler(), s2 = new THREE.Vector3();
+    let k = 0;
+    for (let wi = 0; wi < 4; wi++) for (let i = 0; i < perWall; i++) {
+      const along = (Math.random() * 2 - 1) * R, hgt = Math.random() * HGT, depth = -THK / 2 - .12 - Math.random() * .3;
+      const scale = 1.4 + Math.random() * 1.2;
+      if (wi === 0) p.set(R + depth, along, hgt); else if (wi === 1) p.set(-R - depth, along, hgt);
+      else if (wi === 2) p.set(along, R + depth, hgt); else p.set(along, -R - depth, hgt);
+      // blade +Z faces roughly into the field, with plenty of scatter
+      const face = wi === 0 ? Math.PI : wi === 1 ? 0 : wi === 2 ? -Math.PI / 2 : Math.PI / 2;
+      e.set(Math.PI / 2 + (Math.random() - .5) * 1.4, (Math.random() - .5) * 1.2, face + (Math.random() - .5) * 1.6);
+      q.setFromEuler(e); s2.setScalar(scale);
+      mats.compose(p, q, s2); hedgeLeaves.setMatrixAt(k, mats);
+      const v = .55 + .5 * Math.random(); cols[k * 3] = v * .9; cols[k * 3 + 1] = v; cols[k * 3 + 2] = v * .85; k++;
+    }
+    hedgeLeaves.instanceColor = new THREE.InstancedBufferAttribute(cols, 3);
+    scene.add(hedgeLeaves);
+  }
 
   // canopy kiwis (visual) + stems
   const fr = f32(bin, meta.fruit.off, meta.fruit.n * 12);
