@@ -183,6 +183,7 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('set_carry_line_enabled(bool(saved_line))', inspect.getsource(train_fast.evaluate_mission))
         self.assertIn("row['carry_line_hits']", collect_src)
         self.assertIn('carry_line_hits', run_src)
+        self.assertIn('pick_reward', run_src)
         harvest = apply_ik_harvest_cli(argparse.Namespace(
             ik_harvest=True, teacher_mix=None, shaping_coef=None,
             entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,

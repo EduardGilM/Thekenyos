@@ -316,6 +316,9 @@ IK_HARVEST_PRESET = {
     'carry_line_points': 8,
     'carry_line_radius_m': 0.10,
     'carry_line_bonus': 8.0,
+    # One-shot held-pick jackpot during RL. Eval keeps guidance at 0.
+    # Not a slam-detach: the oracle still needs 0.12 s hand contact.
+    'pick_reward': 100.0,
     'eval_every': 8,
     'checkpoint_every': 4,
     'deposit_reward': 30.0,

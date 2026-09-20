@@ -297,6 +297,9 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('grasped[world] == 0', src)
         self.assertIn("knobs['carry_line_points']", src)
         self.assertIn('SIZE[2] + release_c', src)
+        self.assertIn('self._grasp_w', src)
+        self.assertIn('grasp_w[0]', src)
+        self.assertIn("knobs['pick_reward']", src)
         self.assertIn('retained_detach[world] != 0', src)
         self.assertIn('grasped[world] != 0', src)
         self.assertIn('close_radius', src)
@@ -519,6 +522,7 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(preset['carry_line_points'], 8)
         self.assertAlmostEqual(preset['carry_line_radius_m'], 0.10)
         self.assertAlmostEqual(preset['carry_line_bonus'], 8.0)
+        self.assertAlmostEqual(preset['pick_reward'], 100.0)
         self.assertNotIn('weld', IK_HARVEST_PRESET)
         self.assertEqual(preset['gate_success_rate'], 0.80)
         skills = sample_world_skills(stage_named('stationary_harvest'), 400, np.random.default_rng(0),

@@ -79,7 +79,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
                      fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
-                     w_grasp: float, w_detach: float, w_loss: float,
+                     grasp_w: wp.array(dtype=float), w_detach: float, w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float,
                      shape_hand_fruit: wp.array(dtype=int),
                      easy_released: wp.array(dtype=int)):
@@ -136,7 +136,10 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     shaping_ref[world] = potential_ref
     r = shaped
     if grasped[world] != 0 and grasp_paid[world] == 0:
-        r = r + w_grasp
+        # Optional pick jackpot. Eval keeps guidance at 0 so this stays off
+        # the score. A slam-detach without the 0.12 s hold does not pay.
+        if guidance[world] > 0.0:
+            r = r + grasp_w[0]
         grasp_paid[world] = wp.uint8(1)
     if retained_detach[world] != 0 and detach_paid[world] == 0:
         r = r + w_detach
@@ -1027,6 +1030,7 @@ class FastRuntime:
             self._shaping_length = wp.full(worlds, float(EASY_PRESET['default_shaping_length_m']),
                                            dtype=float, device=self.device)
             self._deposit_w = wp.full(worlds, float(W_DEPOSIT), dtype=float, device=self.device)
+            self._grasp_w = wp.full(1, float(W_GRASP_STABLE), dtype=float, device=self.device)
             self._fail_w = wp.zeros(worlds, dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
@@ -1241,7 +1245,7 @@ class FastRuntime:
                           self._hover_offset, self._release_offset, self._open_half_xy,
                           self.control_dt,
                           self._gamma_step, self._deposit_w, self._fail_w, self.task.fail_paid,
-                          W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
+                          self._grasp_w, W_DETACH_HELD, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
                           self._shape_hand_fruit, self._easy_released], device=self.device)
         wp.launch(_pay_carry_line, dim=self.worlds,
@@ -2175,6 +2179,10 @@ class FastRuntime:
         self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
         self._deposit_w.assign(np.full(self.worlds, float(knobs['deposit_reward']), dtype=np.float32))
         self._fail_w.assign(np.full(self.worlds, float(knobs['fail_reward']), dtype=np.float32))
+        pick = float(knobs['pick_reward'])
+        if not np.isfinite(pick) or not 0.0 <= pick <= 200.0:
+            raise ValueError('pick_reward must be finite in [0, 200]')
+        self._grasp_w.assign(np.array([pick], dtype=np.float32))
         line = self._configure_carry_line(
             knobs['carry_line_points'], knobs['carry_line_radius_m'],
             knobs['carry_line_bonus'])
@@ -2217,6 +2225,7 @@ class FastRuntime:
             'shaping_length_m': length,
             'deposit_reward': float(knobs['deposit_reward']),
             'fail_reward': float(knobs['fail_reward']),
+            'pick_reward': pick,
             'hold_close_frac': close,
             'scripted_jaw': bool(self._ik_harvest),
             'weld': False,

@@ -975,6 +975,7 @@ def run(args):
             config['catalog_fruit_source'] = harvest_info.get('catalog_fruit_source')
             config['catalog_fruit_world_m'] = harvest_info.get('catalog_fruit_world_m')
             config['jaw_close_radius_m'] = float(IK_HARVEST_PRESET['jaw_close_radius_m'])
+            config['pick_reward'] = harvest_info.get('pick_reward')
             config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])
@@ -1129,6 +1130,7 @@ def run(args):
                 grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
+                pick_reward=float(knobs.get('pick_reward', 0.5)) if (ik_harvest or ik_grasp or easy) else 0.5,
                 carry_line_hits=int(torch.stack([r['carry_line_hits'] for r in rows]).sum())
                 if 'carry_line_hits' in rows[0] else 0,
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
