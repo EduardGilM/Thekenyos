@@ -341,9 +341,16 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertFalse(wrist_clears_crate(release, np.array([-1.0, 0.0, 0.0])))
         self.assertTrue(wrist_clears_crate(release, downward_approach_local()))
         tcp = np.array([0.18, 0.0, 0.0], dtype=np.float64)
-        pockets = [random_grasp_offset_local_m(tcp, rng) for _ in range(12)]
-        offsets = [float(np.linalg.norm(p - tcp)) for p in pockets]
-        self.assertGreater(max(offsets) - min(offsets), 0.005)
+        pockets = [random_grasp_offset_local_m(tcp, rng) for _ in range(48)]
+        deltas = np.stack([p - tcp for p in pockets])
+        offsets = np.linalg.norm(deltas, axis=1)
+        axis = tcp / float(np.linalg.norm(tcp))
+        axial = deltas @ axis
+        lateral = np.linalg.norm(deltas - axial.reshape(-1, 1) * axis, axis=1)
+        self.assertGreater(float(np.ptp(offsets)), 0.02)
+        self.assertGreater(float(np.std(axial)), 0.008)
+        self.assertGreater(float(np.std(lateral)), 0.003)
+        self.assertGreater(len({tuple(np.round(p, 6)) for p in pockets}), 30)
         for pocket in pockets:
             self.assertTrue(grasp_local_near_tcp(pocket, tcp))
         with self.assertRaises(ValueError):

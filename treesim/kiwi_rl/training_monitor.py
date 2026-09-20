@@ -43,6 +43,7 @@ PRIORITY_CHARTS = (
     'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max',
     'easy_hover_start_worlds', 'easy_outside_start_worlds', 'easy_hold_close_mean',
     'carry_easy_start_worlds', 'carry_hard_start_worlds', 'bc_loss', 'demo_phase',
+    'grasp_offset_mean_m', 'grasp_offset_std_m', 'grasp_offset_max_m',
     'teacher_anneal_after',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
@@ -247,6 +248,7 @@ const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_d
   "success_window_return_mean", "deposit_return_sum", "fail_return_sum", "harvest_jackpot_sum", "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_xy_mean_m", "easy_far_frac", "teacher_mix",
   "bc_loss", "carry_hard_start_worlds", "demo_phase",
+  "grasp_offset_mean_m", "grasp_offset_std_m",
   "evaluation/mean_closest_basket_distance_m",
   "ground_contact_worlds", "nonfinite_worlds", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
@@ -256,6 +258,7 @@ const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian"
   "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
   "easy_far_frac", "easy_start_index_mean", "easy_start_index_max", "teacher_mix",
   "easy_hold_close_mean", "hand_load_mean_N", "hand_load_max_N",
+  "grasp_offset_mean_m", "grasp_offset_std_m", "grasp_offset_max_m",
   "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
   "ground_contact_worlds", "fallen_worlds", "failed_worlds", "hand_load_max_N",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
@@ -908,7 +911,11 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
                 origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
                 rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
                 tcp_local = grasp_local_fallback_m(model, tcp_site)
-                local = random_grasp_offset_local_m(tcp_local, np.random.default_rng(11))
+                tcp_world = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+                quant = np.round(tcp_world * 1000.0).astype(np.int64)
+                seed = 11 + int(far_frac >= 0.5) * 1009 + int(
+                    quant[0] * 17 + quant[1] * 31 + quant[2] * 47)
+                local = random_grasp_offset_local_m(tcp_local, np.random.default_rng(int(seed)))
                 data.qpos[qposadr:qposadr + 3] = origin + rot @ local
             else:
                 pocket = grasp_pocket_world_m(model, data, tcp_site)

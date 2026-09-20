@@ -799,7 +799,11 @@ class FastRuntime:
             self._tcp_body = int(self.model.site_bodyid[self.tcp_site])
             self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
             self._grasp_local_host = np.zeros(3, dtype=np.float64)
+            self._tcp_local_host = np.zeros(3, dtype=np.float64)
             self._grasp_locals = wp.zeros(worlds, dtype=wp.vec3, device=self.device)
+            self._grasp_offset_mean_m = 0.0
+            self._grasp_offset_std_m = 0.0
+            self._grasp_offset_max_m = 0.0
             self._use_pocket = 0
             self._ik_demo = False
             self._n_waypoints = 1
@@ -1198,15 +1202,21 @@ class FastRuntime:
                 hit = np.asarray(mask, dtype=bool).reshape(-1)
         if hit.size != self.worlds:
             raise ValueError('grasp mask must have one flag per world')
-        rng = getattr(self, '_carry_rng', np.random.default_rng())
-        tcp = np.asarray(self._grasp_local_host, dtype=np.float64).reshape(3)
+        rng = getattr(self, '_carry_rng', np.random.default_rng(7))
+        tcp = np.asarray(getattr(self, '_tcp_local_host', self._grasp_local_host),
+                         dtype=np.float64).reshape(3)
+        if not np.isfinite(tcp).all() or float(np.linalg.norm(tcp)) < 1e-9:
+            tcp = np.asarray(self._grasp_local_host, dtype=np.float64).reshape(3)
         inset = float(IK_DEMO_PRESET['grasp_inset_span_m'])
         lateral = float(IK_DEMO_PRESET['grasp_lateral_span_m'])
         for index in np.nonzero(hit)[0]:
             host[int(index)] = random_grasp_offset_local_m(
                 tcp, rng, inset_span_m=inset, lateral_span_m=lateral)
         self._grasp_locals.assign(np.ascontiguousarray(host, dtype=np.float32))
-        self._grasp_offset_mean_m = float(np.mean(np.linalg.norm(host - tcp, axis=1)))
+        deltas = np.linalg.norm(host - tcp.reshape(1, 3), axis=1)
+        self._grasp_offset_mean_m = float(np.mean(deltas))
+        self._grasp_offset_std_m = float(np.std(deltas))
+        self._grasp_offset_max_m = float(np.max(deltas)) if deltas.size else 0.0
 
     def _build_carry_catalog(self, initial_qpos):
         """CPU IK catalog: easy/hard starts and a liner-free path to centre."""
@@ -1374,42 +1384,43 @@ class FastRuntime:
         """
         self._easy = bool(enabled)
         self._ik_demo = bool(enabled) and bool(ik_demo)
+        knobs = IK_DEMO_PRESET if self._ik_demo else EASY_PRESET
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
-        shape_both = bool(self._easy and EASY_PRESET.get('shape_hand_and_fruit'))
-        release_center = bool(self._easy and EASY_PRESET.get('release_at_center'))
-        release_opening = bool(self._easy and EASY_PRESET.get('release_over_opening'))
+        shape_both = bool(self._easy and knobs.get('shape_hand_and_fruit'))
+        release_center = bool(self._easy and knobs.get('release_at_center'))
+        release_opening = bool(self._easy and knobs.get('release_over_opening'))
         self._shape_hand_fruit.assign(np.array([1 if shape_both else 0], dtype=np.int32))
         self._release_at_center.assign(np.array([1 if release_center else 0], dtype=np.int32))
         self._release_over_opening.assign(np.array([1 if release_opening else 0], dtype=np.int32))
         if shaping_coef is None:
-            coef = EASY_PRESET['shaping_coef'] if self._easy else EASY_PRESET['default_shaping_coef']
+            coef = knobs['shaping_coef'] if self._easy else knobs['default_shaping_coef']
         else:
             coef = float(shaping_coef)
         if not np.isfinite(coef) or coef < 0 or coef > 50:
             raise ValueError('shaping_coef must be finite in [0, 50]')
         if open_xy_m is None:
-            self._open_xy_m = float(EASY_PRESET['open_xy_m'])
+            self._open_xy_m = float(knobs['open_xy_m'])
         else:
             self._open_xy_m = float(open_xy_m)
         if not np.isfinite(self._open_xy_m) or not 0 < self._open_xy_m <= 0.5:
             raise ValueError('open_xy_m must be finite in (0, 0.5] m')
         self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
         if self._easy:
-            length = float(EASY_PRESET['shaping_length_m'])
+            length = float(knobs['shaping_length_m'])
         else:
-            length = float(EASY_PRESET['default_shaping_length_m'])
+            length = float(knobs['default_shaping_length_m'])
         if not np.isfinite(length) or not 0.05 <= length <= 2.0:
             raise ValueError('shaping_length_m must be finite in [0.05, 2.0] m')
         self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
         if self._easy:
-            deposit = float(EASY_PRESET['deposit_reward'])
+            deposit = float(knobs['deposit_reward'])
         else:
             deposit = float(W_DEPOSIT)
         if not np.isfinite(deposit) or not 1.0 <= deposit <= 10000.0:
             raise ValueError('deposit_reward must be finite in [1, 10000]')
         self._deposit_w.assign(np.full(self.worlds, deposit, dtype=np.float32))
         if self._easy:
-            fail = float(EASY_PRESET['fail_reward'])
+            fail = float(knobs['fail_reward'])
         else:
             fail = 0.0
         if not np.isfinite(fail) or not -10000.0 <= fail <= 0.0:
@@ -1426,13 +1437,17 @@ class FastRuntime:
             self._use_pocket = 1
             from .reach_teacher import grasp_local_fallback_m, grasp_local_near_tcp
             tcp_local = np.asarray(grasp_local_fallback_m(self.model, self.tcp_site), dtype=np.float64)
-            local = self._hold_sweep.get('grasp_local_m') if self._hold_sweep is not None else None
-            if local is None:
+            self._tcp_local_host = tcp_local.copy()
+            if self._ik_demo:
                 local = tcp_local
             else:
-                local = np.asarray(local, dtype=np.float64).reshape(3)
-            if not grasp_local_near_tcp(local, tcp_local):
-                local = tcp_local
+                local = self._hold_sweep.get('grasp_local_m') if self._hold_sweep is not None else None
+                if local is None:
+                    local = tcp_local
+                else:
+                    local = np.asarray(local, dtype=np.float64).reshape(3)
+                if not grasp_local_near_tcp(local, tcp_local):
+                    local = tcp_local
             self._grasp_local_host = np.asarray(local, dtype=np.float64).reshape(3)
             self._grasp_local = wp.vec3(float(self._grasp_local_host[0]),
                                        float(self._grasp_local_host[1]),
@@ -1442,6 +1457,7 @@ class FastRuntime:
         else:
             self._use_pocket = 0
             self._grasp_local_host = np.zeros(3, dtype=np.float64)
+            self._tcp_local_host = np.zeros(3, dtype=np.float64)
             self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
             self._grasp_locals.assign(np.zeros((self.worlds, 3), dtype=np.float32))
         carry_info = {}
@@ -1484,13 +1500,13 @@ class FastRuntime:
             'shape_hand_and_fruit': shape_both,
             'release_at_center': release_center,
             'release_over_opening': release_opening,
-            'release_opening_inset_m': float(EASY_PRESET['release_opening_inset_m']),
+            'release_opening_inset_m': float(knobs['release_opening_inset_m']),
             'release_max_above_rim_m': float(self._open_max_above_rim_m),
-            'far_horizon_updates': int(EASY_PRESET['far_horizon_updates']),
-            'far_frac_cap': float(EASY_PRESET['far_frac_cap']),
-            'hover_clearance_m': float(EASY_PRESET['hover_clearance_m']),
-            'release_target_clearance_m': float(EASY_PRESET['release_target_clearance_m']),
-            'release_target_inset_x_m': float(EASY_PRESET['release_target_inset_x_m']),
+            'far_horizon_updates': int(knobs.get('far_horizon_updates', EASY_PRESET['far_horizon_updates'])),
+            'far_frac_cap': float(knobs.get('far_frac_cap', EASY_PRESET['far_frac_cap'])),
+            'hover_clearance_m': float(knobs['hover_clearance_m']),
+            'release_target_clearance_m': float(knobs['release_target_clearance_m']),
+            'release_target_inset_x_m': float(knobs['release_target_inset_x_m']),
             'shape_to_hover': shape_both,
             'weld': False,
             'ik_demo': bool(self._ik_demo),

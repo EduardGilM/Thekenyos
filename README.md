@@ -787,11 +787,13 @@ python scripts/train_fast.py --scene /path/to/fast-scene \
 ```
 
 `--ik-demo` is a separate deposit recipe: the arm starts at a mix of **easy and
-hard** physics-safe poses, the kiwi COM is sampled inside the pad pocket, and a
-privileged IK teacher follows a lift / high-slide / centre-drop path that is
-rejected if any waypoint touches the crate liner. Those rollouts behaviour-clone
-the compact actor for 16 updates (~4 M transitions at 4096 worlds × 64 steps),
-then four PPO updates run with the teacher off on the same random starts.
+hard** physics-safe poses, and each reset samples the kiwi COM across the
+physically allowed pad pocket (mouth-axis inset plus a pad-plane disk; not a
+single TCP spawn). A privileged IK teacher follows a lift / high-slide /
+centre-drop path that is rejected if any waypoint touches the crate liner.
+Those rollouts behaviour-clone the compact actor for 16 updates (~4 M
+transitions at 4096 worlds × 64 steps), then four PPO updates run with the
+teacher off on the same random starts.
 Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or
 field harvest; `training_ready` stays false. The arm must not clip through the
 crate: catalog poses with arm/basket contacts are discarded.

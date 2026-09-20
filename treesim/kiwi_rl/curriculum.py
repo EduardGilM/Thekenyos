@@ -188,8 +188,10 @@ IK_DEMO_PRESET = {
     'hard_x_span_m': 0.28,
     'hard_y_span_m': 0.18,
     'hard_z_span_m': 0.16,
-    'grasp_inset_span_m': 0.035,
-    'grasp_lateral_span_m': 0.012,
+    # Full pad-pocket COM: axial inset up to the 5 cm knuckle cap, plus a
+    # pad-plane disk that still sits between the teeth (not a single TCP spawn).
+    'grasp_inset_span_m': 0.05,
+    'grasp_lateral_span_m': 0.018,
     'ik_accept_err_m': 0.025,
     'waypoint_advance_rad': 0.08,
     'eval_every': 16,

@@ -894,6 +894,8 @@ def run(args):
                 carry_easy_start_worlds=int(start_info.get('carry_easy_start_worlds', 0)),
                 carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
                 grasp_offset_mean_m=float(getattr(runtime, '_grasp_offset_mean_m', 0.0)),
+                grasp_offset_std_m=float(getattr(runtime, '_grasp_offset_std_m', 0.0)),
+                grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),

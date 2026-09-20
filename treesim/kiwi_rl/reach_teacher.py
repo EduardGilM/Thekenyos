@@ -1126,12 +1126,13 @@ def random_carry_start_local_m(rng, *, hard=False, margin_m=None, clearance_m=No
     return local
 
 
-def random_grasp_offset_local_m(tcp_local, rng, *, inset_span_m=0.035, lateral_span_m=0.012,
+def random_grasp_offset_local_m(tcp_local, rng, *, inset_span_m=0.05, lateral_span_m=0.018,
                                 max_offset_m=0.08):
-    """Random free-fruit COM in the pad pocket, TCP-body frame.
+    """Random free-fruit COM in the physically allowed pad pocket.
 
-    Samples along the mouth axis and a small pad-plane disk. Rejects knuckle
-    and past-the-teeth poses. Fruit stays a free body; this is not a weld.
+    Samples the full mouth-axis inset and a uniform-area disk in the pad
+    plane. Rejects knuckle and past-the-teeth poses. Fruit stays a free
+    body; this is not a weld or a single TCP spawn.
     """
     if rng is None or not hasattr(rng, 'uniform'):
         raise TypeError('rng must be a NumPy Generator')
@@ -1147,18 +1148,27 @@ def random_grasp_offset_local_m(tcp_local, rng, *, inset_span_m=0.035, lateral_s
         raise ValueError('grasp inset/lateral spans are outside the pad pocket')
     if not 0.02 <= max_off <= 0.12:
         raise ValueError('max_offset_m must be finite in [0.02, 0.12] m')
-    inset = float(rng.uniform(0.0, inset_span))
-    pocket = axial_mouth_local(tcp, inset_m=inset, max_inset_m=max(inset_span, 0.05))
-    axis = tcp / float(np.linalg.norm(tcp))
+    n = float(np.linalg.norm(tcp))
+    if n < 1e-9:
+        raise ValueError('TCP local frame must be nonzero')
+    axis = tcp / n
     helper = np.array([0.0, 1.0, 0.0], dtype=np.float64)
     if abs(float(np.dot(axis, helper))) > 0.9:
         helper = np.array([1.0, 0.0, 0.0], dtype=np.float64)
     u = np.cross(axis, helper)
     u = u / float(np.linalg.norm(u))
     v = np.cross(axis, u)
-    pocket = pocket + u * float(rng.uniform(-lateral, lateral)) + v * float(rng.uniform(-lateral, lateral))
-    if not grasp_local_near_tcp(pocket, tcp, max_offset_m=max_off):
-        pocket = axial_mouth_local(tcp, inset_m=inset, max_inset_m=max(inset_span, 0.05))
+    max_in = max(inset_span, 0.05)
+    for _ in range(8):
+        inset = float(rng.uniform(0.0, inset_span))
+        pocket = axial_mouth_local(tcp, inset_m=inset, max_inset_m=max_in)
+        radius = lateral * float(np.sqrt(rng.uniform(0.0, 1.0)))
+        angle = float(rng.uniform(0.0, 2.0 * np.pi))
+        pocket = pocket + u * (radius * float(np.cos(angle))) + v * (radius * float(np.sin(angle)))
+        if grasp_local_near_tcp(pocket, tcp, max_offset_m=max_off):
+            return pocket.astype(np.float64)
+    pocket = axial_mouth_local(
+        tcp, inset_m=float(rng.uniform(0.0, inset_span)), max_inset_m=max_in)
     if not grasp_local_near_tcp(pocket, tcp, max_offset_m=max_off):
         raise ValueError('randomized grasp offset left the pad pocket')
     return pocket.astype(np.float64)

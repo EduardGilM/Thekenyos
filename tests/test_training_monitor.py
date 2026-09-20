@@ -192,6 +192,7 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('random_carry_start_local_m', inspect.getsource(apply_native_carry_start))
         self.assertIn('ik_demo', inspect.getsource(apply_native_skill_reset))
         self.assertIn('random_grasp_offset_local_m', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('tcp_world', inspect.getsource(apply_native_skill_reset))
         from treesim.kiwi_rl.training_monitor import _record_progress_video_locked as _rec
         rec_src = inspect.getsource(_rec)
         self.assertIn('release_at_center', rec_src)
