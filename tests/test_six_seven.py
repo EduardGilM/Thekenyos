@@ -40,6 +40,8 @@ class SixSevenTest(unittest.TestCase):
         self.assertGreater(reared['joints']['fl_hy'], stand['joints']['fl_hy'])
         self.assertGreater(reared['joints']['fl_hx'], stand['joints']['fl_hx'])
         self.assertLess(reared['joints']['fr_hx'], stand['joints']['fr_hx'])
+        # Front knees fold so the paws sit at shoulder height, not on the floor.
+        self.assertLess(reared['joints']['fl_kn'], stand['joints']['fl_kn'] - 0.8)
         six = pose_at(3.3, HOME)
         seven = pose_at(3.3 + 0.5 / DANCE_HZ, HOME)
         self.assertEqual(six['caption'], 'SIX')

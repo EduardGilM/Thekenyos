@@ -76,16 +76,16 @@ def rear_joints(home: dict[str, float]) -> dict[str, float]:
     pose.update({
         'hl_hx': 0.20,
         'hr_hx': -0.20,
-        'hl_hy': 0.85,
-        'hr_hy': 0.85,
-        'hl_kn': -1.35,
-        'hr_kn': -1.35,
-        'fl_hx': 0.55,
-        'fr_hx': -0.55,
-        'fl_hy': 1.55,
-        'fr_hy': 1.55,
-        'fl_kn': -1.55,
-        'fr_kn': -1.55,
+        'hl_hy': 0.70,
+        'hr_hy': 0.70,
+        'hl_kn': -1.15,
+        'hr_kn': -1.15,
+        'fl_hx': 0.62,
+        'fr_hx': -0.62,
+        'fl_hy': 0.90,
+        'fr_hy': 0.90,
+        'fl_kn': -2.20,
+        'fr_kn': -2.20,
         'arm_sh0': 0.45,
         'arm_sh1': -0.35,
         'arm_el0': 1.15,
@@ -102,14 +102,13 @@ def dance_joints(home: dict[str, float], phase_rad: float) -> dict[str, float]:
     base = rear_joints(home)
     six = math.sin(phase_rad)
     seven = math.sin(phase_rad + math.pi)
-    bounce = 0.40 * six
     pose = dict(base)
-    pose['fl_hy'] = base['fl_hy'] + bounce
-    pose['fr_hy'] = base['fr_hy'] + bounce
-    pose['fl_hx'] = base['fl_hx'] + 0.10 * seven
-    pose['fr_hx'] = base['fr_hx'] - 0.10 * six
-    pose['fl_kn'] = base['fl_kn'] - 0.22 * six
-    pose['fr_kn'] = base['fr_kn'] - 0.22 * six
+    pose['fl_hy'] = base['fl_hy'] + 0.28 * six
+    pose['fr_hy'] = base['fr_hy'] + 0.28 * seven
+    pose['fl_hx'] = base['fl_hx'] + 0.08 * seven
+    pose['fr_hx'] = base['fr_hx'] - 0.08 * six
+    pose['fl_kn'] = base['fl_kn'] + 0.18 * six
+    pose['fr_kn'] = base['fr_kn'] + 0.18 * seven
     pose['arm_sh0'] = 0.70 * six
     pose['arm_sh1'] = -0.25 + 0.28 * seven
     pose['arm_el0'] = 1.05 + 0.45 * six

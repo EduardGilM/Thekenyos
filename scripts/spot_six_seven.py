@@ -212,16 +212,13 @@ def apply_pose(model, data, pose: dict, home: dict[str, float], plant_xy=None):
     return _plant_feet(model, data, hind_only=bool(pose['hind_support']), plant_xy=plant_xy)
 
 
-def look_at(model, data, cam, *, distance=2.45) -> None:
-    """Keep the camera on the chassis and the waving front legs."""
+def look_at(model, data, cam, *, distance=2.5) -> None:
+    """Front-ish view so the reared chest and two 'hands' face the camera."""
     body = np.array(data.xpos[model.body('body').id], dtype=np.float64)
-    fl = np.array(data.xpos[model.body('fl_uleg').id], dtype=np.float64)
-    fr = np.array(data.xpos[model.body('fr_uleg').id], dtype=np.float64)
-    target = 0.40 * body + 0.30 * fl + 0.30 * fr
-    cam.lookat[:] = target
+    cam.lookat[:] = body
     cam.distance = distance
-    cam.azimuth = 142.0
-    cam.elevation = -8.0 - 10.0 * float(np.clip(target[2] - 0.55, 0.0, 0.9))
+    cam.azimuth = 28.0
+    cam.elevation = -12.0 + 10.0 * float(np.clip(body[2] - 0.50, 0.0, 0.5))
 
 
 def run(args) -> None:
