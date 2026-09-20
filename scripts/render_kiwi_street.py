@@ -49,6 +49,10 @@ FOOTER_RADIUS_M = 0.18
 FOOTER_HALF_M = 0.055
 LEAF_LENGTH_M = 0.22
 LEAF_WIDTH_M = 0.17
+GROUND_SMOOTH_CELLS = 2.5
+# Fraction of infill leaves kept inside a sun pool, so the roof gap shows
+# scattered foliage against the sky instead of a hard-edged hole.
+SUN_GAP_KEEP = 0.30
 # Still camera: azimuth 0 looks +X down the aisle.
 CAMERA_LOOKAT = (2.4, 0.18, 0.48)
 CAMERA_DISTANCE_M = 13.6
@@ -81,7 +85,7 @@ SPOT_HOME = {
 SPOT_ARM = ("arm_sh0", "arm_sh1", "arm_el0", "arm_el1", "arm_wr0", "arm_wr1", "arm_f1x")
 # Centre and amplitude of the scripted arm wander, clipped to model ranges.
 SPOT_ARM_WANDER = {
-    "arm_sh0": (0.0, 0.70), "arm_sh1": (-0.85, 0.35), "arm_el0": (1.75, 0.40),
+    "arm_sh0": (0.0, 0.45), "arm_sh1": (-0.85, 0.35), "arm_el0": (1.75, 0.40),
     "arm_el1": (0.0, 0.55), "arm_wr0": (-0.60, 0.50), "arm_wr1": (0.0, 0.9),
     "arm_f1x": (-0.8, 0.6),
 }
@@ -434,8 +438,15 @@ def _leaf_class(length: float) -> int:
 # Scene MJCF
 # --------------------------------------------------------------------------- #
 def street_heights(floor, xs, ys) -> np.ndarray:
-    """Keep sampled slope; add aisle ruts and post pads on the working lanes."""
-    heights = np.asarray(floor.heights_m, dtype=np.float64).copy()
+    """Keep sampled slope; add aisle ruts and post pads on the working lanes.
+
+    The sampled per-vertex roughness (5 cm cells, ~1 cm) is smoothed for the
+    render: Gouraud shading of a random 5 cm lattice reads as a woven grid on
+    mown sod. This changes the visual floor only.
+    """
+    from scipy.ndimage import gaussian_filter
+    heights = gaussian_filter(np.asarray(floor.heights_m, dtype=np.float64),
+                              GROUND_SMOOTH_CELLS, mode="nearest")
     x = np.asarray(floor.x_m, dtype=np.float64)
     y = np.asarray(floor.y_m, dtype=np.float64)
     xx, yy = np.meshgrid(x, y)
@@ -589,9 +600,9 @@ def mjcf(floor, skeleton, fruit, leaves, xs, ys, with_spot_wrap: bool = False) -
               rgba="0.38 0.38 0.40 1"/>
     <material name="vine" reflectance="0.05" shininess="0.10" specular="0.08"/>
     <material name="leaf_sun" texture="leaf_sun" texrepeat="1 1" texuniform="false"
-              reflectance="0.02" shininess="0.10" specular="0.08" emission="0.16"/>
+              reflectance="0.02" shininess="0.10" specular="0.08" emission="0.24"/>
     <material name="leaf_shade" texture="leaf_shade" texrepeat="1 1" texuniform="false"
-              reflectance="0.01" shininess="0.06" specular="0.05" emission="0.04"/>
+              reflectance="0.01" shininess="0.06" specular="0.05" emission="0.08"/>
     <material name="kiwi" texture="kiwi" texuniform="true" reflectance="0.04"
               shininess="0.12" specular="0.08"/>
     <hfield name="orchard_ground" nrow="{nrow}" ncol="{ncol}"
@@ -1030,7 +1041,8 @@ def sun_gaps(leaves, seed: int, fraction: float, cell_m: float = 1.0):
     idx = np.clip(((xy - lo) / span * (n - 1)).astype(int), 0, n - 1)
     values = field[idx[:, 1], idx[:, 0]]
     threshold = float(np.quantile(values, 1.0 - fraction))
-    return [leaf for leaf, v in zip(leaves, values) if v < threshold]
+    keep = rng.random(len(leaves)) < SUN_GAP_KEEP
+    return [leaf for leaf, v, k in zip(leaves, values, keep) if v < threshold or k]
 
 
 def main():
@@ -1047,7 +1059,7 @@ def main():
     p.add_argument("--fruit-count", type=int, default=600)
     p.add_argument("--leaves", type=int, default=28)
     p.add_argument("--canopy-spacing", type=float, default=0.09)
-    p.add_argument("--sun-gaps", type=float, default=0.14,
+    p.add_argument("--sun-gaps", type=float, default=0.18,
                    help="fraction of canopy infill removed in coherent sun pools")
     p.add_argument("--no-grade", action="store_true")
     p.add_argument("--gl", choices=("auto", "egl", "osmesa"), default="auto")
