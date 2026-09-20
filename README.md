@@ -87,6 +87,20 @@ release over the basket. Success requires the fruit to settle inside the
 collision liner. It uses rigid fruit and an artificial grasp, so it validates
 workspace and deposit geometry, not grip strength or fruit safety.
 
+### Kiwi street still (native MuJoCo)
+
+Five-bay street with render-only canopy cards. Fruit hang stays
+`place_fruit` plus `STEM_LENGTH`; the still only changes ground, post and
+leaf *visuals* and the free camera so the working lanes read in one frame.
+
+```bash
+MUJOCO_GL=osmesa python scripts/render_kiwi_street.py \
+    --snapshot output/kiwi-street-five-bays.png
+python -B -m unittest tests.test_kiwi_street_render -v
+```
+
+Not Newton GL, not Spot gait, and not a five-robot harvest demo.
+
 ### Native stem extraction bench
 
 ```bash
