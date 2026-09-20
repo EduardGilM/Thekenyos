@@ -33,7 +33,8 @@ not approval of the basket geometry or loaded workspace.
 | Deformable fruit | Separate native MuJoCo tetrahedral compression/release bench with Xuxiang flesh stiffness |
 | Task evaluator | Outcome-based single-fruit oracle with optional guidance; [task definition](docs/harvest-task.md) |
 | RL environment | Gymnasium fixed-base Spot interface, substep oracle and reset/failure checks; rigid-fruit integration surrogate |
-| RL training | Earlier diagnostic pilot used faulty CPU hand collision filtering; checkpoint retained for regression only. Training paused for physics validation |
+| RL training | Fixed-base privileged PPO teacher on a progressive sequence curriculum (position, grip, extract, carry, deposit) with GJK jaw-surface distances; sensor-only RGB-D student distilled DAgger-style. Simulation-only, not physically validated |
+| Full cycle | RL approach, grasp and extraction; scripted collision-checked joint-space deposit with a proprioceptive hold trigger; orchard demo walks between kiwis with the RELIC gait and records a replay for the timelapse renderer |
 
 The upstream harvesting demo uses a hand-to-fruit spring as a grip assist,
 including stronger recentring after detachment (`treesim/fruit.py`). That is
@@ -1495,3 +1496,106 @@ The renderer reads the saved objective and policy schema. Archived graph profile
 retain their existing scorer and observation schema. The archived sequence-v1
 run uses its frozen `sequence-001` source release; v2 checkpoints use a new schema
 and cannot resume a v1 optimizer.
+
+### Scripted deposit and full-cycle evaluation
+
+Transport is treated as a planning problem, not a contact problem. The RL
+policy learns approach, seated grasp and extraction. Once the fruit is validly
+extracted and held, `treesim/kiwi_rl/scripted_deposit.py` drives the arm targets
+along two collision-checked joint-space segments (extraction posture, high
+posture over the basket centre, low posture inside the basket), opens the jaw,
+dwells 0.5 s and retracts. Segment feasibility was checked by forward kinematics
+on the fixed-base scene; the physics still decides whether the fruit settles.
+The handover keeps a harder squeeze than the policy's own jaw command.
+
+Two triggers can start the deposit. `oracle` uses the simulator grasp oracle and
+is a diagnostic. `proprioceptive` uses joint state only: the jaw is commanded
+near closed but has stalled well short of closed for 0.2 s, and the hand has
+then travelled at least 5 cm from where the hold began. Only the proprioceptive
+trigger is deployable.
+
+```bash
+python scripts/evaluate_full_cycle.py \
+  --scene /path/to/sequence-near-001 --checkpoint /path/to/teacher-sequence-002/checkpoint-000120.pt \
+  --gait-checkpoint /path/to/g1-cpu.pt --output /path/to/full-cycle-001 \
+  --worlds 64 --seconds 20 --deposit-trigger proprioceptive
+```
+
+The report lists per-stage completion, physical success, episode end reasons,
+agreement steps between the two triggers and the numerical flag count. One
+world's states are saved in the renderer's replay format. `--role` defaults to
+the checkpoint's role, so the same command evaluates a student checkpoint.
+Checkpoints are numbered `checkpoint-NNNNNN.pt`; the training log records
+which one scored best.
+
+Jaw distances in the sequence scorer come from
+`treesim/kiwi_rl/surface_distance.py`, which reuses the pinned MJWarp GJK support
+maps to measure nonpenetrating distances between the actual convex jaw
+collision meshes and the fruit. A regression test compares them with native
+MuJoCo at a recorded false optimum of the old aperture-width proxy.
+
+### Sensor-only student
+
+`train_sequence_student.py` distills the privileged sequence teacher into a
+policy that never receives simulator state. It observes hand RGB-D at 64×48 by
+default plus the R84 proprioception vector. Training is DAgger-style on top of
+the same PPO objective: the student acts, the teacher labels its actions, and
+`--teacher-distill-weight` scales the imitation term. The student starts at the
+extraction objective (`--start-level 3`) because the teacher already masters
+the prefix, and `--max-level 3` is the ceiling since carry and deposit are
+scripted. The jaw torque command is capped at 0.6 Nm: full 1 Nm torque loads
+the pads to the 15 N damage limit, so a fully closed command on the fruit would
+always fail, while 0.6 Nm squeezes at about 9 N.
+
+```bash
+python scripts/train_sequence_student.py \
+  --scene /path/to/sequence-near-001 --eval-scene /path/to/sequence-holdout-001 \
+  --gait-checkpoint /path/to/g1-cpu.pt --teacher-checkpoint /path/to/teacher-sequence-002/checkpoint-000120.pt \
+  --output /path/to/student-sequence-001 --worlds 512 --steps 128 --train-seconds 28800
+```
+
+The student schema is `fast-harvest-sequence-student-rgbd-r84/v1`. Resume with
+`--resume-from` and, for online W&B, `--wandb-run-id`.
+
+### Orchard demo and timelapse
+
+`demo_orchard_harvest.py` runs the whole cycle in the orchard scene: walk to a
+stand point beside each kiwi with the RELIC gait under a simple route
+controller, harvest with the RL arm policy, detect the hold proprioceptively,
+deposit with the scripted carry, stow and move on. Every layer is deployable
+except the reward oracle, which only reports. Fruit order defaults to
+nearest-first greedy; `--order` overrides it. `--freeze-legs-while-harvesting`
+holds the current stance targets from stand through stow, matching the
+fixed-base training. `--r84-template` replays leg and body proprioception
+recorded on the fixed-base training scene while the gait stands, keeping arm
+entries live, which closes the gap between the training and demo observation
+distributions. `--yaw-sign` and `--vy-sign` correct the gait command
+conventions if the robot turns or strafes the wrong way.
+
+```bash
+python scripts/demo_orchard_harvest.py \
+  --scene /path/to/orchard-demo-001 --checkpoint /path/to/teacher-sequence-002/checkpoint-000120.pt \
+  --gait-checkpoint /path/to/g1-cpu.pt --output /path/to/demo-001 \
+  --freeze-legs-while-harvesting --deposit-trigger proprioceptive
+python scripts/render_demo_timelapse.py \
+  --scene /path/to/orchard-demo-001 --replay /path/to/demo-001 \
+  --output /path/to/demo-001/timelapse.mp4 --seconds 15
+```
+
+The demo writes `report.json` with the visit events and harvest count and
+`states.npz` with one world's joint states. The timelapse renderer replays those
+states in native MuJoCo at 1920×1080 with a chase camera and a harvest-count
+HUD, compressed to a fixed output length. No physics is re-run, and a
+visual-only scene variant can be substituted for rendering.
+
+Validate these additions with:
+
+```bash
+python -m unittest tests.test_sequence_curriculum tests.test_scripted_deposit -v
+```
+
+The sequence tests cover ordered checkpoints, one-time event payments,
+rehearsal, terminal deadlines, carry progress along the joint line and the
+native-versus-GPU surface-distance regression. The deposit tests check that the
+controller engages only after a held extraction, follows both segments before
+releasing, and keeps the harder squeeze at handover.
