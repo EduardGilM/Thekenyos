@@ -4,7 +4,9 @@ import unittest
 import numpy as np
 
 from treesim.kiwi_rl.rewards import (
-    RewardEvaluator, RewardState, approach_center_potential, shaping_step,
+    CARRY_LINE_POINTS, RewardEvaluator, RewardState, W_CARRY_LINE,
+    approach_center_potential, carry_line_waypoints_world_m, pay_carry_line_once,
+    shaping_step,
 )
 
 
@@ -65,6 +67,47 @@ class LedgerTest(unittest.TestCase):
         self.assertGreater(at_hover, dive)
         with self.assertRaises(ValueError):
             approach_center_potential([np.nan, 0, 0], [0, 0, 0], [0, 0, 0])
+
+    def test_carry_line_pays_each_point_once(self):
+        origin = np.array([0.0, 0.0, 1.5])
+        target = np.array([0.0, 0.0, 0.6])
+        points = carry_line_waypoints_world_m(origin, target, n_points=4)
+        self.assertEqual(points.shape, (4, 3))
+        np.testing.assert_allclose(points[-1], target)
+        self.assertGreater(float(np.linalg.norm(points[0] - origin)), 0.1)
+        reward, mask, hits = pay_carry_line_once(
+            points[1], origin, target, 0, n_points=4, radius_m=0.05, bonus=8.0)
+        self.assertEqual(reward, 8.0)
+        self.assertEqual(hits, 1)
+        again, mask2, hits2 = pay_carry_line_once(
+            points[1], origin, target, mask, n_points=4, radius_m=0.05, bonus=8.0)
+        self.assertEqual(again, 0.0)
+        self.assertEqual(hits2, 0)
+        self.assertEqual(mask2, mask)
+        next_r, mask3, hits3 = pay_carry_line_once(
+            points[2], origin, target, mask2, n_points=4, radius_m=0.05, bonus=8.0)
+        self.assertEqual(next_r, 8.0)
+        self.assertEqual(hits3, 1)
+        self.assertNotEqual(mask3, mask2)
+        dropped, _, dropped_hits = pay_carry_line_once(
+            points[3], origin, target, 0, n_points=4, grasped=False)
+        self.assertEqual(dropped, 0.0)
+        self.assertEqual(dropped_hits, 0)
+        unarmed, _, unarmed_hits = pay_carry_line_once(
+            points[0], origin, target, 0, n_points=4, armed=False)
+        self.assertEqual(unarmed, 0.0)
+        self.assertEqual(unarmed_hits, 0)
+        miss, miss_mask, miss_hits = pay_carry_line_once(
+            origin + np.array([2.0, 0.0, 0.0]), origin, target, 0, n_points=4)
+        self.assertEqual(miss, 0.0)
+        self.assertEqual(miss_mask, 0)
+        self.assertEqual(miss_hits, 0)
+        self.assertEqual(CARRY_LINE_POINTS, 8)
+        self.assertEqual(W_CARRY_LINE, 8.0)
+        with self.assertRaises(ValueError):
+            carry_line_waypoints_world_m([np.nan, 0, 0], target)
+        with self.assertRaises(ValueError):
+            pay_carry_line_once(points[0], origin, target, 0, radius_m=0.0)
 
 
 if __name__ == "__main__":

@@ -44,10 +44,19 @@ a separate short PPO pilot is implemented in `scripts/train_reach_grasp.py`.
 ## Guidance that can be removed
 
 `TaskDefinition(guidance_weight=1.)` enables bounded reach-potential shaping and
-one-time stable-grasp / retained-detachment bonuses. Set this weight between
-episodes; anneal to **zero** as unguided evaluation success improves. At zero,
-only collection, failure, damage, loss, elapsed time and actuator-work terms
-remain. Keep safety and physical outcome criteria active throughout training.
+one-time stable-grasp / retained-detachment bonuses. The GPU harvest trainer
+may also pay a large one-shot held-pick bonus (`grasped`) during RL, shape
+the stem load toward the 8 N release while the fruit is held and still
+attached (a removable pull cue, not a required angle), and
+arm an optional straight detach→opening breadcrumb line: eight one-shot
+COM spheres from the detach position to the crate opening, paid at most
+once each while the fruit is still held. A slam that breaks the stem
+without the 0.12 s hold is not a pick. That line is
+not a required grasp sequence, not a paper angle, and not part of the
+oracle. Set this weight between episodes; anneal to **zero** as unguided
+evaluation success improves. At zero, only collection, failure, damage, loss,
+elapsed time and actuator-work terms remain. Keep safety and physical
+outcome criteria active throughout training.
 
 The reach shaping uses `gamma_per_second ** dt`; the trainer must use the same
 discount convention. Grasp/detachment bonuses are explicit temporary biases,

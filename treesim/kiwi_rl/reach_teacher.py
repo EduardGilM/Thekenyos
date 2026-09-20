@@ -1585,6 +1585,41 @@ def grasp_close_index(n_waypoints):
     return int(n_waypoints - 2)
 
 
+def harvest_waypoints_world_m(fruit_world, start_world, chassis_p, chassis_R, *,
+                              pregrasp_m=0.03, pull_m=0.08, n_approach=3,
+                              transit_clearance_m=0.28, release_clearance_m=0.16,
+                              n_transit=6):
+    """Grasp/pull then a liner-free carry to the basket centre.
+
+    Returns ``(waypoints_world, n_grasp)``. The first ``n_grasp`` rows are
+    the hanging-fruit path; the rest slide high and drop over the opening.
+    Fruit stays a free body. Rejects a pull that sits inside the crate.
+    """
+    grasp = grasp_waypoints_world_m(
+        fruit_world, start_world, pregrasp_m=pregrasp_m, pull_m=pull_m,
+        n_approach=n_approach)
+    origin = np.asarray(chassis_p, dtype=np.float64).reshape(3)
+    rot = np.asarray(chassis_R, dtype=np.float64).reshape(3, 3)
+    if origin.shape != (3,) or rot.shape != (3, 3) or not np.isfinite(origin).all() or not np.isfinite(rot).all():
+        raise ValueError('chassis pose must be a finite origin and 3x3 rotation')
+    pull_world = np.asarray(grasp[-1], dtype=np.float64).reshape(3)
+    pull_local = rot.T @ (pull_world - origin)
+    if crate_interior_contains(pull_local):
+        raise ValueError('harvest pull TCP sits inside the crate volume')
+    carry_local = carry_waypoints_local_m(
+        pull_local, transit_clearance_m=transit_clearance_m,
+        release_clearance_m=release_clearance_m, n_transit=n_transit)
+    if float(np.linalg.norm(carry_local[0] - pull_local)) < 1e-8:
+        carry_local = carry_local[1:]
+    if carry_local.shape[0] < 3:
+        raise ValueError('harvest carry path must keep at least three waypoints')
+    carry_world = origin + (rot @ carry_local.T).T
+    stacked = np.vstack([grasp, carry_world]).astype(np.float64)
+    if not np.isfinite(stacked).all():
+        raise ValueError('harvest waypoints must be finite')
+    return stacked, int(grasp.shape[0])
+
+
 def plan_grasp_joint_path(model, qpos, site_id, chassis, start_q, waypoints_world,
                           joint_qposadr, joint_dofadr, ranges, *, approach_world,
                           accept_err_m=0.025):

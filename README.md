@@ -832,6 +832,53 @@ python scripts/train_fast.py --scene /path/to/fast-scene \
   --eval-profile speedrun --ik-grasp --video-every 5 --seed 7
 ```
 
+`--ik-harvest` is the stage-3 recipe: the kiwi **stays hanging**, a privileged
+IK teacher reaches it (easy 1–3 cm / hard 8–15 cm starts), the **same scripted
+jaw pin** closes at `jaw_close_frac=0.32` when the live TCP is within 4.5 cm,
+the arm **waits for the grasp latch** before the 8 cm pull and for
+`retained_detach` before the crate path, then follows the liner-free high
+slide to the opening and opens. Catalog rows that clip the crate or miss the
+hanging COM by more than ~3 cm are discarded. The floating base is pinned so
+gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
+`--easy` and does not weld the fruit. Behaviour-clone 10 updates on 512 worlds
+× 256 steps, then teacher-off PPO. `--initialize-from` with `--ik-harvest`
+skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates on the
+same hanging-fruit catalog, with entropy 0.004 (harvest6/7 forgot the
+grasp, eval 62 → 20 → 0 %, at lr `5e-4`, four epochs and unclipped
+positive advantages with KL pinned at the 0.05 target; the continue now
+keeps lr `3e-4`, two clipped epochs). Harvest3/4 grasped (eval 49–87 %) but never deposited:
+the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
+no signal once held, and 180 s episodes let a frozen hold run ~35 updates.
+The continue therefore uses a **30 s training timeout** (eval keeps its own
+horizon), shapes the **stem load toward 8 N** while the fruit is held and
+still attached (guidance-gated, `potential_ref=4`), and reuses the `--easy`
+slip guard so the pin tightens toward at most `0.40` only when the fruit is
+leaving the mouth; the 15 N jaw fail stays active and the 0.45 pin that sat
+at 24 N is not used. Harvest5 still lost most pulls to slip (retained detach
+0–9/512 per update), so the continue also pins at the `0.40` pull hold as
+soon as the oracle latches `grasped`, and pays the held detach `+40` once
+(fresh runs keep `+2`). These are training assists on the scripted jaw, not
+a calibrated grip force. `retained_detach_events` is logged per update. A held pick (`grasped`, 0.12 s hand
+contact) pays a one-shot `+100` during RL; eval keeps `guidance_weight=0`
+so that jackpot stays off the score. A slam-detach without the hold does
+not pay. During those RL
+updates only, the first detach latches a straight 8-point line from the fruit
+COM to the opening (not the liner floor); each unpaid point pays `+8` on a
+fresh run and `+12` when continuing from a checkpoint, once
+when the held COM first enters a 10 cm radius. The origin is never paid, a
+dropped fruit cannot collect crumbs while falling, and evaluation keeps
+`teacher_mix=0` and `guidance_weight=0` so the line stays off the score.
+Success is a settled liner deposit, not a wall touch or a waypoint hit. This
+is not a paper picking angle or a tissue-safe grasp; `training_ready` stays
+false.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-harvest-run \
+  --stage stationary_harvest --worlds 512 --steps 256 --minibatch-worlds 64 \
+  --eval-profile speedrun --ik-harvest --video-every 0 --seed 7
+```
+
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-demo-run \

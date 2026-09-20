@@ -17,13 +17,14 @@ import warp as wp
 from .control_warp import WarpSpotControl, _set_gait_targets
 from .curriculum import (
     EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M, IK_DEMO_PRESET,
-    IK_GRASP_PRESET, commit_carry_starts, sample_carry_start_indices,
+    IK_GRASP_PRESET, IK_HARVEST_PRESET, commit_carry_starts, sample_carry_start_indices,
     sample_easy_start_indices,
 )
-from .fast_task import MAX_FRUITS, _pad_ids
+from .fast_task import DETACH_FORCE_N, MAX_FRUITS, _pad_ids
 from .rewards import (
-    W_DAMAGE_PER_UNIT, W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE,
-    W_LOSS, W_SMOOTH, W_TIME_PER_S,
+    CARRY_LINE_POINTS, CARRY_LINE_RADIUS_M, W_CARRY_LINE, W_DAMAGE_PER_UNIT,
+    W_DEPOSIT, W_DETACH_HELD, W_FALL, W_GRASP_STABLE, W_LOSS, W_SMOOTH,
+    W_TIME_PER_S,
 )
 
 # Latched per-world bits. Overflow, a nonfinite action, or a single-world
@@ -69,7 +70,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      success: wp.array(dtype=wp.uint8), failed: wp.array(dtype=wp.uint8),
                      detached: wp.array(dtype=wp.uint8), grasped: wp.array(dtype=wp.uint8),
                      retained_detach: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
-                     damage_proxy: wp.array(dtype=float),
+                     damage_proxy: wp.array(dtype=float), stem_force: wp.array(dtype=float),
+                     stem_shaping: wp.array(dtype=int),
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
@@ -78,7 +80,7 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
                      fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
-                     w_grasp: float, w_detach: float, w_loss: float,
+                     grasp_w: wp.array(dtype=float), detach_w: wp.array(dtype=float), w_loss: float,
                      w_damage: float, w_fall: float, w_time: float, w_smooth: float,
                      shape_hand_fruit: wp.array(dtype=int),
                      easy_released: wp.array(dtype=int)):
@@ -128,6 +130,17 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     if easy_released[world] != 0 and use_basket != 0:
         phi = wp.exp(-d_hand_xy / length)
         potential_ref = 3
+    # Held and still attached: the TCP term is already ~0, so shape the stem
+    # load toward the 8 N release instead. Optional guidance; eval keeps
+    # guidance at 0. Not a paper angle or a required grasp sequence.
+    if stem_shaping[0] != 0 and grasped[world] != 0 and detached[world] == 0 and goal[world] != 0:
+        load = stem_force[world] / DETACH_FORCE_N
+        if load > 1.0:
+            load = 1.0
+        if load < 0.0:
+            load = 0.0
+        phi = load
+        potential_ref = 4
     shaped = float(0.)
     if shaping_ref[world] == potential_ref:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
@@ -135,10 +148,13 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     shaping_ref[world] = potential_ref
     r = shaped
     if grasped[world] != 0 and grasp_paid[world] == 0:
-        r = r + w_grasp
+        # Optional pick jackpot. Eval keeps guidance at 0 so this stays off
+        # the score. A slam-detach without the 0.12 s hold does not pay.
+        if guidance[world] > 0.0:
+            r = r + grasp_w[0]
         grasp_paid[world] = wp.uint8(1)
     if retained_detach[world] != 0 and detach_paid[world] == 0:
-        r = r + w_detach
+        r = r + detach_w[0]
         detach_paid[world] = wp.uint8(1)
     delta_damage = damage_proxy[world] - previous_damage[world]
     if delta_damage < 0.:
@@ -175,6 +191,68 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
         r = r + fail_w[world]
         fail_paid[world] = wp.uint8(1)
     reward[world] = r
+
+
+@wp.kernel
+def _pay_carry_line(xipos: wp.array2d(dtype=wp.vec3), fruit_bodies: wp.array(dtype=int),
+                    active_fruit: wp.array(dtype=int), xpos: wp.array2d(dtype=wp.vec3),
+                    xmat: wp.array2d(dtype=wp.mat33), chassis: int, basket_center: wp.vec3,
+                    release_offset: wp.array(dtype=wp.vec3), detached: wp.array(dtype=wp.uint8),
+                    grasped: wp.array(dtype=wp.uint8), ground_contact: wp.array(dtype=wp.uint8),
+                    goal: wp.array(dtype=int), guidance: wp.array(dtype=float),
+                    mask: wp.array(dtype=wp.uint8), enabled: wp.array(dtype=int),
+                    armed: wp.array(dtype=int), origin: wp.array(dtype=wp.vec3),
+                    paid: wp.array(dtype=int), hits: wp.array(dtype=int),
+                    hits_step: wp.array(dtype=int), reward: wp.array(dtype=float),
+                    n_points: wp.array(dtype=int), radius: wp.array(dtype=float),
+                    bonus: wp.array(dtype=float)):
+    """One-shot detach→opening crumbs. Eval keeps guidance at 0 and must stay off."""
+    world = wp.tid()
+    if mask[world] == 0:
+        return
+    hits_step[world] = 0
+    if enabled[0] == 0 or guidance[world] <= 0.0 or goal[world] == 1:
+        return
+    if detached[world] == 0 or grasped[world] == 0 or ground_contact[world] != 0:
+        return
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit_pos = xipos[world, fruit_bodies[idx]]
+    if armed[world] == 0:
+        armed[world] = 1
+        origin[world] = fruit_pos
+        paid[world] = 0
+        return
+    count = n_points[0]
+    rad = radius[0]
+    pay = bonus[0]
+    if count < 1 or rad <= 0.0 or pay == 0.0:
+        return
+    if count > 8:
+        count = 8
+    rotation = xmat[world, chassis]
+    target = xpos[world, chassis] + rotation @ basket_center + rotation @ release_offset[0]
+    span = target - origin[world]
+    if wp.length(span) < 1.0e-4:
+        return
+    bits = paid[world]
+    added = float(0.0)
+    hit_count = int(0)
+    inv = 1.0 / float(count)
+    for i in range(8):
+        if i < count:
+            wpnt = origin[world] + span * (float(i + 1) * inv)
+            flag = 1 << i
+            if (bits & flag) == 0 and wp.length(fruit_pos - wpnt) <= rad:
+                bits = bits | flag
+                added = added + pay
+                hit_count = hit_count + 1
+    paid[world] = bits
+    if hit_count > 0:
+        reward[world] = reward[world] + added
+        hits[world] = hits[world] + hit_count
+        hits_step[world] = hit_count
 
 
 @wp.kernel
@@ -430,6 +508,22 @@ def _mark_scripted_grasp_open(mask: wp.array(dtype=wp.uint8), reset_mode: wp.arr
 
 
 @wp.kernel
+def _tighten_on_grasp(goal: wp.array(dtype=int), grasped: wp.array(dtype=wp.uint8),
+                      released: wp.array(dtype=int), jaw_hold: wp.array(dtype=float),
+                      pull_hold: float, jaw_open: float, jaw_closed: float):
+    """Once the oracle latches a held pick, pin at the pull hold so the 8 N
+    stem load is not lost to slip. Reset restores the light hold. Not a weld;
+    the 15 N jaw fail stays active."""
+    world = wp.tid()
+    if goal[world] != 2 or grasped[world] == 0 or released[world] != 0:
+        return
+    if jaw_closed >= jaw_open:
+        jaw_hold[world] = wp.max(jaw_hold[world], pull_hold)
+    else:
+        jaw_hold[world] = wp.min(jaw_hold[world], pull_hold)
+
+
+@wp.kernel
 def _latch_scripted_grasp_close(goal: wp.array(dtype=int),
                                 waypoint_index: wp.array(dtype=int),
                                 close_index: int,
@@ -451,7 +545,7 @@ def _latch_scripted_grasp_close(goal: wp.array(dtype=int),
     Once latched, the hold stays on. Not a weld; fruit stays a free body.
     """
     world = wp.tid()
-    if goal[world] != 1:
+    if goal[world] != 1 and goal[world] != 2:
         return
     wp_idx = waypoint_index[world]
     if wp_idx < 0:
@@ -806,6 +900,92 @@ def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype
             waypoint_index[world] = wp_idx + 1
 
 
+@wp.kernel
+def _privileged_harvest_action(goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
+                               grasped: wp.array(dtype=wp.uint8),
+                               retained_detach: wp.array(dtype=wp.uint8),
+                               targets: wp.array2d(dtype=float),
+                               waypoint_q: wp.array2d(dtype=float),
+                               start_index: wp.array(dtype=int),
+                               waypoint_index: wp.array(dtype=int),
+                               n_waypoints: int, close_index: int, pull_index: int,
+                               jaw_hold: wp.array(dtype=float), jaw_open: float,
+                               max_delta: float, advance_rad: float,
+                               site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
+                               xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                               xipos: wp.array2d(dtype=wp.vec3),
+                               chassis: int, fruit_bodies: wp.array(dtype=int),
+                               active_fruit: wp.array(dtype=int),
+                               basket_center: wp.vec3, close_radius: float,
+                               open_xy_m: float, rim_z_m: float,
+                               release_at_center: wp.array(dtype=int),
+                               release_over_opening: wp.array(dtype=int),
+                               open_half_xy: wp.vec2, open_max_above_rim_m: float,
+                               out_applied: wp.array2d(dtype=float)):
+    """Pick, hold through detach, then carry to the liner. HARVEST only.
+
+    Waits for the grasp latch before the pull and for retained_detach before
+    the crate path. Opens over the opening. Not a weld or a paper angle.
+    """
+    world, joint = wp.tid()
+    if goal[world] != 2:
+        out_applied[world, joint] = 0.0
+        return
+    start = start_index[world]
+    if start < 0:
+        start = 0
+    wp_idx = waypoint_index[world]
+    if wp_idx < 0:
+        wp_idx = 0
+    if wp_idx >= n_waypoints:
+        wp_idx = n_waypoints - 1
+    row = start * n_waypoints + wp_idx
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    dist = wp.length(site_xpos[world, tcp_site] - xipos[world, fruit])
+    near = 1 if dist < close_radius else 0
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    over = _in_release_zone(xpos[world, fruit], site_xpos[world, tcp_site], basket_world,
+                            xmat[world, chassis], open_half_xy,
+                            open_xy_m, rim_z_m, release_at_center[0],
+                            release_over_opening[0], open_max_above_rim_m)
+    closing = 1 if (over == 0 and (wp_idx >= close_index or near != 0
+                                   or grasped[world] != 0 or detached[world] != 0)) else 0
+    if joint < 6:
+        if over == 1:
+            out_applied[world, joint] = 0.0
+            return
+        desired = waypoint_q[row, joint]
+        current = targets[world, joint + 12]
+    else:
+        desired = jaw_hold[world] if closing != 0 else jaw_open
+        current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    out_applied[world, joint] = delta / max_delta
+    if joint == 0 and over == 0:
+        err = float(0.0)
+        for item in range(6):
+            e = wp.abs(waypoint_q[row, item] - targets[world, item + 12])
+            if e > err:
+                err = e
+        can_advance = 0
+        if err < advance_rad and wp_idx < n_waypoints - 1:
+            if wp_idx < close_index:
+                can_advance = 1
+            elif wp_idx == close_index and grasped[world] != 0:
+                can_advance = 1
+            elif wp_idx > close_index and wp_idx < pull_index:
+                can_advance = 1
+            elif wp_idx == pull_index and retained_detach[world] != 0:
+                can_advance = 1
+            elif wp_idx > pull_index:
+                can_advance = 1
+        if can_advance != 0:
+            waypoint_index[world] = wp_idx + 1
+
+
 class FastRuntime:
     """Bounded rigid-fruit runtime.
 
@@ -878,6 +1058,13 @@ class FastRuntime:
             self._shaping_length = wp.full(worlds, float(EASY_PRESET['default_shaping_length_m']),
                                            dtype=float, device=self.device)
             self._deposit_w = wp.full(worlds, float(W_DEPOSIT), dtype=float, device=self.device)
+            self._grasp_w = wp.full(1, float(W_GRASP_STABLE), dtype=float, device=self.device)
+            # Stem-load shaping while held; harvest RL only. Device flag so the
+            # captured graph can be retargeted. Eval keeps guidance at 0.
+            self._stem_shaping = wp.zeros(1, dtype=int, device=self.device)
+            self._harvest_slip_max_close = 0.0
+            self._harvest_pull_hold = None
+            self._detach_w = wp.full(1, float(W_DETACH_HELD), dtype=float, device=self.device)
             self._fail_w = wp.zeros(worlds, dtype=float, device=self.device)
             self._shaping_ref = wp.zeros(worlds, dtype=int, device=self.device)
             self._reset_mode = wp.zeros(worlds, dtype=int, device=self.device)
@@ -978,7 +1165,9 @@ class FastRuntime:
             self._use_pocket = 0
             self._ik_demo = False
             self._ik_grasp = False
+            self._ik_harvest = False
             self._grasp_close_index = 1
+            self._harvest_pull_index = 1
             self._grasp_catalog_locked = False
             self._catalog_fruit_world_m = None
             self._last_grasp_catalog = {}
@@ -1007,6 +1196,18 @@ class FastRuntime:
             self._easy_start_index_next = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_hover_cohort = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_released = wp.zeros(worlds, dtype=int, device=self.device)
+            # Captured into the CUDA graph. Enable in-place during RL only.
+            self._carry_line_enabled = wp.zeros(1, dtype=int, device=self.device)
+            self._carry_line_n = wp.zeros(1, dtype=int, device=self.device)
+            self._carry_line_radius = wp.zeros(1, dtype=float, device=self.device)
+            self._carry_line_bonus = wp.zeros(1, dtype=float, device=self.device)
+            self._carry_line_armed = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_origin = wp.zeros(worlds, dtype=wp.vec3, device=self.device)
+            self._carry_line_paid = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_hits = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_line_step = wp.zeros(worlds, dtype=int, device=self.device)
+            self._configure_carry_line(
+                CARRY_LINE_POINTS, CARRY_LINE_RADIUS_M, W_CARRY_LINE)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
             self._easy_jaw_hold_next = wp.zeros(worlds, dtype=float, device=self.device)
             closed_holds = np.full(worlds, self._jaw_closed, dtype=np.float32)
@@ -1073,14 +1274,25 @@ class FastRuntime:
                           self._basket_distance, self._basket_xy, mask,
                           self.task.success, self.task.failed, self.task.detached, self.task.grasped,
                           self.task.retained_detach, self.task.ground_contact, self.task.damage_proxy,
+                          self.task.stem_force, self._stem_shaping,
                           self.task.grasp_paid, self.task.detach_paid, self.task.deposit_paid,
                           self.task.deposited, self.task.loss_paid, self._basket_center,
                           self._hover_offset, self._release_offset, self._open_half_xy,
                           self.control_dt,
                           self._gamma_step, self._deposit_w, self._fail_w, self.task.fail_paid,
-                          W_GRASP_STABLE, W_DETACH_HELD, W_LOSS,
+                          self._grasp_w, self._detach_w, W_LOSS,
                           W_DAMAGE_PER_UNIT, W_FALL, W_TIME_PER_S, W_SMOOTH,
                           self._shape_hand_fruit, self._easy_released], device=self.device)
+        wp.launch(_pay_carry_line, dim=self.worlds,
+                  inputs=[self.data.xipos, self.task.fruit_body, self.task.active_fruit,
+                          self.data.xpos, self.data.xmat, self.chassis, self._basket_center,
+                          self._release_offset, self.task.detached, self.task.grasped,
+                          self.task.ground_contact, self.task.goal, self._guidance, mask,
+                          self._carry_line_enabled, self._carry_line_armed,
+                          self._carry_line_origin, self._carry_line_paid,
+                          self._carry_line_hits, self._carry_line_step, self._reward,
+                          self._carry_line_n, self._carry_line_radius,
+                          self._carry_line_bonus], device=self.device)
 
     def _latch(self):
         wp.launch(_latch_state, dim=(self.worlds, max(self.data.qpos.shape[1], self.data.qvel.shape[1])),
@@ -1098,7 +1310,10 @@ class FastRuntime:
         import mujoco_warp as mw
         with wp.ScopedDevice(self.device):
             wp.copy(self._actions, action_wp)
-            if self._ik_grasp:
+            if self._ik_grasp or self._ik_harvest:
+                close_r = float(
+                    IK_HARVEST_PRESET['jaw_close_radius_m'] if self._ik_harvest
+                    else IK_GRASP_PRESET['jaw_close_radius_m'])
                 wp.launch(_hold_stationary_base, dim=self.worlds, inputs=[
                     self.data.qpos, self.data.qvel, self._initial_qpos,
                     self.control.targets, self.control.home,
@@ -1108,11 +1323,29 @@ class FastRuntime:
                     self.task.goal, self._waypoint_index, int(self._grasp_close_index),
                     self.data.site_xpos, int(self.tcp_site), self.data.xipos,
                     self.task.fruit_body, self.task.active_fruit,
-                    float(IK_GRASP_PRESET['jaw_close_radius_m']),
+                    close_r,
                     self.task.grasped, self.task.detached, self._easy_released,
                     self._actions, self.control.targets,
                     self._easy_jaw_hold, float(self._jaw_open),
                     float(2.5 * self.control_dt)],
+                    device=self.device)
+            if self._ik_harvest and self._harvest_pull_hold is not None:
+                wp.launch(_tighten_on_grasp, dim=self.worlds, inputs=[
+                    self.task.goal, self.task.grasped, self._easy_released,
+                    self._easy_jaw_hold, float(self._harvest_pull_hold),
+                    float(self._jaw_open), float(self._jaw_closed)],
+                    device=self.device)
+            if self._ik_harvest and self._harvest_slip_max_close > 0.0:
+                # Same slip guard as --easy, capped below the 0.45 pin that sat
+                # over the 15 N jaw limit. The pin still opens over the opening.
+                wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
+                    self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
+                    self.chassis, self.task.fruit_body, self.task.active_fruit,
+                    self._basket_center, self._easy_jaw_hold, float(self._jaw_open),
+                    float(self._jaw_closed), float(self._open_xy_m),
+                    float(self._open_rim_z_m), 0.03, float(self._harvest_slip_max_close),
+                    self._release_at_center, self._release_over_opening, self._open_half_xy,
+                    float(self._open_max_above_rim_m)],
                     device=self.device)
             if self._easy:
                 wp.launch(_adapt_scripted_jaw, dim=self.worlds, inputs=[
@@ -1145,6 +1378,7 @@ class FastRuntime:
             'timed_out': wp.to_torch(self._timed_out).bool(),
             'release_supported': True,
             'release_fired': wp.to_torch(self._easy_released).bool(),
+            'carry_line_hits': wp.to_torch(self._carry_line_step),
             **{key: wp.to_torch(value) for key,value in self.task.outputs().items()},
         }
 
@@ -1399,6 +1633,32 @@ class FastRuntime:
             raise ValueError('shape offsets must be finite')
         self._hover_offset.assign(np.ascontiguousarray(hover))
         self._release_offset.assign(np.ascontiguousarray(release))
+
+    def _configure_carry_line(self, n_points, radius_m, bonus):
+        """Write captured-graph breadcrumb knobs. Does not enable the line."""
+        n = int(n_points)
+        radius = float(radius_m)
+        pay = float(bonus)
+        if n < 1 or n > 8:
+            raise ValueError('carry_line_points must be in [1, 8]')
+        if not np.isfinite(radius) or not 0.0 < radius <= 0.25:
+            raise ValueError('carry_line_radius_m must be finite in (0, 0.25] m')
+        if not np.isfinite(pay) or not 0.0 < pay <= 20.0:
+            raise ValueError('carry_line_bonus must be finite in (0, 20]')
+        self._carry_line_n.assign(np.array([n], dtype=np.int32))
+        self._carry_line_radius.assign(np.array([radius], dtype=np.float32))
+        self._carry_line_bonus.assign(np.array([pay], dtype=np.float32))
+        return {
+            'carry_line_points': n,
+            'carry_line_radius_m': radius,
+            'carry_line_bonus': pay,
+        }
+
+    def set_carry_line_enabled(self, enabled):
+        """RL-only detach→opening crumbs. Eval keeps guidance_weight=0."""
+        flag = 1 if enabled else 0
+        self._carry_line_enabled.assign(np.array([flag], dtype=np.int32))
+        return {'carry_line_enabled': int(flag)}
 
     def _commit_queued_carry_starts(self, mask):
         """Move queued catalog rows onto resetting worlds only."""
@@ -1687,6 +1947,147 @@ class FastRuntime:
             'hover_error_m': 0.0,
         }
 
+    def _build_harvest_catalog(self, initial_qpos):
+        """CPU IK catalog: hanging pick, then a crate-clearing carry to the liner."""
+        from .reach_teacher import (
+            crate_interior_contains, downward_approach_local, grasp_close_index,
+            harvest_waypoints_world_m, plan_carry_joint_path, plan_grasp_joint_path,
+            pose_clears_crate, random_pregrasp_offset_world_m, solve_tcp_hover,
+        )
+        knobs = IK_HARVEST_PRESET
+        contract = self.control.contract
+        qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
+        qids = np.asarray(contract.qids[12:18], dtype=int)
+        dofs = np.asarray(contract.dofs[12:18], dtype=int)
+        ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+        limited = np.asarray(self.model.jnt_limited[contract.joints[12:18]], dtype=bool)
+        ranges[limited] = np.asarray(self.model.jnt_range[contract.joints[12:18]], dtype=np.float64)[limited]
+        import mujoco
+        data = mujoco.MjData(self.model)
+        data.qpos[:] = qpos
+        mujoco.mj_forward(self.model, data)
+        chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
+        chassis_R = np.asarray(data.xmat[self.chassis], dtype=np.float64).reshape(3, 3)
+        fruit_p = np.asarray(data.xipos[self.fruit_body], dtype=np.float64)
+        fruit_source = 'cpu_mj_forward'
+        gpu_fruit = self._gpu_fruit_world_m()
+        if gpu_fruit is not None:
+            fruit_p = gpu_fruit
+            fruit_source = 'gpu_xipos'
+        q_home = qpos[qids].copy()
+        safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+        if (safe.shape == (6,) and np.isfinite(safe).all()
+                and np.all(safe >= ranges[:, 0]) and np.all(safe <= ranges[:, 1])):
+            q_seed = safe.copy()
+        else:
+            q_seed = q_home.copy()
+        accept = float(knobs['ik_accept_err_m'])
+        n = int(knobs['n_start_poses'])
+        n_hard = int(round(float(knobs['hard_start_frac']) * n))
+        n_approach = int(knobs['n_approach'])
+        pregrasp_m = float(knobs['pregrasp_standoff_m'])
+        pull_m = float(knobs['pull_distance_m'])
+        starts, paths, hard_flags = [], [], []
+        rng = np.random.default_rng(17)
+        attempts = 0
+        max_attempts = n * 48
+        n_grasp = n_approach + 2
+        close_i = grasp_close_index(n_grasp)
+        grasp_tcp_errors = []
+        q_init = q_seed.copy()
+        down = chassis_R @ downward_approach_local()
+        while len(starts) < n and attempts < max_attempts:
+            attempts += 1
+            want_hard = len([flag for flag in hard_flags if flag]) < n_hard and (
+                len(starts) >= n - n_hard or bool(rng.random() < 0.5))
+            try:
+                start_world = random_pregrasp_offset_world_m(
+                    fruit_p, chassis_p, rng, hard=want_hard,
+                    easy_min_m=knobs['easy_standoff_min_m'],
+                    easy_max_m=knobs['easy_standoff_max_m'],
+                    hard_min_m=knobs['hard_standoff_min_m'],
+                    hard_max_m=knobs['hard_standoff_max_m'])
+                waypoints, grasp_n = harvest_waypoints_world_m(
+                    fruit_p, start_world, chassis_p, chassis_R,
+                    pregrasp_m=pregrasp_m, pull_m=pull_m, n_approach=n_approach,
+                    transit_clearance_m=knobs['transit_clearance_m'],
+                    release_clearance_m=knobs['release_clearance_m'],
+                    n_transit=knobs['n_transit'])
+            except ValueError:
+                continue
+            if grasp_n != n_grasp:
+                continue
+            arm_q, err = solve_tcp_hover(
+                self.model, qpos, self.tcp_site, start_world, qids, dofs, q_init, ranges)
+            if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+                continue
+            data.qpos[:] = qpos
+            data.qpos[qids] = arm_q
+            if not pose_clears_crate(self.model, data, self.tcp_site, self.chassis):
+                continue
+            approach = fruit_p - start_world
+            grasp_path = plan_grasp_joint_path(
+                self.model, qpos, self.tcp_site, self.chassis, arm_q, waypoints[:grasp_n],
+                qids, dofs, ranges, approach_world=approach, accept_err_m=accept)
+            if grasp_path is None or grasp_path.shape[0] != grasp_n:
+                continue
+            pull_local = chassis_R.T @ (waypoints[grasp_n - 1] - chassis_p)
+            if crate_interior_contains(pull_local):
+                continue
+            carry_path = plan_carry_joint_path(
+                self.model, qpos, self.tcp_site, self.chassis, grasp_path[-1],
+                waypoints[grasp_n:], qids, dofs, ranges, approach_world=down,
+                accept_err_m=accept)
+            if carry_path is None or carry_path.shape[0] != waypoints.shape[0] - grasp_n:
+                continue
+            data.qpos[:] = qpos
+            data.qpos[qids] = grasp_path[close_i]
+            mujoco.mj_forward(self.model, data)
+            tcp = np.asarray(data.site_xpos[self.tcp_site], dtype=np.float64)
+            grasp_err = float(np.linalg.norm(tcp - fruit_p))
+            if not np.isfinite(grasp_err) or grasp_err > accept + 0.01:
+                continue
+            path = np.concatenate([grasp_path, carry_path], axis=0)
+            starts.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
+            paths.append(path.astype(np.float32))
+            hard_flags.append(bool(want_hard))
+            grasp_tcp_errors.append(grasp_err)
+            q_init = np.asarray(arm_q, dtype=np.float64)
+        if not starts:
+            raise ValueError('harvest IK found no physics-safe pick-and-carry path')
+        while len(starts) < n:
+            starts.append(starts[0])
+            paths.append(paths[0])
+            hard_flags.append(hard_flags[0])
+        order = np.argsort(np.asarray(hard_flags, dtype=np.int32))
+        start_qs = np.stack([starts[int(i)] for i in order])
+        path_qs = np.stack([paths[int(i)] for i in order])
+        n_hard = int(np.count_nonzero(np.asarray(hard_flags, dtype=np.int32)[order]))
+        self._easy_catalog_n = int(start_qs.shape[0])
+        self._n_hard_starts = n_hard
+        self._n_waypoints = int(path_qs.shape[1])
+        self._grasp_close_index = grasp_close_index(n_grasp)
+        self._harvest_pull_index = int(n_grasp - 1)
+        self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
+        self._waypoint_q = wp.array(path_qs.reshape(-1, 6), dtype=float, device=self.device)
+        self._hover_start_index = int(start_qs.shape[0] - 1)
+        self._catalog_fruit_world_m = np.asarray(fruit_p, dtype=np.float64).reshape(3)
+        self.hover_error_m = 0.0
+        self.easy_start_error_m = 0.0
+        return {
+            'n_start_poses': int(start_qs.shape[0]),
+            'n_hard_starts': n_hard,
+            'n_waypoints': int(self._n_waypoints),
+            'n_grasp_waypoints': int(n_grasp),
+            'grasp_close_index': int(self._grasp_close_index),
+            'harvest_pull_index': int(self._harvest_pull_index),
+            'catalog_grasp_tcp_err_mean_m': float(np.mean(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
+            'catalog_grasp_tcp_err_max_m': float(np.max(grasp_tcp_errors)) if grasp_tcp_errors else 1.0,
+            'catalog_fruit_source': fruit_source,
+            'catalog_fruit_world_m': [float(v) for v in self._catalog_fruit_world_m],
+            'hover_error_m': 0.0,
+        }
+
     def _gpu_fruit_world_m(self):
         """Settled hanging fruit COM from the GPU state. None if the buffer is empty."""
         try:
@@ -1711,7 +2112,7 @@ class FastRuntime:
         visible on device. Closing on that stale COM is empty air, not a grasp.
         One rebuild; fruit stays attached. Not a weld.
         """
-        if not self._ik_grasp or getattr(self, '_grasp_catalog_locked', False):
+        if not (self._ik_grasp or self._ik_harvest) or getattr(self, '_grasp_catalog_locked', False):
             return
         gpu = self._gpu_fruit_world_m()
         catalog = getattr(self, '_catalog_fruit_world_m', None)
@@ -1724,7 +2125,8 @@ class FastRuntime:
         host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
         q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
         try:
-            info = self._build_grasp_catalog(q0)
+            info = (self._build_harvest_catalog(q0) if self._ik_harvest
+                    else self._build_grasp_catalog(q0))
         except ValueError:
             return
         self._last_grasp_catalog = info
@@ -1739,8 +2141,13 @@ class FastRuntime:
         is an engineering close, not a calibrated tissue-safe force.
         """
         self._ik_grasp = bool(enabled)
+        self._ik_harvest = False
         self._easy = False
         self._ik_demo = False
+        self._harvest_slip_max_close = 0.0
+        self._harvest_pull_hold = None
+        self._stem_shaping.assign(np.array([0], dtype=np.int32))
+        self._detach_w.assign(np.array([float(W_DETACH_HELD)], dtype=np.float32))
         knobs = IK_GRASP_PRESET
         self._easy_pin.assign(np.array([1 if self._ik_grasp else 0], dtype=np.int32))
         self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
@@ -1800,6 +2207,123 @@ class FastRuntime:
             **catalog,
         }
 
+    def enable_ik_harvest(self, enabled=True, *, shaping_coef=None, knobs=None):
+        """Hanging fruit, IK pick/hold, then crate-clearing carry to the liner.
+
+        Does not enable ``--easy`` or weld the fruit. The scripted jaw closes
+        on the kiwi and opens over the opening. Eval must keep teacher_mix at 0.
+        """
+        self._ik_harvest = bool(enabled)
+        self._ik_grasp = False
+        self._easy = False
+        self._ik_demo = False
+        knobs = IK_HARVEST_PRESET if knobs is None else knobs
+        self._easy_pin.assign(np.array([1 if self._ik_harvest else 0], dtype=np.int32))
+        self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
+        self._release_at_center.assign(np.array([1 if knobs['release_at_center'] else 0], dtype=np.int32))
+        self._release_over_opening.assign(np.array([1 if knobs['release_over_opening'] else 0], dtype=np.int32))
+        self._use_pocket = 0
+        if shaping_coef is None:
+            coef = knobs['shaping_coef'] if self._ik_harvest else knobs['default_shaping_coef']
+        else:
+            coef = float(shaping_coef)
+        if not np.isfinite(coef) or coef < 0 or coef > 50:
+            raise ValueError('shaping_coef must be finite in [0, 50]')
+        self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
+        length = float(knobs['shaping_length_m'] if self._ik_harvest else knobs['default_shaping_length_m'])
+        if not np.isfinite(length) or not 0.05 <= length <= 2.0:
+            raise ValueError('shaping_length_m must be finite in [0.05, 2.0] m')
+        self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
+        self._deposit_w.assign(np.full(self.worlds, float(knobs['deposit_reward']), dtype=np.float32))
+        self._fail_w.assign(np.full(self.worlds, float(knobs['fail_reward']), dtype=np.float32))
+        pick = float(knobs['pick_reward'])
+        if not np.isfinite(pick) or not 0.0 <= pick <= 200.0:
+            raise ValueError('pick_reward must be finite in [0, 200]')
+        self._grasp_w.assign(np.array([pick], dtype=np.float32))
+        line = self._configure_carry_line(
+            knobs['carry_line_points'], knobs['carry_line_radius_m'],
+            knobs['carry_line_bonus'])
+        from treesim.basket import SIZE
+        hover_c = float(knobs['hover_clearance_m'])
+        release_c = float(knobs['release_clearance_m'])
+        if not np.isfinite(hover_c) or not 0.05 <= hover_c <= 0.40:
+            raise ValueError('hover_clearance_m must be finite in [0.05, 0.40] m')
+        if not np.isfinite(release_c) or not 0.05 <= release_c <= 0.40:
+            raise ValueError('release_clearance_m must be finite in [0.05, 0.40] m')
+        self._set_shape_offsets(
+            (0.0, 0.0, float(SIZE[2] + hover_c)),
+            (0.0, 0.0, float(SIZE[2] + release_c)),
+        )
+        close = float(knobs['jaw_close_frac'])
+        if not np.isfinite(close) or not 0.15 <= close <= 0.85:
+            raise ValueError('jaw_close_frac must be finite in [0.15, 0.85]')
+        self._chosen_close_frac = close
+        hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
+        holds = np.full(self.worlds, hold, dtype=np.float32)
+        self._easy_jaw_hold.assign(holds)
+        self._easy_jaw_hold_next.assign(holds)
+        slip_cap = float(knobs.get('slip_max_close_frac', 0.0) or 0.0)
+        if not np.isfinite(slip_cap) or slip_cap < 0.0 or slip_cap > 0.85:
+            raise ValueError('slip_max_close_frac must be finite in [0, 0.85]')
+        if slip_cap > 0.0 and slip_cap < close:
+            raise ValueError('slip_max_close_frac must be >= jaw_close_frac')
+        self._harvest_slip_max_close = slip_cap if self._ik_harvest else 0.0
+        stem_shape = bool(knobs.get('stem_shaping', False)) and self._ik_harvest
+        self._stem_shaping.assign(np.array([1 if stem_shape else 0], dtype=np.int32))
+        pull_frac = float(knobs.get('pull_close_frac', 0.0) or 0.0)
+        if not np.isfinite(pull_frac) or pull_frac < 0.0 or pull_frac > 0.85:
+            raise ValueError('pull_close_frac must be finite in [0, 0.85]')
+        if pull_frac > 0.0 and pull_frac < close:
+            raise ValueError('pull_close_frac must be >= jaw_close_frac')
+        self._harvest_pull_hold = (
+            float(self._jaw_open + pull_frac * (self._jaw_closed - self._jaw_open))
+            if (pull_frac > 0.0 and self._ik_harvest) else None)
+        detach_w = float(knobs.get('detach_reward', W_DETACH_HELD))
+        if not np.isfinite(detach_w) or not 0.0 <= detach_w <= 200.0:
+            raise ValueError('detach_reward must be finite in [0, 200]')
+        self._detach_w.assign(np.array([detach_w], dtype=np.float32))
+        self._open_xy_m = float(knobs['open_xy_m'])
+        host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+        q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+        self._grasp_catalog_locked = False
+        if self._ik_harvest:
+            import mujoco_warp as mw
+            with wp.ScopedDevice(self.device):
+                mw.forward(self.gpu_model, self.data)
+                self._refresh(mw)
+        catalog = self._build_harvest_catalog(q0) if self._ik_harvest else {}
+        self._last_grasp_catalog = catalog
+        return {
+            'easy': False,
+            'ik_demo': False,
+            'ik_grasp': False,
+            'ik_harvest': bool(self._ik_harvest),
+            'shaping_coef': coef,
+            'shaping_length_m': length,
+            'deposit_reward': float(knobs['deposit_reward']),
+            'fail_reward': float(knobs['fail_reward']),
+            'pick_reward': pick,
+            'hold_close_frac': close,
+            'slip_max_close_frac': float(self._harvest_slip_max_close),
+            'stem_shaping': bool(stem_shape),
+            'pull_close_frac': pull_frac if self._harvest_pull_hold is not None else 0.0,
+            'detach_reward': detach_w,
+            'scripted_jaw': bool(self._ik_harvest),
+            'weld': False,
+            **line,
+            'n_start_poses': int(catalog.get('n_start_poses', 0)),
+            'n_hard_starts': int(catalog.get('n_hard_starts', 0)),
+            'n_waypoints': int(catalog.get('n_waypoints', 0)),
+            'n_grasp_waypoints': int(catalog.get('n_grasp_waypoints', 0)),
+            'grasp_close_index': int(catalog.get('grasp_close_index', 0)),
+            'harvest_pull_index': int(catalog.get('harvest_pull_index', 0)),
+            'hover_error_m': 0.0,
+            'easy_start_error_m': 0.0,
+            'scope': ('hanging fruit; privileged IK pick/hold; crate-clearing '
+                      'carry to liner; scripted jaw; fruit stays free; no weld'),
+            **catalog,
+        }
+
     def snapshot_easy_hover(self):
         """Host copy of start indices and the success hover cohort."""
         return {
@@ -1856,6 +2380,11 @@ class FastRuntime:
         """
         self._easy = bool(enabled)
         self._ik_demo = bool(enabled) and bool(ik_demo)
+        self._ik_harvest = False
+        self._harvest_slip_max_close = 0.0
+        self._harvest_pull_hold = None
+        self._stem_shaping.assign(np.array([0], dtype=np.int32))
+        self._detach_w.assign(np.array([float(W_DETACH_HELD)], dtype=np.float32))
         knobs = IK_DEMO_PRESET if self._ik_demo else EASY_PRESET
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
         shape_both = bool(self._easy and knobs.get('shape_hand_and_fruit'))
@@ -2106,6 +2635,41 @@ class FastRuntime:
             raise RuntimeError('privileged grasp action has the wrong shape')
         return applied
 
+    def privileged_harvest_action(self):
+        """Joint increments along the pick-and-carry IK catalog.
+
+        Returns tanh-space applied actions in [-1, 1]. Active on HARVEST.
+        Fruit stays free; this stays off during eval.
+        """
+        import torch
+        if not self._ik_harvest:
+            applied = wp.to_torch(self._teacher_applied)
+            applied.zero_()
+            return applied
+        max_delta = 2.5 * self.control_dt
+        knobs = IK_HARVEST_PRESET
+        with wp.ScopedDevice(self.device):
+            wp.launch(_privileged_harvest_action, dim=(self.worlds, 7), inputs=[
+                self.task.goal, self.task.detached, self.task.grasped,
+                self.task.retained_detach, self.control.targets, self._waypoint_q,
+                self._easy_start_index, self._waypoint_index,
+                int(self._n_waypoints), int(self._grasp_close_index),
+                int(self._harvest_pull_index), self._easy_jaw_hold, self._jaw_open,
+                float(max_delta), float(knobs['waypoint_advance_rad']),
+                self.data.site_xpos, int(self.tcp_site), self.data.xpos, self.data.xmat,
+                self.data.xipos, self.chassis, self.task.fruit_body,
+                self.task.active_fruit, self._basket_center,
+                float(knobs['jaw_close_radius_m']),
+                float(self._open_xy_m), float(self._open_rim_z_m),
+                self._release_at_center, self._release_over_opening,
+                self._open_half_xy, float(self._open_max_above_rim_m),
+                self._teacher_applied],
+                device=self.device)
+        applied = wp.to_torch(self._teacher_applied)
+        if tuple(applied.shape) != (self.worlds, 7):
+            raise RuntimeError('privileged harvest action has the wrong shape')
+        return applied
+
     def pixels(self):
         if self.rig is None or self.policy_camera is None:
             raise RuntimeError('FastRuntime was created without a gripper camera')
@@ -2137,7 +2701,15 @@ class FastRuntime:
                       inputs=[mask_wp, self._easy_released], device=self.device)
             wp.launch(_clear_masked_int, dim=self.worlds,
                       inputs=[mask_wp, self._waypoint_index], device=self.device)
-            if self._ik_demo or self._ik_grasp:
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_armed], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_paid], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_hits], device=self.device)
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._carry_line_step], device=self.device)
+            if self._ik_demo or self._ik_grasp or self._ik_harvest:
                 self._commit_queued_carry_starts(mask)
             if self._easy and not self._ik_demo:
                 self._prefer_hover_after_success(mask)
@@ -2168,7 +2740,7 @@ class FastRuntime:
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self._jaw_qposadr, self._easy_jaw_hold],
                     device=self.device)
-            if self._ik_grasp:
+            if self._ik_grasp or self._ik_harvest:
                 wp.launch(_apply_grasp_start, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self.control.qids, self._easy_start_q, self._easy_start_index,
@@ -2184,7 +2756,7 @@ class FastRuntime:
                     device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
-            if self._ik_grasp:
+            if self._ik_grasp or self._ik_harvest:
                 self._relock_grasp_catalog_to_gpu()
             self._measure_reward(mask_wp)
             wp.launch(_basket_distance, dim=self.worlds,

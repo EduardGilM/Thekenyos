@@ -406,6 +406,29 @@ class ReachTeacherMathTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             random_pregrasp_offset_world_m(fruit, chassis, None)
 
+    def test_harvest_waypoints_pick_then_drop_over_opening(self):
+        from treesim.basket import CENTER, SIZE
+        from treesim.kiwi_rl.reach_teacher import (
+            crate_interior_contains, harvest_waypoints_world_m,
+        )
+        fruit = np.array([0.4, -0.2, 1.2], dtype=np.float64)
+        start = np.array([0.42, -0.18, 1.17], dtype=np.float64)
+        chassis = np.array([0.0, 0.0, 0.5], dtype=np.float64)
+        rot = np.eye(3)
+        waypoints, n_grasp = harvest_waypoints_world_m(fruit, start, chassis, rot)
+        self.assertEqual(n_grasp, 5)
+        self.assertGreaterEqual(waypoints.shape[0], n_grasp + 3)
+        np.testing.assert_allclose(waypoints[n_grasp - 2], fruit)
+        self.assertAlmostEqual(float(waypoints[-1][0]), float(CENTER[0] + chassis[0]))
+        self.assertAlmostEqual(float(waypoints[-1][1]), float(CENTER[1] + chassis[1]))
+        self.assertAlmostEqual(
+            float(waypoints[-1][2]), float(chassis[2] + CENTER[2] + SIZE[2] + 0.16))
+        pull_local = waypoints[n_grasp - 1] - chassis
+        self.assertFalse(crate_interior_contains(pull_local))
+        inside = np.asarray(CENTER, dtype=np.float64) + np.array([0.0, 0.0, 0.08])
+        with self.assertRaises(ValueError):
+            harvest_waypoints_world_m(inside, inside + [0.02, 0.0, -0.02], np.zeros(3), rot)
+
 
 if __name__ == '__main__':
     unittest.main()

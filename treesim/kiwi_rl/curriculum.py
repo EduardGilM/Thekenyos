@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import schemas as S
+from .rewards import W_DETACH_HELD
 
 GOALS = S.GOALS
 GOAL_ID = {name: i for i, name in enumerate(GOALS)}
@@ -249,6 +250,102 @@ IK_GRASP_PRESET = {
     # Close when the live TCP sits in the pad-pocket radius, not only at a
     # joint waypoint. 4.5 cm covers the rigid kiwi plus a small IK residual.
     'jaw_close_radius_m': 0.045,
+    'eval_every': 8,
+    'checkpoint_every': 4,
+    'deposit_reward': 30.0,
+    'fail_reward': -30.0,
+    'ppo_clip': 0.2,
+    'ppo_lr': 3e-4,
+    'ppo_epochs': 2,
+    'ppo_grad_clip': 0.5,
+    'ppo_adv_std_cap': None,
+    'ppo_value_coef': 0.5,
+    'ppo_target_kl': 0.05,
+    'ppo_unclip_positive': False,
+    'ppo_success_repeat': 4,
+    'ppo_imitation_coef': 0.25,
+    'ppo_success_epochs': 2,
+    'default_shaping_coef': 2.0,
+    'default_shaping_length_m': 0.25,
+}
+
+# Stage-3 full cycle: privileged IK picks hanging fruit, holds, then carries
+# into the liner. Fruit stays free; scripted jaw; eval keeps teacher_mix=0.
+# Collect needs a long horizon so BC can see settle, so the recipe uses
+# fewer worlds than the 2048×64 grasp tape. Ten IK updates seed the
+# pick/carry; the rest is teacher-off PPO with the detach→opening line.
+# Not a weld or field harvest.
+IK_HARVEST_PRESET = {
+    'demo_updates': 10,
+    'rl_updates': 26,
+    'updates': 36,
+    # Fine-tune from a harvest checkpoint: skip IK, keep hanging-fruit starts.
+    # Harvest3 sat after slams (entropy 0.001); continue explores more.
+    # Harvest6/7 forgot the grasp (eval 62 → 20 → 0 %) with lr 5e-4, four
+    # epochs and unclipped positive advantages: KL sat at the 0.05 target
+    # every update. Keep the exploration bump but update conservatively.
+    'rl_continue_updates': 48,
+    'rl_continue_entropy_coef': 0.004,
+    'rl_continue_ppo_epochs': 2,
+    'rl_continue_ppo_lr': 3e-4,
+    'rl_continue_ppo_unclip_positive': False,
+    'rl_continue_shaping_coef': 15.0,
+    'rl_continue_carry_line_bonus': 12.0,
+    # Harvest3/4 grasped (eval 49–87 %) but never deposited: the 0.32 pin
+    # (~5 N) let the fruit slip under the 8 N pull, the TCP term gave no
+    # signal once held, and 180 s episodes let a frozen hold run ~35 updates.
+    # Training timeout only; eval keeps its own horizon. The slip guard stays
+    # under the 0.45 pin that sat at 24 N over the 15 N jaw fail.
+    'rl_continue_timeout_s': 30.0,
+    'rl_continue_stem_shaping': True,
+    'rl_continue_slip_max_close_frac': 0.40,
+    # Harvest5 still lost the pull to slip (retained detach 0–9/512 per
+    # update): pin at the pull hold as soon as `grasped` latches instead of
+    # waiting for 3 cm of slip, and pay the held detach as the bottleneck
+    # event. Both are training assists; eval keeps guidance at 0.
+    'rl_continue_pull_close_frac': 0.40,
+    'rl_continue_detach_reward': 40.0,
+    'bc_epochs': 6,
+    'bc_minibatch_worlds': 64,
+    'worlds': 512,
+    'steps': 256,
+    'teacher_mix': 1.0,
+    'entropy_coef': 0.001,
+    'shaping_coef': 10.0,
+    'shaping_length_m': 0.50,
+    'n_start_poses': 48,
+    'hard_start_frac': 0.5,
+    'easy_standoff_min_m': 0.01,
+    'easy_standoff_max_m': 0.03,
+    'hard_standoff_min_m': 0.08,
+    'hard_standoff_max_m': 0.15,
+    'pregrasp_standoff_m': 0.03,
+    'pull_distance_m': 0.08,
+    'n_approach': 3,
+    'n_transit': 6,
+    'transit_clearance_m': 0.28,
+    'release_clearance_m': 0.16,
+    'release_target_inset_x_m': 0.0,
+    'release_target_clearance_m': 0.16,
+    'hover_clearance_m': 0.28,
+    'release_max_above_rim_m': 0.30,
+    'release_over_opening': True,
+    'release_at_center': True,
+    'release_opening_inset_m': 0.04,
+    'open_xy_m': 0.15,
+    'ik_accept_err_m': 0.025,
+    'waypoint_advance_rad': 0.08,
+    # Gentler than the 0.45 grasp pin that sat at 24 N over the 15 N fail.
+    'jaw_close_frac': 0.32,
+    'jaw_close_radius_m': 0.045,
+    # RL-only one-shot line after detach. Ends at the opening, not the floor.
+    # Eval keeps guidance_weight=0 so these crumbs stay off the score.
+    'carry_line_points': 8,
+    'carry_line_radius_m': 0.10,
+    'carry_line_bonus': 8.0,
+    # One-shot held-pick jackpot during RL. Eval keeps guidance at 0.
+    # Not a slam-detach: the oracle still needs 0.12 s hand contact.
+    'pick_reward': 100.0,
     'eval_every': 8,
     'checkpoint_every': 4,
     'deposit_reward': 30.0,
@@ -534,6 +631,70 @@ def apply_ik_grasp_preset(values: dict) -> dict:
         raise TypeError('values must be a dict')
     out = dict(values)
     out.update(IK_GRASP_PRESET)
+    return out
+
+
+def apply_ik_harvest_preset(values: dict) -> dict:
+    """Overlay the pick-and-deposit IK teacher. Does not enable --easy or weld."""
+    if not isinstance(values, dict):
+        raise TypeError('values must be a dict')
+    out = dict(values)
+    out.update(IK_HARVEST_PRESET)
+    return out
+
+
+def harvest_run_knobs(*, continuing: bool) -> dict:
+    """Fresh IK+RL stays conservative. Checkpoint continue explores more.
+
+    Eval still keeps teacher_mix=0 and guidance_weight=0. Not a weld.
+    """
+    out = dict(IK_HARVEST_PRESET)
+    out.setdefault('train_timeout_s', None)
+    out.setdefault('stem_shaping', False)
+    out.setdefault('slip_max_close_frac', 0.0)
+    out.setdefault('pull_close_frac', 0.0)
+    out.setdefault('detach_reward', W_DETACH_HELD)
+    if not continuing:
+        return out
+    entropy = float(out['rl_continue_entropy_coef'])
+    lr = float(out['rl_continue_ppo_lr'])
+    epochs = int(out['rl_continue_ppo_epochs'])
+    shaping = float(out['rl_continue_shaping_coef'])
+    line = float(out['rl_continue_carry_line_bonus'])
+    timeout = float(out['rl_continue_timeout_s'])
+    slip_cap = float(out['rl_continue_slip_max_close_frac'])
+    if not np.isfinite(timeout) or not 5.0 <= timeout <= 900.0:
+        raise ValueError('rl_continue_timeout_s must be finite in [5, 900] s')
+    if not np.isfinite(slip_cap) or not float(out['jaw_close_frac']) <= slip_cap <= 0.85:
+        raise ValueError('rl_continue_slip_max_close_frac must be in [jaw_close_frac, 0.85]')
+    pull_frac = float(out['rl_continue_pull_close_frac'])
+    detach_w = float(out['rl_continue_detach_reward'])
+    if not np.isfinite(pull_frac) or not float(out['jaw_close_frac']) <= pull_frac <= 0.85:
+        raise ValueError('rl_continue_pull_close_frac must be in [jaw_close_frac, 0.85]')
+    if not np.isfinite(detach_w) or not 0.0 <= detach_w <= 200.0:
+        raise ValueError('rl_continue_detach_reward must be finite in [0, 200]')
+    if not np.isfinite(entropy) or not 0.0 <= entropy <= 0.1:
+        raise ValueError('rl_continue_entropy_coef must be finite in [0, 0.1]')
+    if not np.isfinite(lr) or not 1e-5 <= lr <= 1e-2:
+        raise ValueError('rl_continue_ppo_lr must be finite in [1e-5, 1e-2]')
+    if epochs < 1 or epochs > 32:
+        raise ValueError('rl_continue_ppo_epochs must be in [1, 32]')
+    if not np.isfinite(shaping) or not 0.0 <= shaping <= 50.0:
+        raise ValueError('rl_continue_shaping_coef must be finite in [0, 50]')
+    if not np.isfinite(line) or not 0.0 < line <= 20.0:
+        raise ValueError('rl_continue_carry_line_bonus must be finite in (0, 20]')
+    out['entropy_coef'] = entropy
+    out['ppo_lr'] = lr
+    out['ppo_epochs'] = epochs
+    out['ppo_unclip_positive'] = bool(out['rl_continue_ppo_unclip_positive'])
+    out['shaping_coef'] = shaping
+    out['carry_line_bonus'] = line
+    out['updates'] = int(out['rl_continue_updates'])
+    out['train_timeout_s'] = timeout
+    out['stem_shaping'] = bool(out['rl_continue_stem_shaping'])
+    out['slip_max_close_frac'] = slip_cap
+    out['pull_close_frac'] = pull_frac
+    out['detach_reward'] = detach_w
     return out
 
 
