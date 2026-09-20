@@ -2,9 +2,6 @@
 
 ![Spot with a chassis-mounted kiwi basket under a procedural pergola](assets/kiwi-pergola.jpg)
 
-<img width="640" height="360" alt="image" src="https://github.com/user-attachments/assets/ad6cda4e-9269-4b4d-af2e-960015df5153" />
-
-
 A research simulation for a **Spot quadruped with one arm**, harvesting kiwis
 under a **1.6 m pergola canopy** and carrying them in a rear basket.
 
