@@ -10,7 +10,8 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    EASY_PRESET, apply_easy_preset, apply_speedrun_preset, easy_start_far_frac,
+    EASY_PRESET, IK_DEMO_PRESET, apply_easy_preset, apply_ik_demo_preset,
+    apply_speedrun_preset, easy_start_far_frac,
     easy_teacher_mix,
     evaluate_skills, evaluation_horizon_steps, fruit_block_reason,
     idle_locomotion_mask, next_stage, promotion_ready, sample_world_skills,
@@ -74,8 +75,38 @@ def apply_speedrun_cli(args, *, video_default=10):
     return args
 
 
+def apply_ik_demo_cli(args):
+    """Random-start IK demos, then a short RL fine-tune. Implies --easy."""
+    if not getattr(args, 'ik_demo', False):
+        return args
+    args.easy = True
+    preset = apply_ik_demo_preset({})
+    continuing = bool(getattr(args, 'initialize_from', None))
+    demo_updates = getattr(args, 'demo_updates', None)
+    if demo_updates is None:
+        demo_updates = 0 if continuing else int(preset['demo_updates'])
+    args.demo_updates = int(demo_updates)
+    if getattr(args, 'teacher_mix', None) is None:
+        args.teacher_mix = 0.0 if int(args.demo_updates) == 0 else float(preset['teacher_mix'])
+    if getattr(args, 'shaping_coef', None) is None:
+        args.shaping_coef = float(preset['shaping_coef'])
+    if continuing and int(args.demo_updates) == 0:
+        args.updates = int(preset['rl_continue_updates'])
+        args.eval_every = min(int(preset['eval_every']), 8)
+        args.checkpoint_every = min(int(preset['checkpoint_every']), 4)
+    else:
+        args.updates = int(preset['updates'])
+        args.eval_every = int(preset['eval_every'])
+        args.checkpoint_every = int(preset['checkpoint_every'])
+    args.entropy_coef = float(preset['entropy_coef'])
+    args.ppo_epochs = int(preset['ppo_epochs'])
+    return args
+
+
 def apply_easy_cli(args):
     """Privileged deposit facilitation. Explicit --teacher-mix, including 0, wins."""
+    if getattr(args, 'ik_demo', False):
+        return args
     if not getattr(args, 'easy', False):
         if getattr(args, 'teacher_mix', None) is None:
             args.teacher_mix = 0.0
@@ -147,6 +178,7 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
             memory = memory * (~reset)[:, None]
             mean, logstd, value, memory = policy(rgbd, r84, memory)
             raw = mean if deterministic else mean + logstd.exp() * torch.randn_like(mean)
+            teacher_applied = None
             if mix_prob > 0.0:
                 # Persist the teacher per world across the chunk so a deposit
                 # is not interrupted by per-step Bernoulli flicker. Resample
@@ -160,7 +192,8 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                     mask = torch.where(
                         reset, torch.rand(runtime.worlds, device=raw.device) < mix_prob, mask)
                 carry['teacher_mask'] = mask
-                raw = mix_privileged_actions(raw, runtime.privileged_deposit_action(), mask)
+                teacher_applied = runtime.privileged_deposit_action()
+                raw = mix_privileged_actions(raw, teacher_applied, mask)
                 teacher_used += int(mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
             base, arm = _split_action(raw)
@@ -199,6 +232,12 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                 row['hand_load_N'] = info['hand_load_N'].clone()
             if 'release_fired' in info:
                 row['release_fired'] = info['release_fired'].clone()
+            if 'inside_basket' in info:
+                row['inside_basket'] = info['inside_basket'].clone()
+            if 'basket_contact' in info:
+                row['basket_contact'] = info['basket_contact'].clone()
+            if teacher_applied is not None:
+                row['teacher_applied'] = teacher_applied.clone()
             rows.append(row)
             if index == 0:
                 rows[0]['memory0'] = memory0
@@ -437,6 +476,103 @@ def update(policy, optimizer, rows, bootstrap, minibatch_worlds=512, entropy_coe
                 fail_return_sum=fail_mass)
 
 
+def imitation_update(policy, optimizer, rows, epochs=6, dim_mask=None, grad_clip=0.5,
+                    minibatch_worlds=64):
+    """Behavior-clone the privileged IK teacher. Fruit stays a free body.
+
+    Unrolls time inside a world minibatch so the backward graph is not one
+    full-batch 64-step RGB-D tape. Recurrent memory stays per-world.
+    """
+    import torch
+    if rows and rows[0]['r84'].is_cuda:
+        torch.cuda.empty_cache()
+    if not rows or 'teacher_applied' not in rows[0]:
+        raise ValueError('imitation_update requires teacher_applied labels')
+    if not isinstance(epochs, int) or isinstance(epochs, bool) or not 1 <= epochs <= 32:
+        raise ValueError('epochs must be an integer in [1, 32]')
+    if not np_finite(grad_clip) or not 0.1 <= grad_clip <= 20.0:
+        raise ValueError('grad_clip must be finite in [0.1, 20]')
+    if not isinstance(minibatch_worlds, int) or isinstance(minibatch_worlds, bool):
+        raise ValueError('minibatch_worlds must be a positive integer')
+    if not 1 <= minibatch_worlds <= 1024:
+        raise ValueError('minibatch_worlds must be an integer in [1, 1024]')
+    if 'memory0' in rows[0]:
+        memory_root = rows[0]['memory0']
+    else:
+        memory_root = torch.zeros(rows[0]['r84'].shape[0], 64, device=rows[0]['r84'].device,
+                                  dtype=rows[0]['r84'].dtype)
+    worlds = int(rows[0]['r84'].shape[0])
+    batch_size = min(int(minibatch_worlds), worlds)
+    if dim_mask is None:
+        arm_mask = None
+    else:
+        arm_mask = dim_mask.to(dtype=rows[0]['r84'].dtype)
+        if arm_mask.shape[-1] == 10:
+            arm_mask = arm_mask[3:10]
+    losses = []
+    n_minibatches = 0
+    before = {name: p.detach().clone() for name, p in policy.named_parameters()}
+    for _ in range(epochs):
+        order = torch.randperm(worlds, device=rows[0]['r84'].device)
+        optimizer.zero_grad(set_to_none=True)
+        epoch_loss = 0.0
+        for start in range(0, worlds, batch_size):
+            idx = order[start:start + batch_size]
+            memory = memory_root[idx].clone()
+            pred, label, weights = [], [], []
+            for row in rows:
+                memory = memory * (~row['reset'][idx])[:, None]
+                mean, _, _, memory = policy(row['rgbd'][idx], row['r84'][idx], memory)
+                applied = mean.tanh()[:, 3:10] if mean.shape[-1] == 10 else mean.tanh()
+                target = row['teacher_applied'][idx]
+                if applied.shape != target.shape:
+                    raise ValueError('teacher labels must match the arm action width')
+                pred.append(applied)
+                label.append(target)
+                n_batch = int(idx.numel())
+                weights.append(torch.ones(n_batch, device=applied.device)
+                               if arm_mask is None else arm_mask.reshape(1, -1).expand(n_batch, -1))
+            stacked_w = torch.stack(weights)
+            err = (torch.stack(pred) - torch.stack(label)) * stacked_w
+            loss = err.square().sum() / stacked_w.sum().clamp_min(1.0)
+            if not torch.isfinite(loss):
+                raise RuntimeError('Nonfinite imitation loss')
+            (loss * (idx.numel() / float(worlds))).backward()
+            epoch_loss += float(loss.detach()) * (idx.numel() / float(worlds))
+            n_minibatches += 1
+            del pred, label, weights, stacked_w, err, loss
+        grad = torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip, error_if_nonfinite=True)
+        optimizer.step()
+        losses.append(float(epoch_loss))
+        if rows[0]['r84'].is_cuda:
+            torch.cuda.empty_cache()
+    changed = [name for name, p in policy.named_parameters() if not torch.equal(p, before[name])]
+    if not any(name.startswith('vision.') for name in changed) or 'mean.weight' not in changed:
+        raise RuntimeError('Imitation update did not change both vision and action weights')
+    return dict(
+        loss=float(losses[-1]), bc_loss=float(losses[-1]), bc_loss_initial=float(losses[0]),
+        bc_epochs_completed=int(epochs), grad_norm=float(grad),
+        kl=0.0, actor_loss=0.0, value_loss=0.0, sil_loss=0.0,
+        entropy=0.0, entropy_gaussian=0.0, entropy_per_dim=0.0,
+        entropy_kind='tanh_gaussian_differential_nats',
+        logstd_mean=float(policy.logstd.detach().mean()),
+        minibatches=int(n_minibatches), optimized_transitions=int(len(rows) * worlds * epochs),
+        ppo_epochs_completed=0, ppo_clip=0.0, ppo_grad_clip=float(grad_clip),
+        ppo_value_coef=0.0, ppo_target_kl=0.0, ppo_adv_std_cap=None,
+        ppo_unclip_positive=0, ppo_success_repeat=1, ppo_imitation_coef=0.0,
+        ppo_success_worlds=int(torch.stack([r['success'] for r in rows]).any(dim=0).sum())
+        if 'success' in rows[0] else 0,
+        ppo_causal_success_transitions=0,
+        reward_mean=float(torch.stack([r['reward'] for r in rows]).mean()),
+        reward_window_mean=float(torch.stack([r['reward'] for r in rows]).sum(dim=0).mean()),
+        reward_transition_mean=float(torch.stack([r['reward'] for r in rows]).mean()),
+        reward_std=float(torch.stack([r['reward'] for r in rows]).std(unbiased=False)),
+        success_window_return_mean=0.0, deposit_return_sum=0.0,
+        deposit_return_mean=0.0, fail_return_sum=0.0,
+        demo_phase=1, vision_changed=True, action_changed=True,
+    )
+
+
 def np_finite(value):
     import math
     return isinstance(value, (int, float)) and math.isfinite(float(value))
@@ -450,7 +586,10 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     runtime.configure_skills(evaluate_skills(stage, runtime.worlds))
     horizon = evaluation_horizon_steps(stage, control_dt, profile=eval_profile)
     saved_hover = None
-    if getattr(runtime, '_easy', False) and hasattr(runtime, 'clear_easy_hover_starts'):
+    if getattr(runtime, '_ik_demo', False) and hasattr(runtime, 'set_carry_progress'):
+        saved_hover = runtime.snapshot_easy_hover()
+        runtime.set_carry_progress(np.random.default_rng(0))
+    elif getattr(runtime, '_easy', False) and hasattr(runtime, 'clear_easy_hover_starts'):
         saved_hover = runtime.snapshot_easy_hover()
         runtime.clear_easy_hover_starts(np.random.default_rng(0))
     runtime.reset()
@@ -463,6 +602,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
     final_distance = torch.zeros(worlds, device='cuda:0')
     final_basket = torch.zeros(worlds, device='cuda:0')
     success_any = torch.zeros(worlds, dtype=torch.bool, device='cuda:0')
+    inside_any = torch.zeros_like(success_any)
+    basket_contact_any = torch.zeros_like(success_any)
     grasp_any = torch.zeros_like(success_any)
     detach_any = torch.zeros_like(success_any)
     harvested_peak = torch.zeros(worlds, device='cuda:0')
@@ -495,6 +636,10 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
                 closest_basket = torch.minimum(closest_basket, info['basket_distance_m'])
                 final_basket = info['basket_distance_m'].clone()
             success_any |= info['success'].bool()
+            if 'inside_basket' in info:
+                inside_any |= info['inside_basket'].bool()
+            if 'basket_contact' in info:
+                basket_contact_any |= info['basket_contact'].bool()
             grasp_any |= info['grasped'].bool()
             detach_any |= info['detached'].bool()
             if 'harvested' in info:
@@ -522,6 +667,8 @@ def evaluate_mission(runtime, policy, gait, camera_every, *, stage, control_dt=0
         'evaluation/mean_closest_basket_distance_m': float(closest_basket.mean()),
         'evaluation/terminal_transitions': terminals,
         'evaluation/harvest_successes': int(success_any.sum()),
+        'evaluation/inside_basket_worlds': int(inside_any.sum()),
+        'evaluation/basket_contact_worlds': int(basket_contact_any.sum()),
         'evaluation/success_rate': float(success_any.float().mean()),
         'evaluation/detach_rate': float(detach_any.float().mean()),
         'evaluation/grasp_rate': float(grasp_any.float().mean()),
@@ -594,8 +741,11 @@ def run(args):
     mask_idle = bool(getattr(args, 'mask_idle_locomotion', True))
     checkpoint_every = int(getattr(args, 'checkpoint_every', 1))
     easy = bool(getattr(args, 'easy', False))
+    ik_demo = bool(getattr(args, 'ik_demo', False))
     teacher_mix = float(getattr(args, 'teacher_mix', 0.0))
     shaping_coef = float(getattr(args, 'shaping_coef', EASY_PRESET['default_shaping_coef']))
+    demo_updates = int(getattr(args, 'demo_updates', 0) or 0) if ik_demo else 0
+    knobs = IK_DEMO_PRESET if ik_demo else EASY_PRESET
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
@@ -603,6 +753,8 @@ def run(args):
                   training_ready=False,
                   speedrun=bool(getattr(args, 'speedrun', False)),
                   easy=easy,
+                  ik_demo=ik_demo,
+                  demo_updates=demo_updates,
                   teacher_mix=teacher_mix,
                   teacher_horizon_updates=int(EASY_PRESET['teacher_horizon_updates']) if easy else 0,
                   teacher_anneal_after=-1,
@@ -624,8 +776,11 @@ def run(args):
         runtime = FastRuntime(args.scene, worlds=args.worlds, camera='hand_color_sensor',
                               nconmax=args.nconmax, njmax=args.njmax)
         if easy:
-            easy_info = runtime.enable_easy(True, shaping_coef=shaping_coef)
-            runtime.set_easy_progress(0.0, numpy_rng)
+            easy_info = runtime.enable_easy(True, shaping_coef=shaping_coef, ik_demo=ik_demo)
+            if ik_demo:
+                runtime.set_carry_progress(numpy_rng)
+            else:
+                runtime.set_easy_progress(0.0, numpy_rng)
             config['hover_error_m'] = easy_info['hover_error_m']
             config['easy_start_error_m'] = easy_info['easy_start_error_m']
             config['easy_far_frac'] = 0.0
@@ -634,17 +789,20 @@ def run(args):
             config['shaping_length_m'] = easy_info.get('shaping_length_m')
             config['deposit_reward'] = easy_info.get('deposit_reward')
             config['fail_reward'] = easy_info.get('fail_reward')
-            config['ppo_lr'] = float(EASY_PRESET['ppo_lr'])
-            config['ppo_epochs'] = int(EASY_PRESET['ppo_epochs'])
-            config['ppo_clip'] = float(EASY_PRESET['ppo_clip'])
-            config['ppo_grad_clip'] = float(EASY_PRESET['ppo_grad_clip'])
-            config['ppo_adv_std_cap'] = EASY_PRESET['ppo_adv_std_cap']
-            config['ppo_value_coef'] = float(EASY_PRESET['ppo_value_coef'])
-            config['ppo_target_kl'] = float(EASY_PRESET['ppo_target_kl'])
-            config['ppo_unclip_positive'] = bool(EASY_PRESET['ppo_unclip_positive'])
-            config['ppo_success_repeat'] = int(EASY_PRESET['ppo_success_repeat'])
-            config['ppo_imitation_coef'] = float(EASY_PRESET['ppo_imitation_coef'])
-            config['ppo_success_epochs'] = int(EASY_PRESET['ppo_success_epochs'])
+            config['ppo_lr'] = float(knobs['ppo_lr'])
+            config['ppo_epochs'] = int(knobs['ppo_epochs'])
+            config['ppo_clip'] = float(knobs['ppo_clip'])
+            config['ppo_grad_clip'] = float(knobs['ppo_grad_clip'])
+            config['ppo_adv_std_cap'] = knobs['ppo_adv_std_cap']
+            config['ppo_value_coef'] = float(knobs['ppo_value_coef'])
+            config['ppo_target_kl'] = float(knobs['ppo_target_kl'])
+            config['ppo_unclip_positive'] = bool(knobs['ppo_unclip_positive'])
+            config['ppo_success_repeat'] = int(knobs['ppo_success_repeat'])
+            config['ppo_imitation_coef'] = float(knobs['ppo_imitation_coef'])
+            config['ppo_success_epochs'] = int(knobs['ppo_success_epochs'])
+            config['n_waypoints'] = easy_info.get('n_waypoints')
+            config['n_hard_starts'] = easy_info.get('n_hard_starts')
+            config['ik_demo'] = bool(ik_demo)
             config['start_over_opening'] = EASY_PRESET['start_over_opening']
             config['start_open_radius_m'] = EASY_PRESET['start_open_radius_m']
             config['start_inset_x_m'] = EASY_PRESET['start_inset_x_m']
@@ -655,8 +813,8 @@ def run(args):
             config['release_over_opening'] = easy_info.get('release_over_opening')
             config['release_opening_inset_m'] = easy_info.get('release_opening_inset_m')
             config['release_max_above_rim_m'] = easy_info.get('release_max_above_rim_m')
-            config['release_target_clearance_m'] = EASY_PRESET['release_target_clearance_m']
-            config['release_target_inset_x_m'] = EASY_PRESET['release_target_inset_x_m']
+            config['release_target_clearance_m'] = knobs['release_target_clearance_m']
+            config['release_target_inset_x_m'] = knobs['release_target_inset_x_m']
             config['safe_hover_arm_q'] = [float(q) for q in EASY_PRESET['safe_hover_arm_q']]
             config['far_horizon_updates'] = easy_info.get('far_horizon_updates')
             config['far_frac_cap'] = easy_info.get('far_frac_cap')
@@ -677,7 +835,7 @@ def run(args):
         if args.initialize_from:
             load_checkpoint(args.initialize_from, {'student':policy}, None,
                             expected_meta={'camera':'hand_color_sensor'})
-        ppo_lr = float(EASY_PRESET['ppo_lr']) if easy else 3e-4
+        ppo_lr = float(knobs['ppo_lr']) if easy else 3e-4
         if not np_finite(ppo_lr) or not 1e-5 <= ppo_lr <= 1e-2:
             raise ValueError('ppo_lr must be finite in [1e-5, 1e-2]')
         optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
@@ -687,6 +845,7 @@ def run(args):
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
                 teacher_mix=warmup_mix)
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         start = time.monotonic()
         reports = []
         last_checkpoint = args.output / 'checkpoint-0000.pt'
@@ -698,6 +857,7 @@ def run(args):
         apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
         baseline = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
                                     control_dt=runtime.control_dt, eval_profile=eval_profile)
+        torch.cuda.empty_cache()
         baseline.update(curriculum_stage=stage.name, curriculum_index=stage.index)
         log.log(baseline, step=0)
         dashboard.refresh()
@@ -714,7 +874,12 @@ def run(args):
         apply_stage(runtime, stage, numpy_rng)
         for iteration in range(args.updates):
             began = time.monotonic()
-            if easy:
+            demo_phase = bool(ik_demo and iteration < demo_updates)
+            if ik_demo:
+                start_info = runtime.set_carry_progress(numpy_rng)
+                config['easy_far_frac'] = start_info['easy_far_frac']
+                mix = 1.0 if demo_phase else 0.0
+            elif easy:
                 far_frac = easy_start_far_frac(iteration)
                 start_info = runtime.set_easy_progress(far_frac, numpy_rng)
                 config['easy_far_frac'] = start_info['easy_far_frac']
@@ -730,29 +895,47 @@ def run(args):
                                              carry=carry, reset_all=False, dim_mask=dim_mask,
                                              teacher_mix=mix)
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             rollout_seconds = time.monotonic() - began
-            if easy:
-                ppo_clip = float(EASY_PRESET['ppo_clip'])
-                ppo_grad = float(EASY_PRESET['ppo_grad_clip'])
-                raw_std_cap = EASY_PRESET['ppo_adv_std_cap']
-                ppo_std_cap = None if raw_std_cap is None else float(raw_std_cap)
-                ppo_value = float(EASY_PRESET['ppo_value_coef'])
-                ppo_kl = float(EASY_PRESET['ppo_target_kl'])
-                ppo_unclip = bool(EASY_PRESET['ppo_unclip_positive'])
-                ppo_repeat = int(EASY_PRESET['ppo_success_repeat'])
-                ppo_sil = float(EASY_PRESET['ppo_imitation_coef'])
-                ppo_epochs = int(EASY_PRESET['ppo_epochs'])
-                if int(torch.stack([r['success'] for r in rows]).any(dim=0).sum()) > 0:
-                    ppo_epochs = max(ppo_epochs, int(EASY_PRESET['ppo_success_epochs']))
+            if ik_demo:
+                live_wp = np.asarray(runtime._waypoint_index.numpy(), dtype=np.int32).reshape(-1)
+                start_info = dict(start_info)
+                start_info['carry_waypoint_mean'] = float(live_wp.mean()) if live_wp.size else 0.0
+                start_info['carry_waypoint_max'] = int(live_wp.max()) if live_wp.size else 0
+            if demo_phase:
+                for row in rows:
+                    for key in ('raw', 'logp', 'value'):
+                        row.pop(key, None)
+                del bootstrap
+                bootstrap = None
+                bc_batch = min(int(args.minibatch_worlds), int(IK_DEMO_PRESET['bc_minibatch_worlds']))
+                metrics = imitation_update(
+                    policy, optimizer, rows, epochs=int(IK_DEMO_PRESET['bc_epochs']),
+                    dim_mask=dim_mask, grad_clip=float(knobs['ppo_grad_clip']),
+                    minibatch_worlds=bc_batch)
             else:
-                ppo_clip, ppo_grad, ppo_std_cap, ppo_value, ppo_kl = 0.2, 0.5, None, 0.5, 0.03
-                ppo_unclip, ppo_repeat, ppo_sil, ppo_epochs = False, 1, 0.0, int(args.ppo_epochs)
-            metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
-                             entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=ppo_epochs,
-                             dim_mask=dim_mask, clip=ppo_clip, grad_clip=ppo_grad,
-                             adv_std_cap=ppo_std_cap, value_coef=ppo_value, target_kl=ppo_kl,
-                             unclip_positive=ppo_unclip, success_repeat=ppo_repeat,
-                             imitation_coef=ppo_sil)
+                if easy:
+                    ppo_clip = float(knobs['ppo_clip'])
+                    ppo_grad = float(knobs['ppo_grad_clip'])
+                    raw_std_cap = knobs['ppo_adv_std_cap']
+                    ppo_std_cap = None if raw_std_cap is None else float(raw_std_cap)
+                    ppo_value = float(knobs['ppo_value_coef'])
+                    ppo_kl = float(knobs['ppo_target_kl'])
+                    ppo_unclip = bool(knobs['ppo_unclip_positive'])
+                    ppo_repeat = int(knobs['ppo_success_repeat'])
+                    ppo_sil = float(knobs['ppo_imitation_coef'])
+                    ppo_epochs = int(knobs['ppo_epochs'])
+                    if int(torch.stack([r['success'] for r in rows]).any(dim=0).sum()) > 0:
+                        ppo_epochs = max(ppo_epochs, int(knobs['ppo_success_epochs']))
+                else:
+                    ppo_clip, ppo_grad, ppo_std_cap, ppo_value, ppo_kl = 0.2, 0.5, None, 0.5, 0.03
+                    ppo_unclip, ppo_repeat, ppo_sil, ppo_epochs = False, 1, 0.0, int(args.ppo_epochs)
+                metrics = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
+                                 entropy_coef=args.entropy_coef, gamma=args.gamma, epochs=ppo_epochs,
+                                 dim_mask=dim_mask, clip=ppo_clip, grad_clip=ppo_grad,
+                                 adv_std_cap=ppo_std_cap, value_coef=ppo_value, target_kl=ppo_kl,
+                                 unclip_positive=ppo_unclip, success_repeat=ppo_repeat,
+                                 imitation_coef=ppo_sil)
             torch.cuda.synchronize()
             duration = time.monotonic() - began
             metrics.update(update=iteration+1, transitions=(iteration+1)*args.steps*args.worlds,
@@ -763,9 +946,18 @@ def run(args):
                 distance_closest_m=float(torch.stack([r['distance'] for r in rows]).min()),
                 distance_mean_closest_m=float(torch.stack([r['distance'] for r in rows]).min(dim=0).values.mean()),
                 terminal_transitions=int(torch.stack([r['terminated'] for r in rows]).sum()),
-                harvest_successes=int(torch.stack([r['success'] for r in rows]).sum()),
+                harvest_successes=int((torch.stack([r['success'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvest_jackpot_sum=float(int(metrics['ppo_success_worlds']) * (
-                    float(EASY_PRESET['deposit_reward']) if easy else 20.0)),
+                    float(knobs['deposit_reward']) if easy else 20.0)),
+                demo_phase=int(demo_phase),
+                ik_demo=int(ik_demo),
+                carry_easy_start_worlds=int(start_info.get('carry_easy_start_worlds', 0)),
+                carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
+                carry_waypoint_mean=float(start_info.get('carry_waypoint_mean', 0.0)),
+                carry_waypoint_max=int(start_info.get('carry_waypoint_max', 0)),
+                grasp_offset_mean_m=float(getattr(runtime, '_grasp_offset_mean_m', 0.0)),
+                grasp_offset_std_m=float(getattr(runtime, '_grasp_offset_std_m', 0.0)),
+                grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),
                 grasp_events=int((torch.stack([r['grasped'] for r in rows]).max(dim=0).values > 0).sum()),
                 detach_events=int((torch.stack([r['detached'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvested_mean=float(torch.stack([r['harvested'] for r in rows]).max(dim=0).values.float().mean()),
@@ -812,6 +1004,12 @@ def run(args):
             if 'release_fired' in rows[0]:
                 metrics['release_fired_worlds'] = int(
                     torch.stack([r['release_fired'] for r in rows]).any(dim=0).sum())
+            if 'inside_basket' in rows[0]:
+                metrics['inside_basket_worlds'] = int(
+                    (torch.stack([r['inside_basket'] for r in rows]).max(dim=0).values > 0).sum())
+            if 'basket_contact' in rows[0]:
+                metrics['basket_contact_worlds'] = int(
+                    (torch.stack([r['basket_contact'] for r in rows]).max(dim=0).values > 0).sum())
             if easy and teacher_anneal_after is None and int(metrics['harvest_successes']) >= 8:
                 teacher_anneal_after = iteration + 1
                 config['teacher_anneal_after'] = teacher_anneal_after
@@ -927,6 +1125,10 @@ def main():
                    help='Shorter eval, fewer checkpoints, mask idle locomotion; not field harvest')
     p.add_argument('--easy', action='store_true',
                    help='Kiwi starts in the jaws; scripted hold/open; RL deposits; not a weld')
+    p.add_argument('--ik-demo', action='store_true',
+                   help='Random easy/hard starts; IK demos to the basket centre; then short RL')
+    p.add_argument('--demo-updates', type=int, default=None,
+                   help='IK-demo behaviour-clone updates; 0 with --initialize-from is RL only')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
@@ -941,6 +1143,7 @@ def main():
     add_monitor_args(p)
     a = p.parse_args()
     apply_speedrun_cli(a)
+    apply_ik_demo_cli(a)
     apply_easy_cli(a)
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
@@ -954,6 +1157,8 @@ def main():
         p.error('Invalid PPO entropy, gamma or epochs')
     if not 0.0 <= a.teacher_mix <= 1.0:
         p.error('Invalid teacher-mix')
+    if getattr(a, 'demo_updates', None) is not None and not 0 <= int(a.demo_updates) <= 10000:
+        p.error('Invalid demo-updates')
     if not 0.0 <= a.shaping_coef <= 50.0:
         p.error('Invalid shaping-coef')
     run(a)

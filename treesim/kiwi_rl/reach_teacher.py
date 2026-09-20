@@ -982,6 +982,261 @@ def easy_start_side_y_m(rng=None, *, side_y_m=None, span_m=None):
     return sign * float(rng.uniform(side, side + span))
 
 
+def crate_interior_contains(local, *, rim_margin_m=0.0):
+    """True if a chassis-frame point sits inside the crate volume.
+
+    Above the open rim does not count unless ``rim_margin_m`` raises the lid.
+    Used to reject start/waypoint TCPs that clip through the liner.
+    """
+    point = np.asarray(local, dtype=np.float64).reshape(3)
+    margin = float(rim_margin_m)
+    if not np.isfinite(point).all() or not np.isfinite(margin) or margin < 0 or margin > 0.2:
+        raise ValueError('crate interior inputs must be finite, rim_margin in [0, 0.2] m')
+    lo, hi = basket_chassis_aabb_m()
+    if not (lo[0] < float(point[0]) < hi[0] and lo[1] < float(point[1]) < hi[1]):
+        return False
+    return float(lo[2]) <= float(point[2]) < float(hi[2]) + margin
+
+
+def fruit_inside_crate_local(local, radii=None, *, tol_m=0.012):
+    """True when the fruit ellipsoid sits in the liner AABB, not on the rim.
+
+    Matches the GPU deposit kernel: COM plus radii must clear the inner
+    walls, sit on or above the floor, and stay below the open rim.
+    Touching the outer wall does not count. ``tol_m`` is the same 12 mm
+    coarse-solver penetration allowance as ``CONTAINMENT_TOL_M``.
+    """
+    from treesim.basket import CENTER, SIZE, WALL
+    from treesim.native_kiwi import RADII_M
+    point = np.asarray(local, dtype=np.float64).reshape(3)
+    extent = np.asarray(RADII_M if radii is None else radii, dtype=np.float64).reshape(3)
+    tol = float(tol_m)
+    if point.shape != (3,) or extent.shape != (3,):
+        raise ValueError('fruit local pose and radii must be 3-vectors')
+    if not np.isfinite(point).all() or not np.isfinite(extent).all() or not np.isfinite(tol):
+        raise ValueError('fruit-in-crate inputs must be finite')
+    if not 0.0 <= tol <= 0.05:
+        raise ValueError('containment tol must be in [0, 0.05] m')
+    if np.any(extent <= 0.0) or np.any(extent > 0.12):
+        raise ValueError('fruit radii must be positive and kiwi-sized')
+    center = np.asarray(CENTER, dtype=np.float64).reshape(3)
+    size = np.asarray(SIZE, dtype=np.float64).reshape(3)
+    wall = float(WALL)
+    return bool(
+        abs(float(point[0] - center[0])) + float(extent[0]) < float(size[0]) / 2.0 - wall + tol
+        and abs(float(point[1] - center[1])) + float(extent[1]) < float(size[1]) / 2.0 - wall + tol
+        and float(point[2]) - float(extent[2]) >= float(center[2]) + wall / 2.0 - tol
+        and float(point[2]) + float(extent[2]) < float(center[2]) + float(size[2]))
+
+
+def wrist_clears_crate(tcp_local, approach_local, *, tcp_to_wrist_m=0.195, rim_margin_m=0.12):
+    """True if a tool-axis wrist estimate stays out of the liner.
+
+    ``approach_local`` is the hand +Z in the chassis frame (TCP forward of the
+    wrist). A downward tool puts the wrist above the TCP; a level −X tool puts
+    it toward +X. Geometry only; not a contact measurement.
+    """
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    approach = np.asarray(approach_local, dtype=np.float64).reshape(3)
+    offset = float(tcp_to_wrist_m)
+    margin = float(rim_margin_m)
+    if not np.isfinite(tcp).all() or not np.isfinite(approach).all():
+        raise ValueError('wrist clearance inputs must be finite')
+    if not np.isfinite(offset) or not 0.05 <= offset <= 0.35:
+        raise ValueError('tcp_to_wrist_m must be finite in [0.05, 0.35] m')
+    if not np.isfinite(margin) or not 0.0 <= margin <= 0.2:
+        raise ValueError('rim_margin_m must be finite in [0, 0.2] m')
+    norm = float(np.linalg.norm(approach))
+    if norm < 1e-9:
+        raise ValueError('approach_local must be nonzero')
+    wrist = tcp - (approach / norm) * offset
+    return not crate_interior_contains(wrist, rim_margin_m=margin)
+
+
+def downward_approach_local():
+    """Chassis-frame hand +Z pointing down so the wrist stays above the TCP."""
+    return np.array([0.0, 0.0, -1.0], dtype=np.float64)
+
+
+def release_tcp_local_m(clearance_m=0.16):
+    """Chassis-frame TCP over the true basket centre, above the rim.
+
+    Distinct from the inset hover dump: XY is ``CENTER``, not robot-side.
+    The caller must still keep the wrist above the rim (downward tool).
+    """
+    from treesim.basket import CENTER, SIZE
+    clearance = float(clearance_m)
+    if not np.isfinite(clearance) or not 0.08 <= clearance <= 0.5:
+        raise ValueError('release clearance must be finite in [0.08, 0.5] m')
+    local = np.asarray(CENTER, dtype=np.float64) + np.array(
+        [0.0, 0.0, float(SIZE[2]) + clearance], dtype=np.float64)
+    if crate_interior_contains(local):
+        raise ValueError('release TCP sits inside the crate volume')
+    return local
+
+
+def carry_waypoints_local_m(start_local, *, transit_clearance_m=0.28, release_clearance_m=0.16,
+                            n_transit=6):
+    """Collision-avoiding TCP polyline: lift, slide high, then drop at centre.
+
+    Start stays outside the crate. Lift keeps that XY and rises. Transit
+    samples stay at ``transit_clearance_m`` above the rim while XY moves to
+    ``CENTER``. Release is the true opening centre. This is a Cartesian
+    scaffold for IK, not a learned path.
+    """
+    start = np.asarray(start_local, dtype=np.float64).reshape(3)
+    transit_c = float(transit_clearance_m)
+    release_c = float(release_clearance_m)
+    n = int(n_transit)
+    if start.shape != (3,) or not np.isfinite(start).all():
+        raise ValueError('start_local must be a finite 3-vector')
+    if not np.isfinite(transit_c) or not 0.16 <= transit_c <= 0.5:
+        raise ValueError('transit_clearance_m must be finite in [0.16, 0.5] m')
+    if not np.isfinite(release_c) or not 0.08 <= release_c <= transit_c:
+        raise ValueError('release_clearance_m must be finite in [0.08, transit] m')
+    if n < 2 or n > 16:
+        raise ValueError('n_transit must be an integer in [2, 16]')
+    if crate_interior_contains(start):
+        raise ValueError('carry start TCP sits inside the crate volume')
+    lo, hi = basket_chassis_aabb_m()
+    lift = np.array([float(start[0]), float(start[1]),
+                     max(float(start[2]), float(hi[2]) + transit_c)], dtype=np.float64)
+    transit = release_tcp_local_m(transit_c)
+    release = release_tcp_local_m(release_c)
+    waypoints = [start.copy(), lift]
+    for step in range(1, n + 1):
+        frac = float(step) / float(n)
+        waypoints.append((1.0 - frac) * lift + frac * transit)
+    waypoints.append(release)
+    out = np.stack(waypoints).astype(np.float64)
+    for point in out:
+        if crate_interior_contains(point):
+            raise ValueError('carry waypoint entered the crate interior')
+    return out
+
+
+def random_carry_start_local_m(rng, *, hard=False, margin_m=None, clearance_m=None,
+                               x_span_m=None, y_span_m=None, z_span_m=None):
+    """Random chassis-frame TCP outside the crate: near (easy) or farther (hard).
+
+    Rejects the liner and the open-top hover. ``hard`` uses a wider box so
+    the catalog is not only the near-crate dump. ``rng`` is a NumPy Generator.
+    """
+    from treesim.kiwi_rl.curriculum import IK_DEMO_PRESET
+    if rng is None or not hasattr(rng, 'uniform'):
+        raise TypeError('rng must be a NumPy Generator')
+    preset = IK_DEMO_PRESET
+    if hard:
+        margin = float(preset['hard_margin_m'] if margin_m is None else margin_m)
+        clearance = float(preset['hard_clearance_m'] if clearance_m is None else clearance_m)
+        x_span = float(preset['hard_x_span_m'] if x_span_m is None else x_span_m)
+        y_span = float(preset['hard_y_span_m'] if y_span_m is None else y_span_m)
+        z_span = float(preset['hard_z_span_m'] if z_span_m is None else z_span_m)
+    else:
+        margin = float(preset['easy_margin_m'] if margin_m is None else margin_m)
+        clearance = float(preset['easy_clearance_m'] if clearance_m is None else clearance_m)
+        x_span = float(preset['easy_x_span_m'] if x_span_m is None else x_span_m)
+        y_span = float(preset['easy_y_span_m'] if y_span_m is None else y_span_m)
+        z_span = float(preset['easy_z_span_m'] if z_span_m is None else z_span_m)
+    if not np.isfinite([margin, clearance, x_span, y_span, z_span]).all():
+        raise ValueError('carry start spans must be finite')
+    if not 0.20 <= margin <= 0.80 or not 0.08 <= clearance <= 0.5:
+        raise ValueError('carry margin/clearance are outside the physics-safe box')
+    if not 0.04 <= x_span <= 0.6 or not 0.0 <= y_span <= 0.30 or not 0.0 <= z_span <= 0.30:
+        raise ValueError('carry start spans are outside the physics-safe box')
+    lo, hi = basket_chassis_aabb_m()
+    x = float(rng.uniform(hi[0] + margin, hi[0] + margin + x_span))
+    y = float(rng.uniform(-y_span, y_span))
+    z = float(rng.uniform(hi[2] + clearance, hi[2] + clearance + z_span))
+    local = push_tcp_outside_basket(np.array([x, y, z], dtype=np.float64), margin_m=margin)
+    local[2] = max(float(local[2]), float(hi[2] + clearance))
+    if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+        raise ValueError('carry start TCP still intersects the crate volume')
+    if crate_interior_contains(local):
+        raise ValueError('carry start TCP sits inside the crate volume')
+    return local
+
+
+def random_grasp_offset_local_m(tcp_local, rng, *, inset_span_m=0.05, lateral_span_m=0.018,
+                                max_offset_m=0.08):
+    """Random free-fruit COM in the physically allowed pad pocket.
+
+    Samples the full mouth-axis inset and a uniform-area disk in the pad
+    plane. Rejects knuckle and past-the-teeth poses. Fruit stays a free
+    body; this is not a weld or a single TCP spawn.
+    """
+    if rng is None or not hasattr(rng, 'uniform'):
+        raise TypeError('rng must be a NumPy Generator')
+    tcp = np.asarray(tcp_local, dtype=np.float64).reshape(3)
+    inset_span = float(inset_span_m)
+    lateral = float(lateral_span_m)
+    max_off = float(max_offset_m)
+    if tcp.shape != (3,) or not np.isfinite(tcp).all():
+        raise ValueError('TCP local frame must be a finite 3-vector')
+    if not np.isfinite([inset_span, lateral, max_off]).all():
+        raise ValueError('grasp offset spans must be finite')
+    if not 0.0 <= inset_span <= 0.06 or not 0.0 <= lateral <= 0.02:
+        raise ValueError('grasp inset/lateral spans are outside the pad pocket')
+    if not 0.02 <= max_off <= 0.12:
+        raise ValueError('max_offset_m must be finite in [0.02, 0.12] m')
+    n = float(np.linalg.norm(tcp))
+    if n < 1e-9:
+        raise ValueError('TCP local frame must be nonzero')
+    axis = tcp / n
+    helper = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    if abs(float(np.dot(axis, helper))) > 0.9:
+        helper = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    u = np.cross(axis, helper)
+    u = u / float(np.linalg.norm(u))
+    v = np.cross(axis, u)
+    max_in = max(inset_span, 0.05)
+    for _ in range(8):
+        inset = float(rng.uniform(0.0, inset_span))
+        pocket = axial_mouth_local(tcp, inset_m=inset, max_inset_m=max_in)
+        radius = lateral * float(np.sqrt(rng.uniform(0.0, 1.0)))
+        angle = float(rng.uniform(0.0, 2.0 * np.pi))
+        pocket = pocket + u * (radius * float(np.cos(angle))) + v * (radius * float(np.sin(angle)))
+        if grasp_local_near_tcp(pocket, tcp, max_offset_m=max_off):
+            return pocket.astype(np.float64)
+    pocket = axial_mouth_local(
+        tcp, inset_m=float(rng.uniform(0.0, inset_span)), max_inset_m=max_in)
+    if not grasp_local_near_tcp(pocket, tcp, max_offset_m=max_off):
+        raise ValueError('randomized grasp offset left the pad pocket')
+    return pocket.astype(np.float64)
+
+
+def arm_basket_contact_pairs(model, data):
+    """Arm-or-hand vs basket liner/floor contact names. Visual vents ignored."""
+    pairs = []
+    for index in range(int(data.ncon)):
+        first = model.geom(int(data.contact[index].geom1)).name or ''
+        second = model.geom(int(data.contact[index].geom2)).name or ''
+        names = (first, second)
+        if not any(name.startswith('basket_') for name in names):
+            continue
+        other = second if first.startswith('basket_') else first
+        if other.startswith('basket_'):
+            continue
+        pairs.append(names)
+    return tuple(pairs)
+
+
+def pose_clears_crate(model, data, tcp_site, chassis, *, tcp_local=None):
+    """True when the posed arm has no basket contacts and TCP is not in the liner."""
+    import mujoco
+    if not isinstance(tcp_site, (int, np.integer)) or int(tcp_site) < 0:
+        raise ValueError('tcp_site must be a non-negative integer')
+    mujoco.mj_forward(model, data)
+    if arm_basket_contact_pairs(model, data):
+        return False
+    if tcp_local is None:
+        tcp = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64).reshape(3)
+        origin = np.asarray(data.xpos[int(chassis)], dtype=np.float64).reshape(3)
+        rot = np.asarray(data.xmat[int(chassis)], dtype=np.float64).reshape(3, 3)
+        tcp_local = rot.T @ (tcp - origin)
+    return not crate_interior_contains(tcp_local)
+
+
 def random_easy_start_local_m(rng, home_local=None, *, margin_m=None, clearance_m=None):
     """Random chassis-frame TCP outside the crate in a bounded IK box.
 
@@ -1101,6 +1356,133 @@ def solve_tcp_hover(model, qpos, site_id, target_world, joint_qposadr, joint_dof
         commands = np.clip(commands + delta.astype(np.float64), ranges[:, 0], ranges[:, 1])
         q[joint_qposadr] = commands
     return commands.astype(np.float32), float(error_norm)
+
+
+def solve_tcp_axis(model, qpos, site_id, target_world, approach_world, joint_qposadr,
+                   joint_dofadr, q_init, ranges, *, damping=.05, max_step=.1, steps=80,
+                   tol_m=0.02, axis_tol=0.18):
+    """CPU DLS for site position plus hand +Z approach. Fruit stays free."""
+    import mujoco
+    qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
+    target_world = np.asarray(target_world, dtype=np.float64).reshape(3)
+    approach_world = np.asarray(approach_world, dtype=np.float64).reshape(3)
+    joint_qposadr = np.asarray(joint_qposadr, dtype=int).reshape(-1)
+    joint_dofadr = np.asarray(joint_dofadr, dtype=int).reshape(-1)
+    q_init = np.asarray(q_init, dtype=np.float64).reshape(-1)
+    ranges = np.asarray(ranges, dtype=np.float64)
+    n_arm = joint_qposadr.shape[0]
+    if n_arm != 6 or joint_dofadr.shape[0] != 6 or q_init.shape != (6,) or ranges.shape != (6, 2):
+        raise ValueError('axis IK uses the six arm joints, not the jaw')
+    if not isinstance(site_id, (int, np.integer)) or int(site_id) < 0:
+        raise ValueError('site_id must be a non-negative integer')
+    if not isinstance(steps, int) or isinstance(steps, bool) or not 1 <= steps <= 200:
+        raise ValueError('steps must be an integer in [1, 200]')
+    if not np.isfinite(target_world).all() or not np.isfinite(approach_world).all():
+        raise ValueError('axis IK target/approach must be finite')
+    if not np.isfinite(qpos).all() or not np.isfinite(q_init).all():
+        raise ValueError('axis IK configuration must be finite')
+    if not np.isfinite(tol_m) or tol_m <= 0 or not np.isfinite(axis_tol) or axis_tol <= 0:
+        raise ValueError('tol_m and axis_tol must be finite and positive')
+    approach_n = float(np.linalg.norm(approach_world))
+    if approach_n < 1e-9:
+        raise ValueError('approach_world must be nonzero')
+    approach = approach_world / approach_n
+    data = mujoco.MjData(model)
+    q = qpos.copy()
+    commands = q_init.copy()
+    q[joint_qposadr] = commands
+    error_norm = np.inf
+    axis_err = 1.0
+    for _ in range(steps):
+        data.qpos[:] = q
+        mujoco.mj_kinematics(model, data)
+        mujoco.mj_comPos(model, data)
+        hand = np.asarray(data.site_xpos[int(site_id)], dtype=np.float64)
+        error = target_world - hand
+        error_norm = float(np.linalg.norm(error))
+        xmat = np.asarray(data.site_xmat[int(site_id)], dtype=np.float64).reshape(3, 3)
+        tool_z = xmat[:, 2]
+        axis_vec = np.cross(tool_z, approach)
+        axis_err = float(np.linalg.norm(axis_vec))
+        if error_norm <= float(tol_m) and axis_err <= float(axis_tol):
+            break
+        jacp = np.zeros((3, model.nv))
+        jacr = np.zeros((3, model.nv))
+        mujoco.mj_jacSite(model, data, jacp, jacr, int(site_id))
+        if error_norm > float(tol_m):
+            delta = bounded_damped_least_squares(
+                jacp[:, joint_dofadr], error, commands,
+                ranges[:, 0], ranges[:, 1], damping, max_step)
+            commands = np.clip(commands + delta.astype(np.float64), ranges[:, 0], ranges[:, 1])
+        if axis_err > float(axis_tol):
+            delta = bounded_damped_least_squares(
+                jacr[:, joint_dofadr], 0.4 * axis_vec, commands,
+                ranges[:, 0], ranges[:, 1], damping, max_step)
+            commands = np.clip(commands + delta.astype(np.float64), ranges[:, 0], ranges[:, 1])
+        q[joint_qposadr] = commands
+    return commands.astype(np.float32), float(error_norm)
+
+
+def plan_carry_joint_path(model, qpos, site_id, chassis, start_q, waypoints_world,
+                          joint_qposadr, joint_dofadr, ranges, *, approach_world=None,
+                          accept_err_m=0.025):
+    """IK a validated waypoint list. Rejects arm/basket contacts and crate clips.
+
+    Early waypoints are position-only. Transit and release request a downward
+    tool so the wrist stays above the rim. Returns ``None`` if any pose fails.
+    """
+    import mujoco
+    start_q = np.asarray(start_q, dtype=np.float64).reshape(6)
+    waypoints = np.asarray(waypoints_world, dtype=np.float64)
+    accept = float(accept_err_m)
+    if waypoints.ndim != 2 or waypoints.shape[1] != 3 or waypoints.shape[0] < 3:
+        raise ValueError('waypoints_world must be [N>=3, 3]')
+    if not np.isfinite(start_q).all() or not np.isfinite(waypoints).all():
+        raise ValueError('carry path inputs must be finite')
+    if not np.isfinite(accept) or not 0.005 <= accept <= 0.05:
+        raise ValueError('accept_err_m must be finite in [0.005, 0.05] m')
+    if approach_world is None:
+        approach = downward_approach_local()
+    else:
+        approach = np.asarray(approach_world, dtype=np.float64).reshape(3)
+        if not np.isfinite(approach).all() or float(np.linalg.norm(approach)) < 1e-9:
+            raise ValueError('approach_world must be a finite nonzero 3-vector')
+    qids = np.asarray(joint_qposadr, dtype=int).reshape(6)
+    q = np.asarray(qpos, dtype=np.float64).reshape(-1).copy()
+    data = mujoco.MjData(model)
+    path = []
+    q_init = start_q.copy()
+    axis_from = max(0, int(waypoints.shape[0]) - 2)
+    tilted = approach / float(np.linalg.norm(approach))
+    tilted_alt = tilted + np.array([-0.35, 0.0, 0.0], dtype=np.float64)
+    tilted_alt = tilted_alt / float(np.linalg.norm(tilted_alt))
+    for index, target in enumerate(waypoints):
+        if index >= axis_from:
+            arm_q, err = solve_tcp_axis(
+                model, q, site_id, target, tilted, qids, joint_dofadr, q_init, ranges)
+            if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+                arm_q, err = solve_tcp_axis(
+                    model, q, site_id, target, tilted_alt, qids, joint_dofadr, q_init, ranges)
+        else:
+            arm_q, err = solve_tcp_hover(
+                model, q, site_id, target, qids, joint_dofadr, q_init, ranges)
+        if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+            return None
+        q[qids] = np.asarray(arm_q, dtype=np.float64)
+        data.qpos[:] = q
+        if not pose_clears_crate(model, data, site_id, chassis):
+            return None
+        if index >= axis_from:
+            origin = np.asarray(data.xpos[int(chassis)], dtype=np.float64).reshape(3)
+            rot = np.asarray(data.xmat[int(chassis)], dtype=np.float64).reshape(3, 3)
+            tcp_local = rot.T @ (np.asarray(data.site_xpos[int(site_id)], dtype=np.float64) - origin)
+            xmat = np.asarray(data.site_xmat[int(site_id)], dtype=np.float64).reshape(3, 3)
+            tool_local = rot.T @ xmat[:, 2]
+            if not wrist_clears_crate(tcp_local, tool_local):
+                return None
+        path.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
+        q_init = np.asarray(arm_q, dtype=np.float64)
+    return np.stack(path)
 
 
 def damped_least_squares(J, error, damping=.05, max_step=.1):

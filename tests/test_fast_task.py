@@ -16,6 +16,9 @@ class FastTaskKernelSourceTest(unittest.TestCase):
         self.assertIn('next_i = int(-1)', text)
         self.assertIn('rows = int(1)', text)
         self.assertIn('jaw_overload', text)
+        self.assertIn('contained_contact', text)
+        self.assertIn('inside_basket', text)
+        self.assertIn('and contained_contact):', text)
         self.assertIn('goal[world] != 0', text)
 
 

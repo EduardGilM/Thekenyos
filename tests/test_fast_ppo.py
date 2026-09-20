@@ -64,6 +64,13 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('easy_teacher_mix', source)
         self.assertIn('--speedrun', source)
         self.assertIn('--easy', source)
+        self.assertIn('--ik-demo', source)
+        self.assertIn('imitation_update', source)
+        self.assertIn('minibatch_worlds', inspect.getsource(train_fast.imitation_update))
+        self.assertIn('empty_cache', inspect.getsource(train_fast.imitation_update))
+        self.assertIn('bc_minibatch_worlds', inspect.getsource(train_fast.run))
+        self.assertIn('set_carry_progress', inspect.getsource(train_fast.run))
+        self.assertIn('carry_waypoint_mean', inspect.getsource(train_fast.run))
         self.assertIn('should_persist_checkpoint', source)
         run_src = inspect.getsource(train_fast.run)
         self.assertIn('fruit-count', run_src)
@@ -116,20 +123,47 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertEqual(kept.teacher_mix, 0.0)
         self.assertEqual(kept.shaping_coef, 2.0)
         off = apply_easy_cli(argparse.Namespace(
-            easy=False, teacher_mix=None, shaping_coef=None))
+            easy=False, teacher_mix=None, shaping_coef=None, ik_demo=False))
         self.assertEqual(off.teacher_mix, 0.0)
         self.assertEqual(off.shaping_coef, 2.0)
+        from train_fast import apply_ik_demo_cli
+        demo = apply_ik_demo_cli(argparse.Namespace(
+            ik_demo=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from=None, demo_updates=None))
+        self.assertTrue(demo.easy)
+        self.assertEqual(demo.updates, 20)
+        self.assertEqual(demo.demo_updates, 16)
+        self.assertEqual(demo.teacher_mix, 1.0)
+        self.assertEqual(demo.shaping_coef, 15.0)
+        self.assertEqual(demo.eval_every, 16)
+        continued = apply_ik_demo_cli(argparse.Namespace(
+            ik_demo=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/latest.pt', demo_updates=None))
+        self.assertEqual(continued.demo_updates, 0)
+        self.assertEqual(continued.updates, 16)
+        self.assertEqual(continued.teacher_mix, 0.0)
+        self.assertEqual(continued.eval_every, 8)
+        skipped = apply_easy_cli(argparse.Namespace(
+            ik_demo=True, easy=True, teacher_mix=1.0, shaping_coef=15.0, updates=20))
+        self.assertEqual(skipped.updates, 20)
         import inspect
         import train_fast
         self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
         collect_src = inspect.getsource(train_fast.collect)
         self.assertIn("row['ground_contact']", collect_src)
+        self.assertIn("row['inside_basket']", collect_src)
         self.assertIn("row['fallen']", collect_src)
         self.assertIn("row['hand_load_N']", collect_src)
         run_src = inspect.getsource(train_fast.run)
         self.assertIn('ground_contact_worlds', run_src)
         self.assertIn('basket_distance_mean_m', run_src)
         self.assertIn('easy_far_frac', run_src)
+        self.assertIn('grasp_offset_std_m', run_src)
+        self.assertIn('empty_cache', run_src)
+        self.assertIn("row.pop(key, None)", run_src)
+        self.assertIn('bc_minibatch_worlds', run_src)
         self.assertIn('easy_teacher_mix', run_src)
         self.assertIn('teacher_anneal_after', run_src)
         self.assertIn('teacher_mask', collect_src)
@@ -163,6 +197,8 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('open_max_above_rim_m', runtime_src)
         self.assertIn('open_half_xy', runtime_src)
         self.assertIn('hover_offset', runtime_src)
+        self.assertIn('_set_shape_offsets', runtime_src)
+        self.assertIn('potential_ref = 3', runtime_src)
         self.assertIn('shape_to_hover', runtime_src)
         self.assertIn('shape_to_hover', run_src)
         self.assertIn('release_over_opening', run_src)
@@ -192,7 +228,10 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertIn('set_easy_progress', run_src)
         self.assertIn('hand_load_max_N', run_src)
         self.assertIn('latest.pt', run_src)
-        self.assertIn('nonfinite_worlds', run_src)
+        self.assertIn('max(dim=0).values > 0).sum()', run_src)
+        self.assertIn('inside_basket_worlds', run_src)
+        self.assertIn('evaluation/inside_basket_worlds', inspect.getsource(train_fast.evaluate_mission))
+        self.assertIn('demo_updates', run_src)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_advantage_std_cap_keeps_jackpot_large(self):
@@ -276,6 +315,37 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertAlmostEqual(result['success_window_return_mean'], 10000.0, places=3)
         self.assertAlmostEqual(result['deposit_return_sum'], 10000.0, places=3)
         self.assertEqual(result['ppo_success_worlds'], 1)
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
+    def test_imitation_update_fits_teacher_labels(self):
+        import torch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+        from train_fast import build_policy, imitation_update
+        torch.manual_seed(1)
+        torch.set_num_threads(1)
+        policy = build_policy()
+        rows = []
+        teacher = torch.zeros(2, 7)
+        teacher[:, 0] = 0.4
+        memory = torch.zeros(2, 64)
+        with torch.no_grad():
+            for t in range(3):
+                reset = torch.tensor([t == 0, t == 0])
+                memory *= (~reset)[:, None]
+                rgbd, r84 = torch.randn(2, 5, 16, 16), torch.randn(2, 84)
+                mean, _, _, memory = policy(rgbd, r84, memory)
+                rows.append(dict(
+                    rgbd=rgbd, r84=r84, reset=reset, teacher_applied=teacher,
+                    success=torch.zeros(2, dtype=torch.int64),
+                    reward=torch.zeros(2)))
+        before = policy.mean.weight.detach().clone()
+        result = imitation_update(policy, torch.optim.Adam(policy.parameters(), lr=3e-3),
+                                  rows, epochs=2, minibatch_worlds=1)
+        self.assertFalse(torch.equal(before, policy.mean.weight))
+        self.assertIn('bc_loss', result)
+        self.assertEqual(result['demo_phase'], 1)
+        self.assertEqual(result['bc_epochs_completed'], 2)
+        self.assertEqual(result['minibatches'], 4)
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'Torch required')
     def test_privileged_mix_uses_atanh_of_teacher_action(self):

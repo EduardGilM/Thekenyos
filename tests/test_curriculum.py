@@ -280,6 +280,22 @@ class CurriculumTest(unittest.TestCase):
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
+        self.assertIn('def _privileged_carry_action', src)
+        self.assertIn('def set_carry_progress', src)
+        self.assertIn('def _commit_queued_carry_starts', src)
+        self.assertIn('_easy_start_index_next', src)
+        self.assertIn('def _set_shape_offsets', src)
+        self.assertIn('hover_offset[0]', src)
+        self.assertIn('potential_ref = 3', src)
+        self.assertNotIn(
+            "self._waypoint_index.assign(np.zeros(self.worlds, dtype=np.int32))", src)
+        self.assertIn('def _build_carry_catalog', src)
+        self.assertIn('safe_hover_arm_q', src)
+        self.assertIn('def _sample_grasp_locals', src)
+        self.assertIn('random_grasp_offset_local_m', src)
+        self.assertIn('_tcp_local_host', src)
+        self.assertIn('grasp_offset_std_m', src)
+        self.assertIn('plan_carry_joint_path', src)
         self.assertIn('def _apply_easy_jaw_hold', src)
         self.assertIn('def _scripted_jaw_hold', src)
         self.assertIn('def _pin_scripted_jaw', src)
@@ -338,6 +354,12 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def sweep_jaw_hold', teacher_src)
         self.assertIn('def easy_start_side_y_m', teacher_src)
         self.assertIn('def easy_over_opening_local_m', teacher_src)
+        self.assertIn('def carry_waypoints_local_m', teacher_src)
+        self.assertIn('def random_carry_start_local_m', teacher_src)
+        self.assertIn('def random_grasp_offset_local_m', teacher_src)
+        self.assertIn('def wrist_clears_crate', teacher_src)
+        self.assertIn('def plan_carry_joint_path', teacher_src)
+        self.assertIn('def solve_tcp_axis', teacher_src)
         self.assertIn('def tcp_over_opening_above_rim', teacher_src)
         self.assertIn('def at_basket_center', teacher_src)
         self.assertIn('def over_opening_xy', teacher_src)
@@ -386,6 +408,46 @@ class CurriculumTest(unittest.TestCase):
             apply_easy_hover_cohort([1, 2], [1], 24)
         with self.assertRaises(ValueError):
             apply_easy_hover_cohort([1], [1], -1)
+
+    def test_ik_demo_preset_keeps_fruit_free_and_mixes_starts(self):
+        from treesim.kiwi_rl.curriculum import (
+            IK_DEMO_PRESET, apply_ik_demo_preset, commit_carry_starts,
+            sample_carry_start_indices,
+        )
+        preset = apply_ik_demo_preset({'gate_success_rate': 0.90})
+        self.assertEqual(preset['demo_updates'], 16)
+        self.assertEqual(preset['rl_updates'], 4)
+        self.assertEqual(preset['updates'], 20)
+        self.assertEqual(preset['n_start_poses'], 48)
+        self.assertEqual(preset['hard_start_frac'], 0.5)
+        self.assertEqual(preset['grasp_inset_span_m'], 0.05)
+        self.assertEqual(preset['grasp_lateral_span_m'], 0.018)
+        self.assertEqual(preset['release_target_inset_x_m'], 0.0)
+        self.assertEqual(preset['bc_minibatch_worlds'], 64)
+        self.assertEqual(preset['rl_continue_updates'], 16)
+        self.assertGreater(preset['transit_clearance_m'], preset['release_clearance_m'])
+        self.assertEqual(preset['gate_success_rate'], 0.90)
+        self.assertNotIn('weld', IK_DEMO_PRESET)
+        idx = sample_carry_start_indices(200, 48, np.random.default_rng(0))
+        self.assertEqual(idx.shape, (200,))
+        self.assertGreater(int(idx.max()), 10)
+        self.assertGreater(int(np.unique(idx).size), 20)
+        current = np.arange(8, dtype=np.int32)
+        queued = np.full(8, 40, dtype=np.int32)
+        mask = np.zeros(8, dtype=bool)
+        mask[1] = True
+        mask[6] = True
+        live, nxt = commit_carry_starts(current, queued, mask, np.random.default_rng(1), 48)
+        self.assertEqual(int(live[0]), 0)
+        self.assertEqual(int(live[1]), 40)
+        self.assertEqual(int(live[6]), 40)
+        self.assertEqual(int(live[7]), 7)
+        self.assertNotEqual(int(nxt[1]), 40)
+        self.assertTrue(0 <= int(nxt[1]) < 48)
+        with self.assertRaises(ValueError):
+            commit_carry_starts([0, 1], [0], [True, False], np.random.default_rng(0), 8)
+        with self.assertRaises(ValueError):
+            sample_carry_start_indices(0, 8, np.random.default_rng(0))
 
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')

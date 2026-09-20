@@ -53,6 +53,23 @@ class ReachTeacherMathTest(unittest.TestCase):
         self.assertAlmostEqual(float(target[2]), 3.0 + local_top + 0.12)
         self.assertGreater(float(target[2] - xpos[2]), local_top)
 
+    def test_fruit_inside_crate_rejects_wall_touch_and_rim(self):
+        from treesim.basket import CENTER, SIZE, WALL
+        from treesim.native_kiwi import RADII_M
+        from treesim.kiwi_rl.reach_teacher import fruit_inside_crate_local
+        settled = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [0.0, 0.0, WALL / 2.0 + RADII_M[2]], dtype=np.float64)
+        self.assertTrue(fruit_inside_crate_local(settled))
+        outside = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [SIZE[0] / 2.0 + RADII_M[0] + 0.02, 0.0, WALL / 2.0 + RADII_M[2]],
+            dtype=np.float64)
+        self.assertFalse(fruit_inside_crate_local(outside))
+        on_rim = np.asarray(CENTER, dtype=np.float64) + np.array(
+            [0.0, 0.0, SIZE[2] + RADII_M[2]], dtype=np.float64)
+        self.assertFalse(fruit_inside_crate_local(on_rim))
+        with self.assertRaises(ValueError):
+            fruit_inside_crate_local([np.nan, 0.0, 0.0])
+
     def test_easy_start_is_outside_crate_and_recedes(self):
         from treesim.basket import CENTER, SIZE
         from treesim.kiwi_rl.reach_teacher import hover_tcp_local_m, push_tcp_outside_basket
@@ -311,6 +328,54 @@ class ReachTeacherMathTest(unittest.TestCase):
             np.array([-1., -1., -1.]), np.array([1., 1., 1.]),
             damping=.01, max_step=.1)
         self.assertLess(float(step[0]), 0.)
+
+    def test_carry_waypoints_stay_out_of_crate_and_end_at_centre(self):
+        from treesim.basket import CENTER, SIZE
+        from treesim.kiwi_rl.reach_teacher import (
+            carry_waypoints_local_m, crate_interior_contains, downward_approach_local,
+            random_carry_start_local_m, random_grasp_offset_local_m,
+            release_tcp_local_m, wrist_clears_crate,
+        )
+        rng = np.random.default_rng(3)
+        easy = [random_carry_start_local_m(rng, hard=False) for _ in range(8)]
+        hard = [random_carry_start_local_m(rng, hard=True) for _ in range(8)]
+        easy_x = [float(p[0]) for p in easy]
+        hard_x = [float(p[0]) for p in hard]
+        self.assertGreater(float(np.mean(hard_x)), float(np.mean(easy_x)) + 0.08)
+        for pose in easy + hard:
+            self.assertTrue(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
+            self.assertFalse(crate_interior_contains(pose))
+            self.assertFalse(tcp_over_opening_above_rim(pose))
+        start = easy[0]
+        waypoints = carry_waypoints_local_m(start)
+        self.assertGreaterEqual(waypoints.shape[0], 5)
+        np.testing.assert_allclose(waypoints[0], start)
+        np.testing.assert_allclose(waypoints[-1][:2], CENTER[:2], atol=1e-9)
+        self.assertAlmostEqual(float(waypoints[-1][2]), float(CENTER[2] + SIZE[2] + 0.16))
+        for point in waypoints:
+            self.assertFalse(crate_interior_contains(point))
+        release = release_tcp_local_m(0.10)
+        self.assertFalse(wrist_clears_crate(release, np.array([-1.0, 0.0, 0.0])))
+        self.assertTrue(wrist_clears_crate(release, downward_approach_local()))
+        tcp = np.array([0.18, 0.0, 0.0], dtype=np.float64)
+        pockets = [random_grasp_offset_local_m(tcp, rng) for _ in range(48)]
+        deltas = np.stack([p - tcp for p in pockets])
+        offsets = np.linalg.norm(deltas, axis=1)
+        axis = tcp / float(np.linalg.norm(tcp))
+        axial = deltas @ axis
+        lateral = np.linalg.norm(deltas - axial.reshape(-1, 1) * axis, axis=1)
+        self.assertGreater(float(np.ptp(offsets)), 0.02)
+        self.assertGreater(float(np.std(axial)), 0.008)
+        self.assertGreater(float(np.std(lateral)), 0.003)
+        self.assertGreater(len({tuple(np.round(p, 6)) for p in pockets}), 30)
+        for pocket in pockets:
+            self.assertTrue(grasp_local_near_tcp(pocket, tcp))
+        with self.assertRaises(ValueError):
+            carry_waypoints_local_m(CENTER)
+        with self.assertRaises(ValueError):
+            crate_interior_contains([np.nan, 0.0, 0.0])
+        with self.assertRaises(TypeError):
+            random_grasp_offset_local_m(tcp, None)
 
 
 if __name__ == '__main__':

@@ -27,7 +27,8 @@ PRIORITY_CHARTS = (
     'reward_mean', 'actor_loss', 'value_loss', 'sil_loss',
     'success_window_return_mean', 'deposit_return_sum', 'fail_return_sum',
     'harvest_jackpot_sum', 'reward_window_mean', 'reward_transition_mean', 'reward_std',
-    'harvest_successes', 'evaluation/success_rate', 'evaluation/harvest_fraction',
+    'harvest_successes', 'inside_basket_worlds', 'basket_contact_worlds',
+    'evaluation/success_rate', 'evaluation/harvest_fraction',
     'basket_distance_mean_m', 'basket_distance_closest_m', 'basket_xy_mean_m',
     'evaluation/mean_closest_basket_distance_m', 'evaluation/final_basket_distance_m',
     'ground_contact_worlds', 'fallen_worlds', 'failed_worlds', 'hand_load_max_N',
@@ -35,6 +36,7 @@ PRIORITY_CHARTS = (
     'distance_mean_closest_m', 'distance_final_m', 'distance_closest_m',
     'evaluation/mean_closest_distance_m', 'evaluation/final_distance_m',
     'evaluation/closest_distance_m', 'evaluation/harvest_successes',
+    'evaluation/inside_basket_worlds', 'evaluation/basket_contact_worlds',
     'evaluation/detach_rate', 'evaluation/grasp_rate',
     'grasp_events', 'detach_events', 'harvested_mean',
     'recovered_worlds', 'overflow_worlds', 'evaluation/recovered_worlds', 'evaluation/overflow_worlds',
@@ -42,6 +44,8 @@ PRIORITY_CHARTS = (
     'curriculum_index', 'guidance_weight', 'teacher_mix', 'shaping_coef',
     'easy_far_frac', 'easy_start_index_mean', 'easy_start_index_max',
     'easy_hover_start_worlds', 'easy_outside_start_worlds', 'easy_hold_close_mean',
+    'carry_easy_start_worlds', 'carry_hard_start_worlds', 'bc_loss', 'demo_phase',
+    'grasp_offset_mean_m', 'grasp_offset_std_m', 'grasp_offset_max_m',
     'teacher_anneal_after',
     'training_transitions_per_second', 'rollout_transitions_per_second',
     'torch_peak_allocated_gb', 'rollout_seconds', 'update_seconds',
@@ -243,17 +247,20 @@ def _video_figure(video: Mapping[str, Any]) -> str:
 _DASHBOARD_SCRIPT = r'''
 <script>
 const CARD_KEYS = ["step", "curriculum_index", "loss", "entropy", "entropy_per_dim", "reward_mean",
-  "success_window_return_mean", "deposit_return_sum", "fail_return_sum", "harvest_jackpot_sum", "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
+  "success_window_return_mean", "deposit_return_sum", "fail_return_sum", "harvest_jackpot_sum", "harvest_successes", "inside_basket_worlds", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_xy_mean_m", "easy_far_frac", "teacher_mix",
+  "bc_loss", "carry_hard_start_worlds", "demo_phase",
+  "grasp_offset_mean_m", "grasp_offset_std_m",
   "evaluation/mean_closest_basket_distance_m",
   "ground_contact_worlds", "nonfinite_worlds", "evaluation/mean_closest_distance_m",
   "evaluation/harvest_successes", "training_transitions_per_second",
   "torch_peak_allocated_gb"];
 const PRIORITY = ["loss", "kl", "entropy", "entropy_per_dim", "entropy_gaussian", "logstd_mean", "grad_norm", "reward_mean", "success_window_return_mean", "deposit_return_sum", "fail_return_sum", "harvest_jackpot_sum", "reward_window_mean", "reward_transition_mean", "reward_std",
-  "harvest_successes", "evaluation/success_rate", "evaluation/harvest_fraction",
+  "harvest_successes", "inside_basket_worlds", "evaluation/success_rate", "evaluation/harvest_fraction",
   "basket_distance_mean_m", "basket_distance_closest_m", "basket_xy_mean_m",
   "easy_far_frac", "easy_start_index_mean", "easy_start_index_max", "teacher_mix",
   "easy_hold_close_mean", "hand_load_mean_N", "hand_load_max_N",
+  "grasp_offset_mean_m", "grasp_offset_std_m", "grasp_offset_max_m",
   "evaluation/mean_closest_basket_distance_m", "evaluation/final_basket_distance_m",
   "ground_contact_worlds", "fallen_worlds", "failed_worlds", "hand_load_max_N",
   "distance_mean_closest_m", "distance_final_m", "distance_closest_m",
@@ -414,10 +421,11 @@ def render_dashboard_html(payload: Mapping[str, Any]) -> str:
             f'<div class="v">{stage}</div></div>')
     for key in ('step', 'curriculum_index', 'loss', 'entropy', 'entropy_per_dim', 'reward_mean',
                 'success_window_return_mean', 'deposit_return_sum', 'fail_return_sum', 'harvest_jackpot_sum',
-                'harvest_successes', 'evaluation/success_rate', 'evaluation/harvest_fraction',
+                'harvest_successes', 'inside_basket_worlds', 'evaluation/success_rate', 'evaluation/harvest_fraction',
                 'basket_distance_mean_m', 'evaluation/mean_closest_basket_distance_m',
                 'ground_contact_worlds', 'evaluation/mean_closest_distance_m',
-                'evaluation/harvest_successes', 'training_transitions_per_second',
+                'evaluation/harvest_successes', 'evaluation/inside_basket_worlds',
+                'training_transitions_per_second',
                 'torch_peak_allocated_gb'):
         if key in latest and is_chartable(latest[key]):
             cards.append(
@@ -671,6 +679,68 @@ def checkpoint_paths(checkpoint: str | Path) -> dict[str, Any]:
                 config=config, meta=meta)
 
 
+def apply_native_carry_start(model, data, controller, tcp_site: int, *,
+                             hard: bool = False, seed: int = 11) -> float:
+    """Move the native arm to a random easy/hard carry start. Fruit is not written.
+
+    Seeds IK from the validated hover, like the GPU catalog, and rejects
+    poses that clip the crate. A failed solve leaves the hover, never folded home.
+    """
+    import mujoco
+    import numpy as np
+    from treesim.kiwi_rl.curriculum import EASY_PRESET, IK_DEMO_PRESET
+    from treesim.kiwi_rl.reach_teacher import (
+        arm_basket_contact_pairs, pose_clears_crate, random_carry_start_local_m,
+        solve_tcp_hover, tcp_outside_basket,
+    )
+    rng = np.random.default_rng(int(seed))
+    mujoco.mj_kinematics(model, data)
+    qids = np.asarray(controller.qids[12:18], dtype=int)
+    dofs = np.asarray(controller.dofs[12:18], dtype=int)
+    joints = np.asarray(controller.joints[12:18], dtype=int)
+    ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+    limited = np.asarray(model.jnt_limited[joints], dtype=bool)
+    ranges[limited] = np.asarray(model.jnt_range[joints], dtype=np.float64)[limited]
+    chassis_p = np.asarray(data.xpos[controller.chassis], dtype=np.float64)
+    chassis_R = np.asarray(data.xmat[controller.chassis], dtype=np.float64).reshape(3, 3)
+    q_home = np.asarray(data.qpos[qids], dtype=np.float64).copy()
+    qpos0 = np.asarray(data.qpos, dtype=np.float64).copy()
+    safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+    if (safe.shape == (6,) and np.isfinite(safe).all()
+            and np.all(safe >= ranges[:, 0]) and np.all(safe <= ranges[:, 1])):
+        q_seed = safe.copy()
+    else:
+        q_seed = q_home.copy()
+    accept = float(IK_DEMO_PRESET['ik_accept_err_m'])
+    for _ in range(48):
+        try:
+            local = random_carry_start_local_m(rng, hard=bool(hard))
+        except ValueError:
+            continue
+        if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+            continue
+        target = chassis_p + chassis_R @ local
+        data.qpos[:] = qpos0
+        arm_q, err = solve_tcp_hover(
+            model, data.qpos, int(tcp_site), target, qids, dofs, q_seed, ranges)
+        if (not np.isfinite(arm_q).all() or not np.isfinite(err)
+                or float(err) > accept):
+            continue
+        data.qpos[qids] = arm_q
+        mujoco.mj_forward(model, data)
+        if not pose_clears_crate(model, data, tcp_site, controller.chassis, tcp_local=local):
+            continue
+        if arm_basket_contact_pairs(model, data):
+            continue
+        controller.targets[12:18] = arm_q
+        return float(err)
+    data.qpos[:] = qpos0
+    data.qpos[qids] = q_seed
+    controller.targets[12:18] = q_seed
+    mujoco.mj_forward(model, data)
+    return float('inf')
+
+
 def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any]:
     """CPU clip reset/locomotion flags from checkpoint metadata. Not a harvest demo."""
     from treesim.kiwi_rl.curriculum import reset_mode_for_goal, stage_named
@@ -678,8 +748,10 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     config = dict(info.get('config') or {})
     name = meta.get('curriculum_stage') or config.get('stage')
     easy = bool(config.get('easy', False))
+    ik_demo = bool(config.get('ik_demo', False))
     far_frac = 0.0
     hold_frac = 0.75
+    preview_hard = False
     if easy:
         raw = config.get('easy_far_frac', 0.0)
         far_frac = float(raw)
@@ -691,13 +763,19 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
         hold_frac = float(raw_hold)
         if not math.isfinite(hold_frac) or not 0.0 <= hold_frac <= 1.0:
             raise ValueError('hold_close_frac must be finite in [0, 1]')
+        # ik-demo stores easy_far_frac=1.0 as "catalog mixes hard rows", not
+        # "this one-world CPU clip is a hard start". Default the preview to
+        # an easy physics-safe pose so a deposit is visible.
+        preview_hard = bool(not ik_demo and far_frac >= 0.5)
     if not name:
         return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
-                    easy_far_frac=far_frac, hold_close_frac=hold_frac)
+                    ik_demo=ik_demo, easy_far_frac=far_frac, hold_close_frac=hold_frac,
+                    preview_hard=preview_hard)
     stage = stage_named(str(name))
     return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
                 allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy,
-                easy_far_frac=far_frac, hold_close_frac=hold_frac)
+                ik_demo=ik_demo, easy_far_frac=far_frac, hold_close_frac=hold_frac,
+                preview_hard=preview_hard)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -827,7 +905,8 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
 
 def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
                              approach_offset_m: float = 1.0, easy: bool = False,
-                             far_frac: float = 0.0, hold_close_frac: float | None = None) -> None:
+                             far_frac: float = 0.0, hold_close_frac: float | None = None,
+                             ik_demo: bool = False, preview_hard: bool = False) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
     import numpy as np
@@ -846,7 +925,11 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
     qposadr = int(model.jnt_qposadr[joint])
     dofadr = int(model.jnt_dofadr[joint])
     if easy and reset_mode == 1:
-        apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
+        if ik_demo:
+            apply_native_carry_start(
+                model, data, controller, tcp_site, hard=bool(preview_hard))
+        else:
+            apply_native_easy_start(model, data, controller, tcp_site, far_frac=far_frac)
     if reset_mode == 1:
         from treesim.kiwi_rl.reach_teacher import grasp_pocket_world_m, jaw_hold_q, jaw_open_closed_q
         opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
@@ -860,8 +943,23 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         controller.targets[18] = hold
         mujoco.mj_forward(model, data)
         if easy:
-            pocket = grasp_pocket_world_m(model, data, tcp_site)
-            data.qpos[qposadr:qposadr + 3] = pocket
+            from treesim.kiwi_rl.reach_teacher import (
+                grasp_local_fallback_m, random_grasp_offset_local_m,
+            )
+            if ik_demo:
+                body = int(model.site_bodyid[int(tcp_site)])
+                origin = np.asarray(data.xpos[body], dtype=np.float64).reshape(3)
+                rot = np.asarray(data.xmat[body], dtype=np.float64).reshape(3, 3)
+                tcp_local = grasp_local_fallback_m(model, tcp_site)
+                tcp_world = np.asarray(data.site_xpos[int(tcp_site)], dtype=np.float64)
+                quant = np.round(tcp_world * 1000.0).astype(np.int64)
+                seed = 11 + int(far_frac >= 0.5) * 1009 + int(
+                    quant[0] * 17 + quant[1] * 31 + quant[2] * 47)
+                local = random_grasp_offset_local_m(tcp_local, np.random.default_rng(int(seed)))
+                data.qpos[qposadr:qposadr + 3] = origin + rot @ local
+            else:
+                pocket = grasp_pocket_world_m(model, data, tcp_site)
+                data.qpos[qposadr:qposadr + 3] = pocket
         else:
             tcp = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
             data.qpos[qposadr:qposadr + 3] = tcp
@@ -950,6 +1048,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     import torch
     import mujoco
     from PIL import Image, ImageDraw
+    from treesim.kiwi_rl.reach_teacher import fruit_inside_crate_local
     from treesim.kiwi_rl.fast_scene import load_fast_scene
     from treesim.kiwi_rl.control import NativeSpotControl, load_gait_artifact
     from treesim.kiwi_rl.spot_cameras import require_mujoco_gripper_cameras
@@ -969,7 +1068,9 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     apply_native_skill_reset(model, data, manifest, controller, reset_mode=preview['reset_mode'],
                              easy=bool(preview.get('easy')),
                              far_frac=float(preview.get('easy_far_frac') or 0.0),
-                             hold_close_frac=preview.get('hold_close_frac'))
+                             hold_close_frac=preview.get('hold_close_frac'),
+                             ik_demo=bool(preview.get('ik_demo')),
+                             preview_hard=bool(preview.get('preview_hard')))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
     basket_local = np.asarray(CENTER, dtype=np.float64)
@@ -995,12 +1096,18 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
     rgbd = None
     distances = []
     basket_distances = []
+    in_crate = []
     command = np.zeros(3, dtype=np.float32)
     easy_hold_q = None
     stage_label = preview['stage'] or 'hanging'
-    easy_tag = (
-        f'easy-carry far_frac={float(preview.get("easy_far_frac") or 0.0):.2f} '
-        if preview.get('easy') else '')
+    if preview.get('ik_demo'):
+        easy_tag = (
+            'ik-demo easy start; teacher off; success = fruit in liner ')
+    elif preview.get('easy'):
+        easy_tag = (
+            f'easy-carry far_frac={float(preview.get("easy_far_frac") or 0.0):.2f} ')
+    else:
+        easy_tag = ''
     try:
         for index in range(steps):
             mujoco.mj_camlight(model, data)
@@ -1016,11 +1123,12 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
             if preview.get('easy'):
-                from treesim.kiwi_rl.curriculum import EASY_PRESET
+                from treesim.kiwi_rl.curriculum import EASY_PRESET, IK_DEMO_PRESET
                 from treesim.kiwi_rl.reach_teacher import (
                     adapt_scripted_hold_q, fruit_in_release_zone, jaw_hold_q,
                     jaw_open_closed_q, scripted_jaw_target,
                 )
+                knobs = IK_DEMO_PRESET if preview.get('ik_demo') else EASY_PRESET
                 opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
                 frac = preview.get('hold_close_frac')
                 if easy_hold_q is None:
@@ -1032,11 +1140,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                     + np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3) @ basket_local)
                 rim_z = float(SIZE[2])
                 tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
-                release_center = bool(EASY_PRESET.get('release_at_center'))
-                release_opening = bool(EASY_PRESET.get('release_over_opening'))
-                inset = float(EASY_PRESET.get('release_opening_inset_m', 0.04))
-                max_above = EASY_PRESET.get('release_max_above_rim_m')
-                open_xy = float(EASY_PRESET['open_xy_m'])
+                release_center = bool(knobs.get('release_at_center'))
+                release_opening = bool(knobs.get('release_over_opening'))
+                inset = float(knobs.get('release_opening_inset_m', 0.04))
+                max_above = knobs.get('release_max_above_rim_m')
+                open_xy = float(knobs['open_xy_m'])
                 rotation = np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3)
                 desired = scripted_jaw_target(
                     fruit_xyz, basket_xyz, hold, opened, open_xy_m=open_xy, rim_z_m=rim_z,
@@ -1084,6 +1192,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             basket_distance = float(np.linalg.norm(
                 np.asarray(data.xpos[fruit_body], dtype=np.float64) - basket_world))
             basket_distances.append(basket_distance)
+            chassis_R = np.asarray(data.xmat[chassis], dtype=np.float64).reshape(3, 3)
+            fruit_local = chassis_R.T @ (
+                np.asarray(data.xpos[fruit_body], dtype=np.float64)
+                - np.asarray(data.xpos[chassis], dtype=np.float64))
+            in_crate.append(bool(fruit_inside_crate_local(fruit_local)))
             viewer.lookat[:] = data.xpos[chassis] + [0., 0., .35]
             viewer.distance, viewer.azimuth, viewer.elevation = 3., 135., -20.
             scene_renderer.update_scene(data, camera=viewer)
@@ -1093,7 +1206,8 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             update = info['completed_updates']
             draw.text((8, 8), f'CPU preview  {stage_label}  update {update}  step {index + 1}/{steps}', fill=(255, 255, 255))
             draw.text((8, 22), (
-                f'TCP-fruit {distance:.3f} m  basket {basket_distance:.3f} m  {easy_tag}'
+                f'TCP-fruit {distance:.3f} m  basket {basket_distance:.3f} m  '
+                f'in-crate {int(in_crate[-1])}  {easy_tag}'
                 'gripper RGB overlay  curriculum preview not harvest proof'), fill=(244, 211, 94))
             try:
                 encoder.stdin.write(np.asarray(image).tobytes())
@@ -1124,6 +1238,11 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                   mean_basket_distance_m=float(np.mean(basket_distances)),
                   min_basket_distance_m=float(np.min(basket_distances)),
                   final_basket_distance_m=float(basket_distances[-1]),
+                  fruit_inside_crate_any=bool(any(in_crate)),
+                  fruit_inside_crate_final=bool(in_crate[-1]),
+                  fruit_inside_crate_frames=int(sum(int(flag) for flag in in_crate)),
+                  preview_hard=bool(preview.get('preview_hard')),
+                  ik_demo=bool(preview.get('ik_demo')),
                   output=str(output))
     output.with_suffix('.json').write_text(json.dumps(result, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     return result

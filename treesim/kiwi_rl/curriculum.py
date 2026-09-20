@@ -151,6 +151,76 @@ EASY_PRESET = {
 HOLD_SWEEP_MARGIN_M = 0.40
 HOLD_SWEEP_CLEARANCE_M = 0.28
 
+# IK demonstration then a short RL fine-tune. Random easy/hard starts, a
+# collision-checked waypoint teacher to the true basket centre, then PPO
+# without the teacher. Fruit stays free; this is not a weld or field harvest.
+IK_DEMO_PRESET = {
+    'demo_updates': 16,
+    'rl_updates': 4,
+    'updates': 20,
+    'bc_epochs': 6,
+    # 2048-world collect already fills a 32 GB card; BC backward stays
+    # inside this world slice so the RGB-D tape is not one full batch.
+    'bc_minibatch_worlds': 64,
+    'teacher_mix': 1.0,
+    'entropy_coef': 0.001,
+    'shaping_coef': 15.0,
+    'shaping_length_m': 0.60,
+    'open_xy_m': 0.15,
+    'n_start_poses': 48,
+    'hard_start_frac': 0.5,
+    'n_transit': 6,
+    'transit_clearance_m': 0.28,
+    'release_clearance_m': 0.16,
+    'release_target_inset_x_m': 0.0,
+    'release_target_clearance_m': 0.16,
+    'hover_clearance_m': 0.28,
+    'release_max_above_rim_m': 0.30,
+    'release_over_opening': True,
+    'release_at_center': True,
+    'release_opening_inset_m': 0.04,
+    'shape_hand_and_fruit': True,
+    'start_over_opening': False,
+    'easy_margin_m': 0.32,
+    'easy_clearance_m': 0.14,
+    'easy_x_span_m': 0.10,
+    'easy_y_span_m': 0.08,
+    'easy_z_span_m': 0.10,
+    'hard_margin_m': 0.48,
+    'hard_clearance_m': 0.10,
+    'hard_x_span_m': 0.28,
+    'hard_y_span_m': 0.18,
+    'hard_z_span_m': 0.16,
+    # Full pad-pocket COM: axial inset up to the 5 cm knuckle cap, plus a
+    # pad-plane disk that still sits between the teeth (not a single TCP spawn).
+    'grasp_inset_span_m': 0.05,
+    'grasp_lateral_span_m': 0.018,
+    'ik_accept_err_m': 0.025,
+    'waypoint_advance_rad': 0.08,
+    'eval_every': 16,
+    'checkpoint_every': 4,
+    # Fine-tune from a BC checkpoint: skip demos, keep the random-start catalog.
+    'rl_continue_updates': 16,
+    'deposit_reward': 30.0,
+    'fail_reward': -30.0,
+    'ppo_clip': 0.2,
+    'ppo_lr': 3e-4,
+    'ppo_epochs': 2,
+    'ppo_grad_clip': 0.5,
+    'ppo_adv_std_cap': None,
+    'ppo_value_coef': 0.5,
+    'ppo_target_kl': 0.05,
+    'ppo_unclip_positive': False,
+    'ppo_success_repeat': 4,
+    'ppo_imitation_coef': 0.25,
+    'ppo_success_epochs': 2,
+    'n_hold_levels': 10,
+    'hold_close_min': 0.25,
+    'hold_close_max': 0.70,
+    'default_shaping_coef': 2.0,
+    'default_shaping_length_m': 0.25,
+}
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -395,6 +465,48 @@ def apply_easy_preset(values: dict) -> dict:
     out = dict(values)
     out.update(EASY_PRESET)
     return out
+
+
+def apply_ik_demo_preset(values: dict) -> dict:
+    """Overlay the IK-demo then short-RL recipe. Does not weld fruit."""
+    if not isinstance(values, dict):
+        raise TypeError('values must be a dict')
+    out = dict(values)
+    out.update(IK_DEMO_PRESET)
+    return out
+
+
+def sample_carry_start_indices(worlds, catalog_n, rng):
+    """Uniform catalog restore. Easy and hard rows stay mixed by construction."""
+    if not isinstance(worlds, int) or isinstance(worlds, bool) or worlds < 1:
+        raise ValueError('worlds must be a positive integer')
+    if not isinstance(catalog_n, int) or isinstance(catalog_n, bool) or catalog_n < 1:
+        raise ValueError('catalog_n must be a positive integer')
+    if not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    return np.asarray(rng.integers(0, catalog_n, size=worlds), dtype=np.int32)
+
+
+def commit_carry_starts(current, queued, mask, rng, catalog_n):
+    """Apply queued catalog rows only on resetting worlds; resample those slots.
+
+    Live worlds keep their current row so an in-flight IK path is not retargeted
+    onto waypoint 0 of a different start. Fruit stays a free body.
+    """
+    live = np.asarray(current, dtype=np.int32).reshape(-1).copy()
+    next_idx = np.asarray(queued, dtype=np.int32).reshape(-1).copy()
+    hit = np.asarray(mask, dtype=bool).reshape(-1)
+    if live.size != next_idx.size or live.size != hit.size:
+        raise ValueError('carry start buffers must match the mask length')
+    if not isinstance(catalog_n, int) or isinstance(catalog_n, bool) or catalog_n < 1:
+        raise ValueError('catalog_n must be a positive integer')
+    if not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    n_hit = int(hit.sum())
+    if n_hit:
+        live[hit] = next_idx[hit]
+        next_idx[hit] = sample_carry_start_indices(n_hit, catalog_n, rng)
+    return live, next_idx
 
 
 def apply_easy_hover_cohort(indices, cohort, hover_index):

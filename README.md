@@ -786,6 +786,37 @@ python scripts/train_fast.py --scene /path/to/fast-scene \
   --minibatch-worlds 512 --speedrun --easy --video-every 0 --seed 7
 ```
 
+`--ik-demo` is a separate deposit recipe: the arm starts at a mix of **easy and
+hard** physics-safe poses, and each reset samples the kiwi COM across the
+physically allowed pad pocket (mouth-axis inset plus a pad-plane disk; not a
+single TCP spawn). A privileged IK teacher follows a lift / high-slide /
+centre-drop path that is rejected if any waypoint touches the crate liner.
+Those rollouts behaviour-clone the compact actor for 16 updates (~2 M
+transitions at 2048 worlds × 64 steps), then four PPO updates run with the
+teacher off on the same random starts. Catalog rows apply on reset; an
+in-flight IK path is not retargeted onto a different start mid-episode.
+Shape offsets live in device buffers so `--ik-demo` retargets the captured
+CUDA graph, and after the scripted jaw opens the reward still shapes hand XY
+over the opening during settle.
+On a 32 GB card, 4096-world collect and
+a full-batch 2048-world BC backward both OOM; the recipe minibatches BC worlds
+(`bc_minibatch_worlds=64`) like PPO.
+`--initialize-from` with `--ik-demo` skips BC (`demo_updates=0`) and runs 16
+PPO updates on the same random-start catalog, teacher off. Deposit success
+latches only while the fruit ellipsoid is inside the liner with basket contact;
+`inside_basket_worlds` is the independent AABB check. CPU progress clips start
+from an easy physics-safe pose seeded like the GPU catalog, not folded home,
+and report `fruit_inside_crate_*` in the sidecar. Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or
+field harvest; `training_ready` stays false. The arm must not clip through the
+crate: catalog poses with arm/basket contacts are discarded.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-demo-run \
+  --stage deposit_pixels --worlds 2048 --steps 64 --minibatch-worlds 64 \
+  --speedrun --ik-demo --video-every 0 --seed 7
+```
+
 `--initialize-from /path/to/student.pt` transfers compatible camera/R84 student
 weights with a fresh optimizer. The GPU runtime captures each 50 Hz control
 interval and evaluates contact/release outcomes at every physics substep. The
