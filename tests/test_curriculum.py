@@ -281,6 +281,11 @@ class CurriculumTest(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / 'treesim' / 'kiwi_rl' / 'fast_runtime.py').read_text(encoding='utf-8')
         self.assertIn('def _apply_easy_start', src)
         self.assertIn('def _privileged_carry_action', src)
+        self.assertIn('def _privileged_grasp_action', src)
+        self.assertIn('def _apply_grasp_start', src)
+        self.assertIn('def _build_grasp_catalog', src)
+        self.assertIn('def enable_ik_grasp', src)
+        self.assertIn('grasped[world] != 0', src)
         self.assertIn('def set_carry_progress', src)
         self.assertIn('def _commit_queued_carry_starts', src)
         self.assertIn('_easy_start_index_next', src)
@@ -448,6 +453,28 @@ class CurriculumTest(unittest.TestCase):
             commit_carry_starts([0, 1], [0], [True, False], np.random.default_rng(0), 8)
         with self.assertRaises(ValueError):
             sample_carry_start_indices(0, 8, np.random.default_rng(0))
+
+    def test_ik_grasp_preset_keeps_fruit_hanging_and_mixes_starts(self):
+        from treesim.kiwi_rl.curriculum import (
+            IK_GRASP_PRESET, apply_ik_grasp_preset, sample_world_skills,
+        )
+        preset = apply_ik_grasp_preset({'gate_success_rate': 0.85})
+        self.assertEqual(preset['demo_updates'], 16)
+        self.assertEqual(preset['rl_updates'], 4)
+        self.assertEqual(preset['updates'], 20)
+        self.assertEqual(preset['n_start_poses'], 48)
+        self.assertEqual(preset['hard_start_frac'], 0.5)
+        self.assertLess(preset['easy_standoff_max_m'], preset['hard_standoff_min_m'])
+        self.assertAlmostEqual(preset['easy_standoff_min_m'], 0.01)
+        self.assertAlmostEqual(preset['hard_standoff_max_m'], 0.15)
+        self.assertGreater(preset['pull_distance_m'], preset['pregrasp_standoff_m'])
+        self.assertNotIn('weld', IK_GRASP_PRESET)
+        self.assertEqual(preset['gate_success_rate'], 0.85)
+        skills = sample_world_skills(stage_named('grasp_detach'), 400, np.random.default_rng(0),
+                                    primary_only=True)
+        self.assertTrue(np.all(skills['goal_id'] == 1))
+        self.assertTrue(np.all(skills['reset_mode'] == 2))
+        self.assertTrue(np.all(skills['guidance_weight'] == 1.0))
 
     def test_one_fruit_scene_blocks_multi_harvest_not_deposit(self):
         start = stage_named('deposit_pixels')

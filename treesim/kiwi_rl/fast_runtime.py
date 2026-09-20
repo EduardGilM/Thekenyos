@@ -17,7 +17,8 @@ import warp as wp
 from .control_warp import WarpSpotControl, _set_gait_targets
 from .curriculum import (
     EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M, IK_DEMO_PRESET,
-    commit_carry_starts, sample_carry_start_indices, sample_easy_start_indices,
+    IK_GRASP_PRESET, commit_carry_starts, sample_carry_start_indices,
+    sample_easy_start_indices,
 )
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
@@ -398,6 +399,27 @@ def _apply_easy_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype
 
 
 @wp.kernel
+def _apply_grasp_start(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
+                      qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
+                      qids: wp.array(dtype=int), start_q: wp.array2d(dtype=float),
+                      start_index: wp.array(dtype=int), jaw_qposadr: int,
+                      jaw_open: float):
+    world = wp.tid()
+    if mask[world] == 0 or reset_mode[world] != 2:
+        return
+    idx = start_index[world]
+    if idx < 0:
+        idx = 0
+    for joint in range(6):
+        qid = qids[joint + 12]
+        value = start_q[idx, joint]
+        qpos[world, qid] = value
+        targets[world, joint + 12] = value
+    qpos[world, jaw_qposadr] = jaw_open
+    targets[world, 18] = jaw_open
+
+
+@wp.kernel
 def _apply_easy_jaw_hold(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(dtype=int),
                          qpos: wp.array2d(dtype=float), targets: wp.array2d(dtype=float),
                          jaw_qposadr: int, jaw_hold: wp.array(dtype=float)):
@@ -645,6 +667,63 @@ def _privileged_carry_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(d
             waypoint_index[world] = wp_idx + 1
 
 
+@wp.kernel
+def _privileged_grasp_action(goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
+                             grasped: wp.array(dtype=wp.uint8),
+                             targets: wp.array2d(dtype=float),
+                             waypoint_q: wp.array2d(dtype=float),
+                             start_index: wp.array(dtype=int),
+                             waypoint_index: wp.array(dtype=int),
+                             n_waypoints: int, close_index: int,
+                             jaw_hold: wp.array(dtype=float), jaw_open: float,
+                             max_delta: float, advance_rad: float,
+                             out_applied: wp.array2d(dtype=float)):
+    """Follow a hanging-fruit IK path, close, then pull. Fruit stays attached.
+
+    Active only on DETACH_ONLY. The jaw stays open until the grasp waypoint
+    and does not advance to the pull until the evaluator latches ``grasped``.
+    This is a privileged teacher, not a weld or a paper angle.
+    """
+    world, joint = wp.tid()
+    if goal[world] != 1:
+        out_applied[world, joint] = 0.0
+        return
+    start = start_index[world]
+    if start < 0:
+        start = 0
+    wp_idx = waypoint_index[world]
+    if wp_idx < 0:
+        wp_idx = 0
+    if wp_idx >= n_waypoints:
+        wp_idx = n_waypoints - 1
+    row = start * n_waypoints + wp_idx
+    closing = 1 if (wp_idx >= close_index or detached[world] != 0) else 0
+    if joint < 6:
+        desired = waypoint_q[row, joint]
+        current = targets[world, joint + 12]
+    else:
+        desired = jaw_hold[world] if closing != 0 else jaw_open
+        current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    out_applied[world, joint] = delta / max_delta
+    if joint == 0:
+        err = float(0.0)
+        for item in range(6):
+            e = wp.abs(waypoint_q[row, item] - targets[world, item + 12])
+            if e > err:
+                err = e
+        can_advance = 0
+        if err < advance_rad and wp_idx < n_waypoints - 1:
+            if wp_idx < close_index:
+                can_advance = 1
+            elif wp_idx == close_index and grasped[world] != 0:
+                can_advance = 1
+            elif wp_idx > close_index:
+                can_advance = 1
+        if can_advance != 0:
+            waypoint_index[world] = wp_idx + 1
+
+
 class FastRuntime:
     """Bounded rigid-fruit runtime.
 
@@ -815,6 +894,8 @@ class FastRuntime:
             self._grasp_offset_max_m = 0.0
             self._use_pocket = 0
             self._ik_demo = False
+            self._ik_grasp = False
+            self._grasp_close_index = 1
             self._n_waypoints = 1
             self._n_hard_starts = 0
             self._waypoint_q = wp.zeros((1, 6), dtype=float, device=self.device)
@@ -1380,6 +1461,168 @@ class FastRuntime:
             'hover_error_m': float(self.hover_error_m),
         }
 
+    def _build_grasp_catalog(self, initial_qpos):
+        """CPU IK catalog: easy/hard pregrasp starts and a pull-to-detach path."""
+        from .reach_teacher import (
+            grasp_close_index, grasp_waypoints_world_m, plan_grasp_joint_path,
+            pose_clears_crate, random_pregrasp_offset_world_m, solve_tcp_hover,
+        )
+        contract = self.control.contract
+        qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
+        qids = np.asarray(contract.qids[12:18], dtype=int)
+        dofs = np.asarray(contract.dofs[12:18], dtype=int)
+        ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+        limited = np.asarray(self.model.jnt_limited[contract.joints[12:18]], dtype=bool)
+        ranges[limited] = np.asarray(self.model.jnt_range[contract.joints[12:18]], dtype=np.float64)[limited]
+        import mujoco
+        data = mujoco.MjData(self.model)
+        data.qpos[:] = qpos
+        mujoco.mj_kinematics(self.model, data)
+        chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
+        fruit_p = np.asarray(data.xpos[self.fruit_body], dtype=np.float64)
+        q_home = qpos[qids].copy()
+        safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+        if (safe.shape == (6,) and np.isfinite(safe).all()
+                and np.all(safe >= ranges[:, 0]) and np.all(safe <= ranges[:, 1])):
+            q_seed = safe.copy()
+        else:
+            q_seed = q_home.copy()
+        accept = float(IK_GRASP_PRESET['ik_accept_err_m'])
+        n = int(IK_GRASP_PRESET['n_start_poses'])
+        n_hard = int(round(float(IK_GRASP_PRESET['hard_start_frac']) * n))
+        n_approach = int(IK_GRASP_PRESET['n_approach'])
+        pregrasp_m = float(IK_GRASP_PRESET['pregrasp_standoff_m'])
+        pull_m = float(IK_GRASP_PRESET['pull_distance_m'])
+        starts, paths, hard_flags = [], [], []
+        rng = np.random.default_rng(13)
+        attempts = 0
+        max_attempts = n * 24
+        q_init = q_seed.copy()
+        while len(starts) < n and attempts < max_attempts:
+            attempts += 1
+            want_hard = len([flag for flag in hard_flags if flag]) < n_hard and (
+                len(starts) >= n - n_hard or bool(rng.random() < 0.5))
+            try:
+                start_world = random_pregrasp_offset_world_m(
+                    fruit_p, chassis_p, rng, hard=want_hard,
+                    easy_min_m=IK_GRASP_PRESET['easy_standoff_min_m'],
+                    easy_max_m=IK_GRASP_PRESET['easy_standoff_max_m'],
+                    hard_min_m=IK_GRASP_PRESET['hard_standoff_min_m'],
+                    hard_max_m=IK_GRASP_PRESET['hard_standoff_max_m'])
+            except ValueError:
+                continue
+            arm_q, err = solve_tcp_hover(
+                self.model, qpos, self.tcp_site, start_world, qids, dofs, q_init, ranges)
+            if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+                continue
+            data.qpos[:] = qpos
+            data.qpos[qids] = arm_q
+            if not pose_clears_crate(self.model, data, self.tcp_site, self.chassis):
+                continue
+            try:
+                waypoints = grasp_waypoints_world_m(
+                    fruit_p, start_world, pregrasp_m=pregrasp_m, pull_m=pull_m,
+                    n_approach=n_approach)
+            except ValueError:
+                continue
+            approach = fruit_p - start_world
+            path = plan_grasp_joint_path(
+                self.model, qpos, self.tcp_site, self.chassis, arm_q, waypoints,
+                qids, dofs, ranges, approach_world=approach, accept_err_m=accept)
+            if path is None or path.shape[0] != waypoints.shape[0]:
+                continue
+            starts.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
+            paths.append(path.astype(np.float32))
+            hard_flags.append(bool(want_hard))
+            q_init = np.asarray(arm_q, dtype=np.float64)
+        if not starts:
+            raise ValueError('grasp IK found no physics-safe start that reaches the hanging fruit')
+        while len(starts) < n:
+            starts.append(starts[0])
+            paths.append(paths[0])
+            hard_flags.append(hard_flags[0])
+        order = np.argsort(np.asarray(hard_flags, dtype=np.int32))
+        start_qs = np.stack([starts[int(i)] for i in order])
+        path_qs = np.stack([paths[int(i)] for i in order])
+        n_hard = int(np.count_nonzero(np.asarray(hard_flags, dtype=np.int32)[order]))
+        self._easy_catalog_n = int(start_qs.shape[0])
+        self._n_hard_starts = n_hard
+        self._n_waypoints = int(path_qs.shape[1])
+        self._grasp_close_index = grasp_close_index(self._n_waypoints)
+        self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
+        self._waypoint_q = wp.array(path_qs.reshape(-1, 6), dtype=float, device=self.device)
+        self._hover_start_index = int(start_qs.shape[0] - 1)
+        self.hover_error_m = 0.0
+        self.easy_start_error_m = 0.0
+        return {
+            'n_start_poses': int(start_qs.shape[0]),
+            'n_hard_starts': n_hard,
+            'n_waypoints': int(self._n_waypoints),
+            'grasp_close_index': int(self._grasp_close_index),
+            'hover_error_m': 0.0,
+        }
+
+    def enable_ik_grasp(self, enabled=True, *, shaping_coef=None):
+        """Hanging fruit, open jaw, privileged IK to grasp and pull.
+
+        Does not enable ``--easy``, weld the fruit, or script the jaw for the
+        student. Eval must keep teacher_mix at 0. Jaw close fraction is an
+        engineering hold, not a calibrated tissue-safe force.
+        """
+        self._ik_grasp = bool(enabled)
+        self._easy = False
+        self._ik_demo = False
+        knobs = IK_GRASP_PRESET
+        self._easy_pin.assign(np.array([0], dtype=np.int32))
+        self._shape_hand_fruit.assign(np.array([0], dtype=np.int32))
+        self._release_at_center.assign(np.array([0], dtype=np.int32))
+        self._release_over_opening.assign(np.array([0], dtype=np.int32))
+        self._use_pocket = 0
+        if shaping_coef is None:
+            coef = knobs['shaping_coef'] if self._ik_grasp else knobs['default_shaping_coef']
+        else:
+            coef = float(shaping_coef)
+        if not np.isfinite(coef) or coef < 0 or coef > 50:
+            raise ValueError('shaping_coef must be finite in [0, 50]')
+        self._shaping_coef.assign(np.full(self.worlds, coef, dtype=np.float32))
+        length = float(knobs['shaping_length_m'] if self._ik_grasp else knobs['default_shaping_length_m'])
+        if not np.isfinite(length) or not 0.05 <= length <= 2.0:
+            raise ValueError('shaping_length_m must be finite in [0.05, 2.0] m')
+        self._shaping_length.assign(np.full(self.worlds, length, dtype=np.float32))
+        self._deposit_w.assign(np.full(self.worlds, float(knobs['deposit_reward']), dtype=np.float32))
+        self._fail_w.assign(np.full(self.worlds, float(knobs['fail_reward']), dtype=np.float32))
+        close = float(knobs['jaw_close_frac'])
+        if not np.isfinite(close) or not 0.15 <= close <= 0.85:
+            raise ValueError('jaw_close_frac must be finite in [0.15, 0.85]')
+        self._chosen_close_frac = close
+        hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
+        holds = np.full(self.worlds, hold, dtype=np.float32)
+        self._easy_jaw_hold.assign(holds)
+        self._easy_jaw_hold_next.assign(holds)
+        host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+        q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+        catalog = self._build_grasp_catalog(q0) if self._ik_grasp else {}
+        return {
+            'easy': False,
+            'ik_demo': False,
+            'ik_grasp': bool(self._ik_grasp),
+            'shaping_coef': coef,
+            'shaping_length_m': length,
+            'deposit_reward': float(knobs['deposit_reward']),
+            'fail_reward': float(knobs['fail_reward']),
+            'hold_close_frac': close,
+            'weld': False,
+            'n_start_poses': int(catalog.get('n_start_poses', 0)),
+            'n_hard_starts': int(catalog.get('n_hard_starts', 0)),
+            'n_waypoints': int(catalog.get('n_waypoints', 0)),
+            'grasp_close_index': int(catalog.get('grasp_close_index', 0)),
+            'hover_error_m': 0.0,
+            'easy_start_error_m': 0.0,
+            'scope': ('hanging fruit; open jaw; privileged IK reach/grasp/pull; '
+                      'fruit stays attached until stem load; no weld'),
+            **catalog,
+        }
+
     def snapshot_easy_hover(self):
         """Host copy of start indices and the success hover cohort."""
         return {
@@ -1655,6 +1898,34 @@ class FastRuntime:
             raise RuntimeError('privileged deposit action has the wrong shape')
         return applied
 
+    def privileged_grasp_action(self):
+        """Joint increments along the hanging-fruit IK catalog.
+
+        Returns tanh-space applied actions in [-1, 1]. Active on DETACH_ONLY.
+        The fruit remains attached until stem load; this is not an oracle
+        demonstration and must stay off during eval.
+        """
+        import torch
+        if not self._ik_grasp:
+            applied = wp.to_torch(self._teacher_applied)
+            applied.zero_()
+            return applied
+        max_delta = 2.5 * self.control_dt
+        with wp.ScopedDevice(self.device):
+            wp.launch(_privileged_grasp_action, dim=(self.worlds, 7), inputs=[
+                self.task.goal, self.task.detached, self.task.grasped,
+                self.control.targets, self._waypoint_q,
+                self._easy_start_index, self._waypoint_index,
+                int(self._n_waypoints), int(self._grasp_close_index),
+                self._easy_jaw_hold, self._jaw_open,
+                float(max_delta), float(IK_GRASP_PRESET['waypoint_advance_rad']),
+                self._teacher_applied],
+                device=self.device)
+        applied = wp.to_torch(self._teacher_applied)
+        if tuple(applied.shape) != (self.worlds, 7):
+            raise RuntimeError('privileged grasp action has the wrong shape')
+        return applied
+
     def pixels(self):
         if self.rig is None or self.policy_camera is None:
             raise RuntimeError('FastRuntime was created without a gripper camera')
@@ -1686,7 +1957,7 @@ class FastRuntime:
                       inputs=[mask_wp, self._easy_released], device=self.device)
             wp.launch(_clear_masked_int, dim=self.worlds,
                       inputs=[mask_wp, self._waypoint_index], device=self.device)
-            if self._ik_demo:
+            if self._ik_demo or self._ik_grasp:
                 self._commit_queued_carry_starts(mask)
             if self._easy and not self._ik_demo:
                 self._prefer_hover_after_success(mask)
@@ -1716,6 +1987,12 @@ class FastRuntime:
                 wp.launch(_apply_easy_jaw_hold, dim=self.worlds, inputs=[
                     mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
                     self._jaw_qposadr, self._easy_jaw_hold],
+                    device=self.device)
+            if self._ik_grasp:
+                wp.launch(_apply_grasp_start, dim=self.worlds, inputs=[
+                    mask_wp, self._reset_mode, self.data.qpos, self.control.targets,
+                    self.control.qids, self._easy_start_q, self._easy_start_index,
+                    self._jaw_qposadr, float(self._jaw_open)],
                     device=self.device)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)

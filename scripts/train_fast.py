@@ -10,12 +10,12 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    EASY_PRESET, IK_DEMO_PRESET, apply_easy_preset, apply_ik_demo_preset,
-    apply_speedrun_preset, easy_start_far_frac,
-    easy_teacher_mix,
-    evaluate_skills, evaluation_horizon_steps, fruit_block_reason,
-    idle_locomotion_mask, next_stage, promotion_ready, sample_world_skills,
-    stage_named, summarise_stage,
+    EASY_PRESET, IK_DEMO_PRESET, IK_GRASP_PRESET, apply_easy_preset,
+    apply_ik_demo_preset, apply_ik_grasp_preset, apply_speedrun_preset,
+    easy_start_far_frac, easy_teacher_mix, evaluate_skills,
+    evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask,
+    next_stage, promotion_ready, sample_world_skills, stage_named,
+    summarise_stage,
 )
 
 
@@ -75,8 +75,36 @@ def apply_speedrun_cli(args, *, video_default=10):
     return args
 
 
+def apply_ik_grasp_cli(args):
+    """Hanging-fruit IK reach/grasp demos, then a short RL fine-tune.
+
+    Does not imply --easy. Fruit stays attached. Eval keeps teacher_mix=0.
+    """
+    if not getattr(args, 'ik_grasp', False):
+        return args
+    args.easy = False
+    args.ik_demo = False
+    preset = apply_ik_grasp_preset({})
+    demo_updates = getattr(args, 'demo_updates', None)
+    if demo_updates is None:
+        demo_updates = int(preset['demo_updates'])
+    args.demo_updates = int(demo_updates)
+    if getattr(args, 'teacher_mix', None) is None:
+        args.teacher_mix = 1.0 if int(args.demo_updates) > 0 else 0.0
+    if getattr(args, 'shaping_coef', None) is None:
+        args.shaping_coef = float(preset['shaping_coef'])
+    args.updates = int(preset['updates'])
+    args.eval_every = int(preset['eval_every'])
+    args.checkpoint_every = int(preset['checkpoint_every'])
+    args.entropy_coef = float(preset['entropy_coef'])
+    args.ppo_epochs = int(preset['ppo_epochs'])
+    return args
+
+
 def apply_ik_demo_cli(args):
     """Random-start IK demos, then a short RL fine-tune. Implies --easy."""
+    if getattr(args, 'ik_grasp', False):
+        return args
     if not getattr(args, 'ik_demo', False):
         return args
     args.easy = True
@@ -105,7 +133,7 @@ def apply_ik_demo_cli(args):
 
 def apply_easy_cli(args):
     """Privileged deposit facilitation. Explicit --teacher-mix, including 0, wins."""
-    if getattr(args, 'ik_demo', False):
+    if getattr(args, 'ik_demo', False) or getattr(args, 'ik_grasp', False):
         return args
     if not getattr(args, 'easy', False):
         if getattr(args, 'teacher_mix', None) is None:
@@ -192,7 +220,10 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                     mask = torch.where(
                         reset, torch.rand(runtime.worlds, device=raw.device) < mix_prob, mask)
                 carry['teacher_mask'] = mask
-                teacher_applied = runtime.privileged_deposit_action()
+                if getattr(runtime, '_ik_grasp', False):
+                    teacher_applied = runtime.privileged_grasp_action()
+                else:
+                    teacher_applied = runtime.privileged_deposit_action()
                 raw = mix_privileged_actions(raw, teacher_applied, mask)
                 teacher_used += int(mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
@@ -710,8 +741,11 @@ def evaluate(runtime, policy, gait, steps, camera_every, *, stage=None):
     }
 
 
-def apply_stage(runtime, stage, rng, *, evaluate_only=False):
-    skills = evaluate_skills(stage, runtime.worlds) if evaluate_only else sample_world_skills(stage, runtime.worlds, rng)
+def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False):
+    if evaluate_only:
+        skills = evaluate_skills(stage, runtime.worlds)
+    else:
+        skills = sample_world_skills(stage, runtime.worlds, rng, primary_only=primary_only)
     runtime.configure_skills(skills)
     return skills
 
@@ -742,10 +776,16 @@ def run(args):
     checkpoint_every = int(getattr(args, 'checkpoint_every', 1))
     easy = bool(getattr(args, 'easy', False))
     ik_demo = bool(getattr(args, 'ik_demo', False))
+    ik_grasp = bool(getattr(args, 'ik_grasp', False))
     teacher_mix = float(getattr(args, 'teacher_mix', 0.0))
     shaping_coef = float(getattr(args, 'shaping_coef', EASY_PRESET['default_shaping_coef']))
-    demo_updates = int(getattr(args, 'demo_updates', 0) or 0) if ik_demo else 0
-    knobs = IK_DEMO_PRESET if ik_demo else EASY_PRESET
+    demo_updates = int(getattr(args, 'demo_updates', 0) or 0) if (ik_demo or ik_grasp) else 0
+    if ik_grasp:
+        knobs = IK_GRASP_PRESET
+    elif ik_demo:
+        knobs = IK_DEMO_PRESET
+    else:
+        knobs = EASY_PRESET
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
@@ -754,6 +794,7 @@ def run(args):
                   speedrun=bool(getattr(args, 'speedrun', False)),
                   easy=easy,
                   ik_demo=ik_demo,
+                  ik_grasp=ik_grasp,
                   demo_updates=demo_updates,
                   teacher_mix=teacher_mix,
                   teacher_horizon_updates=int(EASY_PRESET['teacher_horizon_updates']) if easy else 0,
@@ -830,17 +871,35 @@ def run(args):
             (args.output / 'config.json').write_text(
                 json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
                            indent=2, default=str) + '\n')
+        elif ik_grasp:
+            grasp_info = runtime.enable_ik_grasp(True, shaping_coef=shaping_coef)
+            runtime.set_carry_progress(numpy_rng)
+            config['ik_grasp'] = True
+            config['easy'] = False
+            config['easy_scope'] = grasp_info['scope']
+            config['hold_close_frac'] = grasp_info.get('hold_close_frac')
+            config['shaping_length_m'] = grasp_info.get('shaping_length_m')
+            config['n_waypoints'] = grasp_info.get('n_waypoints')
+            config['n_hard_starts'] = grasp_info.get('n_hard_starts')
+            config['n_start_poses'] = grasp_info.get('n_start_poses')
+            config['grasp_close_index'] = grasp_info.get('grasp_close_index')
+            config['weld'] = False
+            config['ppo_lr'] = float(knobs['ppo_lr'])
+            config['ppo_epochs'] = int(knobs['ppo_epochs'])
+            (args.output / 'config.json').write_text(
+                json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in config.items()},
+                           indent=2, default=str) + '\n')
         gait = load_gait_artifact(args.gait_checkpoint, precision_profile='cuda-fp32').to('cuda:0').eval()
         policy = build_policy().to('cuda:0')
         if args.initialize_from:
             load_checkpoint(args.initialize_from, {'student':policy}, None,
                             expected_meta={'camera':'hand_color_sensor'})
-        ppo_lr = float(knobs['ppo_lr']) if easy else 3e-4
+        ppo_lr = float(knobs['ppo_lr']) if (easy or ik_grasp) else 3e-4
         if not np_finite(ppo_lr) or not 1e-5 <= ppo_lr <= 1e-2:
             raise ValueError('ppo_lr must be finite in [1e-5, 1e-2]')
         optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle, scripted_jaw=easy)
-        apply_stage(runtime, stage, numpy_rng)
+        apply_stage(runtime, stage, numpy_rng, primary_only=ik_grasp)
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
                 teacher_mix=warmup_mix)
@@ -871,11 +930,14 @@ def run(args):
         best_checkpoint = str(last_checkpoint)
         carry = {}
         teacher_anneal_after = None
-        apply_stage(runtime, stage, numpy_rng)
+        apply_stage(runtime, stage, numpy_rng, primary_only=ik_grasp)
         for iteration in range(args.updates):
             began = time.monotonic()
-            demo_phase = bool(ik_demo and iteration < demo_updates)
-            if ik_demo:
+            demo_phase = bool((ik_demo or ik_grasp) and iteration < demo_updates)
+            if ik_grasp and iteration == demo_updates:
+                apply_stage(runtime, stage, numpy_rng)
+                carry = {}
+            if ik_demo or ik_grasp:
                 start_info = runtime.set_carry_progress(numpy_rng)
                 config['easy_far_frac'] = start_info['easy_far_frac']
                 mix = 1.0 if demo_phase else 0.0
@@ -908,13 +970,13 @@ def run(args):
                         row.pop(key, None)
                 del bootstrap
                 bootstrap = None
-                bc_batch = min(int(args.minibatch_worlds), int(IK_DEMO_PRESET['bc_minibatch_worlds']))
+                bc_batch = min(int(args.minibatch_worlds), int(knobs['bc_minibatch_worlds']))
                 metrics = imitation_update(
-                    policy, optimizer, rows, epochs=int(IK_DEMO_PRESET['bc_epochs']),
+                    policy, optimizer, rows, epochs=int(knobs['bc_epochs']),
                     dim_mask=dim_mask, grad_clip=float(knobs['ppo_grad_clip']),
                     minibatch_worlds=bc_batch)
             else:
-                if easy:
+                if easy or ik_grasp:
                     ppo_clip = float(knobs['ppo_clip'])
                     ppo_grad = float(knobs['ppo_grad_clip'])
                     raw_std_cap = knobs['ppo_adv_std_cap']
@@ -948,9 +1010,10 @@ def run(args):
                 terminal_transitions=int(torch.stack([r['terminated'] for r in rows]).sum()),
                 harvest_successes=int((torch.stack([r['success'] for r in rows]).max(dim=0).values > 0).sum()),
                 harvest_jackpot_sum=float(int(metrics['ppo_success_worlds']) * (
-                    float(knobs['deposit_reward']) if easy else 20.0)),
+                    float(knobs['deposit_reward']) if (easy or ik_grasp) else 20.0)),
                 demo_phase=int(demo_phase),
                 ik_demo=int(ik_demo),
+                ik_grasp=int(ik_grasp),
                 carry_easy_start_worlds=int(start_info.get('carry_easy_start_worlds', 0)),
                 carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
                 carry_waypoint_mean=float(start_info.get('carry_waypoint_mean', 0.0)),
@@ -1127,8 +1190,10 @@ def main():
                    help='Kiwi starts in the jaws; scripted hold/open; RL deposits; not a weld')
     p.add_argument('--ik-demo', action='store_true',
                    help='Random easy/hard starts; IK demos to the basket centre; then short RL')
+    p.add_argument('--ik-grasp', action='store_true',
+                   help='Hanging fruit; IK reach/grasp/pull demos; then short RL; not --easy')
     p.add_argument('--demo-updates', type=int, default=None,
-                   help='IK-demo behaviour-clone updates; 0 with --initialize-from is RL only')
+                   help='IK behaviour-clone updates; 0 with --initialize-from is RL only for --ik-demo')
     p.add_argument('--teacher-mix', type=float, default=None,
                    help='Fraction of training actions replaced by the privileged deposit teacher')
     p.add_argument('--shaping-coef', type=float, default=None,
@@ -1143,8 +1208,11 @@ def main():
     add_monitor_args(p)
     a = p.parse_args()
     apply_speedrun_cli(a)
+    apply_ik_grasp_cli(a)
     apply_ik_demo_cli(a)
     apply_easy_cli(a)
+    if bool(getattr(a, 'ik_demo', False)) and bool(getattr(a, 'ik_grasp', False)):
+        p.error('--ik-demo and --ik-grasp cannot be combined')
     if not 1 <= a.eval_every <= 10000 or not 1 <= a.minibatch_worlds <= 1024 or not 2 <= a.steps <= 256 or not 1 <= a.updates <= 10000 or not 1 <= a.camera_every <= 5:
         p.error('Invalid steps, updates or camera interval')
     if not 1 <= a.checkpoint_every <= 10000:

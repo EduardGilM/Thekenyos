@@ -189,6 +189,13 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertEqual(ik['easy_far_frac'], 1.0)
         self.assertFalse(ik['preview_hard'])
         self.assertEqual(ik['reset_mode'], 1)
+        grasp = curriculum_preview_from_checkpoint({
+            'meta': {'curriculum_stage': 'grasp_detach'},
+            'config': {'ik_grasp': True, 'easy': False},
+        })
+        self.assertTrue(grasp['ik_grasp'])
+        self.assertFalse(grasp['easy'])
+        self.assertEqual(grasp['reset_mode'], 2)
         from treesim.kiwi_rl.training_monitor import (
             apply_native_easy_hover, apply_native_easy_start, apply_native_skill_reset, _n3_command,
         )
@@ -203,6 +210,8 @@ class TrainingMonitorTests(unittest.TestCase):
         self.assertIn('pose_clears_crate', inspect.getsource(apply_native_carry_start))
         self.assertIn('arm_basket_contact_pairs', inspect.getsource(apply_native_carry_start))
         self.assertIn('ik_demo', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('ik_grasp', inspect.getsource(apply_native_skill_reset))
+        self.assertIn('apply_native_grasp_start', inspect.getsource(apply_native_skill_reset))
         self.assertIn('preview_hard', inspect.getsource(apply_native_skill_reset))
         self.assertIn('random_grasp_offset_local_m', inspect.getsource(apply_native_skill_reset))
         self.assertIn('tcp_world', inspect.getsource(apply_native_skill_reset))

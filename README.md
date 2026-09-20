@@ -810,6 +810,21 @@ and report `fruit_inside_crate_*` in the sidecar. Evaluation keeps `teacher_mix=
 field harvest; `training_ready` stays false. The arm must not clip through the
 crate: catalog poses with arm/basket contacts are discarded.
 
+`--ik-grasp` is the stage-2 recipe: the kiwi **stays hanging**, the jaw starts
+open, and a privileged IK teacher reaches the fruit (easy 1–3 cm / hard 8–15 cm
+starts), closes, then pulls down to load the stem. It does **not** imply
+`--easy` and does not weld the fruit. Behaviour-clone 16 updates, then four PPO
+updates with the teacher off. Evaluation keeps `teacher_mix=0` and
+`guidance_weight=0`. Success is `retained_detach`, not a crate deposit. This is
+not a paper picking angle or a tissue-safe grasp; `training_ready` stays false.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-grasp-run \
+  --stage grasp_detach --worlds 2048 --steps 64 --minibatch-worlds 64 \
+  --eval-profile speedrun --ik-grasp --video-every 5 --seed 7
+```
+
 ```bash
 python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-demo-run \

@@ -377,6 +377,35 @@ class ReachTeacherMathTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             random_grasp_offset_local_m(tcp, None)
 
+    def test_pregrasp_and_grasp_waypoints_pull_below_fruit(self):
+        from treesim.kiwi_rl.reach_teacher import (
+            grasp_close_index, grasp_waypoints_world_m, random_pregrasp_offset_world_m,
+        )
+        rng = np.random.default_rng(0)
+        fruit = np.array([0.4, 0.0, 1.1], dtype=np.float64)
+        chassis = np.array([0.0, 0.0, 0.5], dtype=np.float64)
+        easy = [random_pregrasp_offset_world_m(fruit, chassis, rng, hard=False) for _ in range(32)]
+        hard = [random_pregrasp_offset_world_m(fruit, chassis, rng, hard=True) for _ in range(32)]
+        easy_d = np.linalg.norm(np.stack(easy) - fruit, axis=1)
+        hard_d = np.linalg.norm(np.stack(hard) - fruit, axis=1)
+        self.assertGreater(float(easy_d.min()), 0.009)
+        self.assertLess(float(easy_d.max()), 0.031)
+        self.assertGreater(float(hard_d.min()), 0.079)
+        self.assertLess(float(hard_d.max()), 0.151)
+        self.assertGreater(float(hard_d.mean()), float(easy_d.mean()) + 0.04)
+        self.assertTrue(np.all(np.stack(easy)[:, 2] < fruit[2]))
+        start = easy[0]
+        waypoints = grasp_waypoints_world_m(fruit, start)
+        self.assertEqual(waypoints.shape[0], 5)
+        self.assertEqual(grasp_close_index(waypoints.shape[0]), 3)
+        np.testing.assert_allclose(waypoints[-2], fruit)
+        self.assertAlmostEqual(float(waypoints[-1][2]), float(fruit[2] - 0.08))
+        self.assertLess(float(np.linalg.norm(waypoints[-3] - fruit)), 0.031)
+        with self.assertRaises(ValueError):
+            grasp_waypoints_world_m(fruit, start, pull_m=0.01)
+        with self.assertRaises(TypeError):
+            random_pregrasp_offset_world_m(fruit, chassis, None)
+
 
 if __name__ == '__main__':
     unittest.main()
