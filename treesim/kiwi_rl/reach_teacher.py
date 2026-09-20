@@ -1485,6 +1485,152 @@ def plan_carry_joint_path(model, qpos, site_id, chassis, start_q, waypoints_worl
     return np.stack(path)
 
 
+def random_pregrasp_offset_world_m(fruit_world, chassis_world, rng, *, hard=False,
+                                   easy_min_m=0.01, easy_max_m=0.03,
+                                   hard_min_m=0.08, hard_max_m=0.15):
+    """World TCP start around a hanging fruit. Stem stays attached.
+
+    Easy starts sit 1–3 cm off the COM; hard starts sit 8–15 cm. The sample
+    is biased toward the robot and below the fruit so the first pose does not
+    come through the canopy. This is a privileged reset, not a weld.
+    """
+    if rng is None or not hasattr(rng, 'uniform'):
+        raise TypeError('rng must be a NumPy Generator')
+    fruit = np.asarray(fruit_world, dtype=np.float64).reshape(3)
+    chassis = np.asarray(chassis_world, dtype=np.float64).reshape(3)
+    easy_min = float(easy_min_m)
+    easy_max = float(easy_max_m)
+    hard_min = float(hard_min_m)
+    hard_max = float(hard_max_m)
+    if fruit.shape != (3,) or chassis.shape != (3,):
+        raise ValueError('fruit and chassis must be finite 3-vectors')
+    if not np.isfinite(fruit).all() or not np.isfinite(chassis).all():
+        raise ValueError('fruit and chassis must be finite')
+    spans = (easy_min, easy_max, hard_min, hard_max)
+    if not np.isfinite(spans).all():
+        raise ValueError('pregrasp standoff spans must be finite')
+    if not 0.005 <= easy_min < easy_max <= 0.05:
+        raise ValueError('easy pregrasp standoff must sit in [0.005, 0.05] m')
+    if not 0.05 <= hard_min < hard_max <= 0.25:
+        raise ValueError('hard pregrasp standoff must sit in [0.05, 0.25] m')
+    if hard_min < easy_max:
+        raise ValueError('hard pregrasp starts must sit farther than easy starts')
+    standoff = float(rng.uniform(hard_min, hard_max) if hard else rng.uniform(easy_min, easy_max))
+    toward = chassis - fruit
+    toward[2] = 0.0
+    norm = float(np.linalg.norm(toward))
+    if norm < 1e-6:
+        toward = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        toward = toward / norm
+    yaw = float(rng.uniform(-np.pi / 3.0, np.pi / 3.0))
+    elev = float(rng.uniform(-0.85, -0.05))
+    cos_y, sin_y = float(np.cos(yaw)), float(np.sin(yaw))
+    horiz = np.array(
+        [cos_y * toward[0] - sin_y * toward[1], sin_y * toward[0] + cos_y * toward[1], 0.0],
+        dtype=np.float64)
+    horiz = horiz / float(np.linalg.norm(horiz))
+    direction = horiz * float(np.cos(elev)) + np.array([0.0, 0.0, 1.0], dtype=np.float64) * float(np.sin(elev))
+    direction = direction / float(np.linalg.norm(direction))
+    start = fruit + direction * standoff
+    if not np.isfinite(start).all():
+        raise ValueError('pregrasp start must be finite')
+    return start
+
+
+def grasp_waypoints_world_m(fruit_world, start_world, *, pregrasp_m=0.03, pull_m=0.08,
+                            n_approach=3):
+    """Approach, close at the COM, then pull down to load the stem.
+
+    The fruit stays on its equality until the pull exceeds the engineering
+    detach threshold. The last two waypoints are the grasp and the pull.
+    """
+    fruit = np.asarray(fruit_world, dtype=np.float64).reshape(3)
+    start = np.asarray(start_world, dtype=np.float64).reshape(3)
+    pregrasp = float(pregrasp_m)
+    pull = float(pull_m)
+    if not isinstance(n_approach, int) or isinstance(n_approach, bool) or not 1 <= n_approach <= 8:
+        raise ValueError('n_approach must be an integer in [1, 8]')
+    if fruit.shape != (3,) or start.shape != (3,) or not np.isfinite(fruit).all() or not np.isfinite(start).all():
+        raise ValueError('fruit and start must be finite 3-vectors')
+    if not np.isfinite(pregrasp) or not 0.01 <= pregrasp <= 0.08:
+        raise ValueError('pregrasp_m must be finite in [0.01, 0.08] m')
+    if not np.isfinite(pull) or not 0.03 <= pull <= 0.20:
+        raise ValueError('pull_m must be finite in [0.03, 0.20] m')
+    approach = start - fruit
+    norm = float(np.linalg.norm(approach))
+    if norm < 1e-6:
+        approach = np.array([0.12, 0.0, -0.04], dtype=np.float64)
+        norm = float(np.linalg.norm(approach))
+    approach = approach / norm
+    pregrasp_xyz = fruit + approach * pregrasp
+    grasp_xyz = fruit.copy()
+    pull_xyz = fruit + np.array([0.0, 0.0, -pull], dtype=np.float64)
+    waypoints = []
+    for index in range(n_approach):
+        frac = float(index + 1) / float(n_approach)
+        waypoints.append((1.0 - frac) * start + frac * pregrasp_xyz)
+    waypoints.append(grasp_xyz)
+    waypoints.append(pull_xyz)
+    stacked = np.stack(waypoints).astype(np.float64)
+    if not np.isfinite(stacked).all():
+        raise ValueError('grasp waypoints must be finite')
+    return stacked
+
+
+def grasp_close_index(n_waypoints):
+    """First catalog row that should close the jaw (the grasp waypoint)."""
+    if not isinstance(n_waypoints, int) or isinstance(n_waypoints, bool) or n_waypoints < 3:
+        raise ValueError('n_waypoints must be an integer >= 3')
+    return int(n_waypoints - 2)
+
+
+def plan_grasp_joint_path(model, qpos, site_id, chassis, start_q, waypoints_world,
+                          joint_qposadr, joint_dofadr, ranges, *, approach_world,
+                          accept_err_m=0.025):
+    """IK a hanging-fruit approach. Rejects crate clips; fruit stays attached.
+
+    Early waypoints are position-only. The grasp and pull request tool +Z
+    toward the fruit. This is a privileged teacher path, not a paper angle.
+    """
+    import mujoco
+    start_q = np.asarray(start_q, dtype=np.float64).reshape(6)
+    waypoints = np.asarray(waypoints_world, dtype=np.float64)
+    accept = float(accept_err_m)
+    approach = np.asarray(approach_world, dtype=np.float64).reshape(3)
+    if waypoints.ndim != 2 or waypoints.shape[1] != 3 or waypoints.shape[0] < 3:
+        raise ValueError('waypoints_world must be [N>=3, 3]')
+    if not np.isfinite(start_q).all() or not np.isfinite(waypoints).all():
+        raise ValueError('grasp path inputs must be finite')
+    if not np.isfinite(approach).all() or float(np.linalg.norm(approach)) < 1e-9:
+        raise ValueError('approach_world must be a finite nonzero 3-vector')
+    if not np.isfinite(accept) or not 0.005 <= accept <= 0.05:
+        raise ValueError('accept_err_m must be finite in [0.005, 0.05] m')
+    qids = np.asarray(joint_qposadr, dtype=int).reshape(6)
+    q = np.asarray(qpos, dtype=np.float64).reshape(-1).copy()
+    data = mujoco.MjData(model)
+    path = []
+    q_init = start_q.copy()
+    axis_from = grasp_close_index(int(waypoints.shape[0]))
+    tilted = approach / float(np.linalg.norm(approach))
+    for index, target in enumerate(waypoints):
+        if index >= axis_from:
+            arm_q, err = solve_tcp_axis(
+                model, q, site_id, target, tilted, qids, joint_dofadr, q_init, ranges)
+        else:
+            arm_q, err = solve_tcp_hover(
+                model, q, site_id, target, qids, joint_dofadr, q_init, ranges)
+        if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+            return None
+        q[qids] = np.asarray(arm_q, dtype=np.float64)
+        data.qpos[:] = q
+        if not pose_clears_crate(model, data, site_id, chassis):
+            return None
+        path.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
+        q_init = np.asarray(arm_q, dtype=np.float64)
+    return np.stack(path)
+
+
 def damped_least_squares(J, error, damping=.05, max_step=.1):
     """Return a bounded joint increment for a Cartesian position error."""
     J, error = np.asarray(J, dtype=np.float64), np.asarray(error, dtype=np.float64)

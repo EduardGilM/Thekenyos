@@ -148,10 +148,34 @@ class FastTrainerCLITest(unittest.TestCase):
         skipped = apply_easy_cli(argparse.Namespace(
             ik_demo=True, easy=True, teacher_mix=1.0, shaping_coef=15.0, updates=20))
         self.assertEqual(skipped.updates, 20)
+        from train_fast import apply_ik_grasp_cli
+        grasp = apply_ik_grasp_cli(argparse.Namespace(
+            ik_grasp=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/latest.pt', demo_updates=None, easy=True, ik_demo=True))
+        self.assertFalse(grasp.easy)
+        self.assertFalse(grasp.ik_demo)
+        self.assertEqual(grasp.demo_updates, 16)
+        self.assertEqual(grasp.teacher_mix, 1.0)
+        self.assertEqual(grasp.updates, 20)
+        self.assertEqual(grasp.shaping_coef, 8.0)
+        self.assertEqual(grasp.eval_every, 8)
+        skipped_grasp = apply_easy_cli(argparse.Namespace(
+            ik_grasp=True, easy=False, teacher_mix=1.0, shaping_coef=8.0, updates=20))
+        self.assertEqual(skipped_grasp.updates, 20)
         import inspect
         import train_fast
         self.assertNotIn('privileged_deposit_action', inspect.getsource(train_fast.evaluate_mission))
+        self.assertNotIn('privileged_grasp_action', inspect.getsource(train_fast.evaluate_mission))
         collect_src = inspect.getsource(train_fast.collect)
+        self.assertIn('privileged_grasp_action', collect_src)
+        run_src = inspect.getsource(train_fast.run)
+        self.assertIn('enable_ik_grasp', run_src)
+        self.assertIn('ik_grasp', run_src)
+        self.assertIn('primary_only', run_src)
+        self.assertIn('scripted_jaw=(easy or ik_grasp)', run_src)
+        self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
+        self.assertIn('catalog_fruit_source', run_src)
         self.assertIn("row['ground_contact']", collect_src)
         self.assertIn("row['inside_basket']", collect_src)
         self.assertIn("row['fallen']", collect_src)

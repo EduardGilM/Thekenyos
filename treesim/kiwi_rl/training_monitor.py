@@ -741,6 +741,63 @@ def apply_native_carry_start(model, data, controller, tcp_site: int, *,
     return float('inf')
 
 
+def apply_native_grasp_start(model, data, controller, tcp_site: int, fruit_body: int, *,
+                             hard: bool = False, seed: int = 13) -> float:
+    """Move the native arm to an easy hanging-fruit pregrasp. Fruit is not written."""
+    import mujoco
+    import numpy as np
+    from treesim.kiwi_rl.curriculum import EASY_PRESET, IK_GRASP_PRESET
+    from treesim.kiwi_rl.reach_teacher import (
+        pose_clears_crate, random_pregrasp_offset_world_m, solve_tcp_hover,
+    )
+    rng = np.random.default_rng(int(seed))
+    mujoco.mj_kinematics(model, data)
+    qids = np.asarray(controller.qids[12:18], dtype=int)
+    dofs = np.asarray(controller.dofs[12:18], dtype=int)
+    joints = np.asarray(controller.joints[12:18], dtype=int)
+    ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+    limited = np.asarray(model.jnt_limited[joints], dtype=bool)
+    ranges[limited] = np.asarray(model.jnt_range[joints], dtype=np.float64)[limited]
+    chassis_p = np.asarray(data.xpos[controller.chassis], dtype=np.float64)
+    fruit_p = np.asarray(data.xpos[int(fruit_body)], dtype=np.float64)
+    q_home = np.asarray(data.qpos[qids], dtype=np.float64).copy()
+    qpos0 = np.asarray(data.qpos, dtype=np.float64).copy()
+    safe = np.asarray(EASY_PRESET['safe_hover_arm_q'], dtype=np.float64).reshape(-1)
+    if (safe.shape == (6,) and np.isfinite(safe).all()
+            and np.all(safe >= ranges[:, 0]) and np.all(safe <= ranges[:, 1])):
+        q_seed = safe.copy()
+    else:
+        q_seed = q_home.copy()
+    accept = float(IK_GRASP_PRESET['ik_accept_err_m'])
+    for _ in range(48):
+        try:
+            target = random_pregrasp_offset_world_m(
+                fruit_p, chassis_p, rng, hard=bool(hard),
+                easy_min_m=IK_GRASP_PRESET['easy_standoff_min_m'],
+                easy_max_m=IK_GRASP_PRESET['easy_standoff_max_m'],
+                hard_min_m=IK_GRASP_PRESET['hard_standoff_min_m'],
+                hard_max_m=IK_GRASP_PRESET['hard_standoff_max_m'])
+        except ValueError:
+            continue
+        data.qpos[:] = qpos0
+        arm_q, err = solve_tcp_hover(
+            model, data.qpos, int(tcp_site), target, qids, dofs, q_seed, ranges)
+        if (not np.isfinite(arm_q).all() or not np.isfinite(err)
+                or float(err) > accept):
+            continue
+        data.qpos[qids] = arm_q
+        mujoco.mj_forward(model, data)
+        if not pose_clears_crate(model, data, tcp_site, controller.chassis):
+            continue
+        controller.targets[12:18] = arm_q
+        return float(err)
+    data.qpos[:] = qpos0
+    data.qpos[qids] = q_seed
+    controller.targets[12:18] = q_seed
+    mujoco.mj_forward(model, data)
+    return float('inf')
+
+
 def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any]:
     """CPU clip reset/locomotion flags from checkpoint metadata. Not a harvest demo."""
     from treesim.kiwi_rl.curriculum import reset_mode_for_goal, stage_named
@@ -749,6 +806,7 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
     name = meta.get('curriculum_stage') or config.get('stage')
     easy = bool(config.get('easy', False))
     ik_demo = bool(config.get('ik_demo', False))
+    ik_grasp = bool(config.get('ik_grasp', False))
     far_frac = 0.0
     hold_frac = 0.75
     preview_hard = False
@@ -767,15 +825,22 @@ def curriculum_preview_from_checkpoint(info: Mapping[str, Any]) -> dict[str, Any
         # "this one-world CPU clip is a hard start". Default the preview to
         # an easy physics-safe pose so a deposit is visible.
         preview_hard = bool(not ik_demo and far_frac >= 0.5)
+    if ik_grasp:
+        raw_hold = config.get('hold_close_frac', 0.45)
+        if raw_hold is None:
+            raw_hold = 0.45
+        hold_frac = float(raw_hold)
+        if not math.isfinite(hold_frac) or not 0.0 <= hold_frac <= 1.0:
+            raise ValueError('hold_close_frac must be finite in [0, 1]')
     if not name:
         return dict(stage=None, reset_mode=0, allow_locomotion=False, easy=easy,
-                    ik_demo=ik_demo, easy_far_frac=far_frac, hold_close_frac=hold_frac,
-                    preview_hard=preview_hard)
+                    ik_demo=ik_demo, ik_grasp=ik_grasp, easy_far_frac=far_frac,
+                    hold_close_frac=hold_frac, preview_hard=preview_hard)
     stage = stage_named(str(name))
     return dict(stage=stage.name, reset_mode=int(reset_mode_for_goal(stage.goal, stage)),
                 allow_locomotion=bool(stage.allow_locomotion), goal=stage.goal, easy=easy,
-                ik_demo=ik_demo, easy_far_frac=far_frac, hold_close_frac=hold_frac,
-                preview_hard=preview_hard)
+                ik_demo=ik_demo, ik_grasp=ik_grasp, easy_far_frac=far_frac,
+                hold_close_frac=hold_frac, preview_hard=preview_hard)
 
 
 def _tcp_fruit_ids(model, manifest):
@@ -906,7 +971,8 @@ def apply_native_easy_start(model, data, controller, tcp_site: int, *,
 def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: int,
                              approach_offset_m: float = 1.0, easy: bool = False,
                              far_frac: float = 0.0, hold_close_frac: float | None = None,
-                             ik_demo: bool = False, preview_hard: bool = False) -> None:
+                             ik_demo: bool = False, ik_grasp: bool = False,
+                             preview_hard: bool = False) -> None:
     """Match GPU deposit/approach resets on CPU native MuJoCo. Fruit stays a free body."""
     import mujoco
     import numpy as np
@@ -973,6 +1039,9 @@ def apply_native_skill_reset(model, data, manifest, controller, *, reset_mode: i
         opened, _closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
         data.qpos[int(controller.qids[18])] = opened
         controller.targets[18] = opened
+        if ik_grasp:
+            apply_native_grasp_start(
+                model, data, controller, tcp_site, fruit_body, hard=False)
     if reset_mode == 3:
         chassis_joint = int(model.body_jntadr[controller.chassis])
         data.qpos[int(model.jnt_qposadr[chassis_joint])] -= approach_offset_m
@@ -1070,6 +1139,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                              far_frac=float(preview.get('easy_far_frac') or 0.0),
                              hold_close_frac=preview.get('hold_close_frac'),
                              ik_demo=bool(preview.get('ik_demo')),
+                             ik_grasp=bool(preview.get('ik_grasp')),
                              preview_hard=bool(preview.get('preview_hard')))
     tcp_site, fruit_body = _tcp_fruit_ids(model, manifest)
     chassis = controller.chassis
@@ -1122,7 +1192,22 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
                 mean, _, _, memory = policy(torch.as_tensor(rgbd), torch.as_tensor(r84), memory)
                 action = mean.tanh().numpy()[0]
             arm = action[-7:]
-            if preview.get('easy'):
+            if preview.get('ik_grasp'):
+                from treesim.kiwi_rl.curriculum import IK_GRASP_PRESET
+                from treesim.kiwi_rl.reach_teacher import jaw_hold_q, jaw_open_closed_q
+                opened, closed = jaw_open_closed_q(model, int(controller.qids[18]), data)
+                frac = preview.get('hold_close_frac')
+                hold = jaw_hold_q(
+                    IK_GRASP_PRESET['jaw_close_frac'] if frac is None else float(frac),
+                    opened, closed)
+                tcp_xyz = np.asarray(data.site_xpos[tcp_site], dtype=np.float64)
+                fruit_com = np.asarray(data.xipos[fruit_body], dtype=np.float64)
+                near = float(np.linalg.norm(tcp_xyz - fruit_com)) < float(
+                    IK_GRASP_PRESET['jaw_close_radius_m'])
+                desired = hold if near else opened
+                arm = np.asarray(arm, dtype=np.float64).copy()
+                arm[6] = np.clip((desired - float(controller.targets[18])) / max_delta, -1.0, 1.0)
+            elif preview.get('easy'):
                 from treesim.kiwi_rl.curriculum import EASY_PRESET, IK_DEMO_PRESET
                 from treesim.kiwi_rl.reach_teacher import (
                     adapt_scripted_hold_q, fruit_in_release_zone, jaw_hold_q,
@@ -1175,7 +1260,7 @@ def _record_progress_video_locked(info, output, *, steps, camera_every, control_
             controller.targets[12:] = np.clip(
                 controller.targets[12:] + np.clip(arm, -1., 1.) * max_delta, lower, upper)
             for _ in range(substeps):
-                if preview.get('easy'):
+                if preview.get('easy') or preview.get('ik_grasp'):
                     data.qpos[int(controller.qids[18])] = desired
                     data.qvel[int(controller.dofs[18])] = 0.0
                     controller.targets[18] = desired
