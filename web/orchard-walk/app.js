@@ -15,7 +15,7 @@ renderer.toneMappingExposure = 1.05;
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fc4e6);
-scene.fog = new THREE.Fog(0xb8d3ea, 30, 110);
+scene.fog = new THREE.FogExp2(0xc4d4dc, .0038);   // slight haze, everything fades into the same tone
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, .05, 900);
 camera.up.set(0, 0, 1);
 
@@ -75,7 +75,7 @@ async function loadOrchard() {
   skirt.position.z = meta.terrain.min_z - 1.5 - .01;
   scene.add(skirt);
   // far ground beyond the block
-  const far = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({ color: 0x3f6a26, roughness: 1 }));
+  const far = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({ color: 0x5c8a34, roughness: 1 }));
   far.position.z = meta.terrain.min_z - .02; scene.add(far);
 
   // wood: posts, wires, canes as merged cylinders
@@ -146,12 +146,12 @@ async function loadOrchard() {
       }
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setIndex(idx);
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, fog: false, side: THREE.DoubleSide }));
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
       m.frustumCulled = false; scene.add(m);
     };
-    ring(420, 34, 30, 2.0, 0x8fb0d0, 0xb9cfe6);   // far, pale haze
-    ring(300, 18, 20, 7.5, 0x6f8fa8, 0x93afc6);   // mid
-    ring(210, 7, 9, 11.2, 0x5d7c6a, 0x7f9b82);     // near foothills, greener
+    ring(420, 34, 30, 2.0, 0x5a7a9a, 0x8aa6c0);   // far, pale haze
+    ring(300, 18, 20, 7.5, 0x4c6e60, 0x6f8f80);   // mid
+    ring(210, 9, 11, 11.2, 0x3f6a3a, 0x628a5c);     // near foothills, greener
   }
 
   // canopy kiwis (visual) + stems
