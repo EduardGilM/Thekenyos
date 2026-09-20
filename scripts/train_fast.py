@@ -800,6 +800,7 @@ def run(args):
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
                 teacher_mix=warmup_mix)
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         start = time.monotonic()
         reports = []
         last_checkpoint = args.output / 'checkpoint-0000.pt'
@@ -811,6 +812,7 @@ def run(args):
         apply_stage(runtime, stage, numpy_rng, evaluate_only=True)
         baseline = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
                                     control_dt=runtime.control_dt, eval_profile=eval_profile)
+        torch.cuda.empty_cache()
         baseline.update(curriculum_stage=stage.name, curriculum_index=stage.index)
         log.log(baseline, step=0)
         dashboard.refresh()
