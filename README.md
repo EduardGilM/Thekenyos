@@ -793,7 +793,12 @@ single TCP spawn). A privileged IK teacher follows a lift / high-slide /
 centre-drop path that is rejected if any waypoint touches the crate liner.
 Those rollouts behaviour-clone the compact actor for 16 updates (~2 M
 transitions at 2048 worlds × 64 steps), then four PPO updates run with the
-teacher off on the same random starts. On a 32 GB card, 4096-world collect and
+teacher off on the same random starts. Catalog rows apply on reset; an
+in-flight IK path is not retargeted onto a different start mid-episode.
+Shape offsets live in device buffers so `--ik-demo` retargets the captured
+CUDA graph, and after the scripted jaw opens the reward still shapes hand XY
+over the opening during settle.
+On a 32 GB card, 4096-world collect and
 a full-batch 2048-world BC backward both OOM; the recipe minibatches BC worlds
 (`bc_minibatch_worlds=64`) like PPO.
 Evaluation keeps `teacher_mix=0`. This is not a weld, a tissue-safe grasp, or

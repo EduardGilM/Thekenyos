@@ -485,6 +485,28 @@ def sample_carry_start_indices(worlds, catalog_n, rng):
     return np.asarray(rng.integers(0, catalog_n, size=worlds), dtype=np.int32)
 
 
+def commit_carry_starts(current, queued, mask, rng, catalog_n):
+    """Apply queued catalog rows only on resetting worlds; resample those slots.
+
+    Live worlds keep their current row so an in-flight IK path is not retargeted
+    onto waypoint 0 of a different start. Fruit stays a free body.
+    """
+    live = np.asarray(current, dtype=np.int32).reshape(-1).copy()
+    next_idx = np.asarray(queued, dtype=np.int32).reshape(-1).copy()
+    hit = np.asarray(mask, dtype=bool).reshape(-1)
+    if live.size != next_idx.size or live.size != hit.size:
+        raise ValueError('carry start buffers must match the mask length')
+    if not isinstance(catalog_n, int) or isinstance(catalog_n, bool) or catalog_n < 1:
+        raise ValueError('catalog_n must be a positive integer')
+    if not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    n_hit = int(hit.sum())
+    if n_hit:
+        live[hit] = next_idx[hit]
+        next_idx[hit] = sample_carry_start_indices(n_hit, catalog_n, rng)
+    return live, next_idx
+
+
 def apply_easy_hover_cohort(indices, cohort, hover_index):
     """Keep success worlds on the hover start row. Catalog draws stay elsewhere.
 

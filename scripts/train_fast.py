@@ -875,6 +875,11 @@ def run(args):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             rollout_seconds = time.monotonic() - began
+            if ik_demo:
+                live_wp = np.asarray(runtime._waypoint_index.numpy(), dtype=np.int32).reshape(-1)
+                start_info = dict(start_info)
+                start_info['carry_waypoint_mean'] = float(live_wp.mean()) if live_wp.size else 0.0
+                start_info['carry_waypoint_max'] = int(live_wp.max()) if live_wp.size else 0
             if demo_phase:
                 for row in rows:
                     for key in ('raw', 'logp', 'value'):
@@ -926,6 +931,8 @@ def run(args):
                 ik_demo=int(ik_demo),
                 carry_easy_start_worlds=int(start_info.get('carry_easy_start_worlds', 0)),
                 carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
+                carry_waypoint_mean=float(start_info.get('carry_waypoint_mean', 0.0)),
+                carry_waypoint_max=int(start_info.get('carry_waypoint_max', 0)),
                 grasp_offset_mean_m=float(getattr(runtime, '_grasp_offset_mean_m', 0.0)),
                 grasp_offset_std_m=float(getattr(runtime, '_grasp_offset_std_m', 0.0)),
                 grasp_offset_max_m=float(getattr(runtime, '_grasp_offset_max_m', 0.0)),

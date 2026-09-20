@@ -17,7 +17,7 @@ import warp as wp
 from .control_warp import WarpSpotControl, _set_gait_targets
 from .curriculum import (
     EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M, IK_DEMO_PRESET,
-    sample_carry_start_indices, sample_easy_start_indices,
+    commit_carry_starts, sample_carry_start_indices, sample_easy_start_indices,
 )
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
@@ -72,8 +72,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
                      grasp_paid: wp.array(dtype=wp.uint8), detach_paid: wp.array(dtype=wp.uint8),
                      deposit_paid: wp.array2d(dtype=wp.uint8), deposited: wp.array2d(dtype=wp.uint8),
                      loss_paid: wp.array(dtype=wp.uint8),
-                     basket_center: wp.vec3, hover_offset: wp.vec3,
-                     release_offset: wp.vec3, open_half_xy: wp.vec2,
+                     basket_center: wp.vec3, hover_offset: wp.array(dtype=wp.vec3),
+                     release_offset: wp.array(dtype=wp.vec3), open_half_xy: wp.vec2,
                      dt: float, gamma_step: float,
                      deposit_w: wp.array(dtype=float),
                      fail_w: wp.array(dtype=float), fail_paid: wp.array(dtype=wp.uint8),
@@ -99,6 +99,8 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     d_basket = wp.length(diff)
     basket_distance[world] = d_basket
     basket_xy[world] = wp.sqrt(diff[0] * diff[0] + diff[1] * diff[1])
+    tcp_diff = tcp - basket_world
+    d_hand_xy = wp.sqrt(tcp_diff[0] * tcp_diff[0] + tcp_diff[1] * tcp_diff[1])
     use_basket = 1 if (goal[world] == 0 or detached[world] != 0) else 0
     d_shape = d_basket if use_basket != 0 else d_tcp
     length = shaping_length[world]
@@ -108,21 +110,25 @@ def _reward_and_done(xipos: wp.array2d(dtype=wp.vec3), site_xpos: wp.array2d(dty
     if use_basket != 0 and shape_hand_fruit[0] != 0:
         local_fruit = wp.transpose(rotation) @ (fruit_world - basket_world)
         local_tcp = wp.transpose(rotation) @ (tcp - basket_world)
-        aligned = (wp.abs(local_fruit[0]) < open_half_xy[0]
-                   and wp.abs(local_fruit[1]) < open_half_xy[1]
-                   and wp.abs(local_tcp[0]) < open_half_xy[0]
-                   and wp.abs(local_tcp[1]) < open_half_xy[1])
-        target_offset = release_offset if aligned else hover_offset
+        half = open_half_xy
+        aligned = (wp.abs(local_fruit[0]) < half[0]
+                   and wp.abs(local_fruit[1]) < half[1]
+                   and wp.abs(local_tcp[0]) < half[0]
+                   and wp.abs(local_tcp[1]) < half[1])
+        target_offset = release_offset[0] if aligned else hover_offset[0]
         target_world = basket_world + rotation @ target_offset
         d_target = wp.length(fruit_world - target_world)
-        tcp_diff = tcp - basket_world
-        d_hand_xy = wp.sqrt(tcp_diff[0] * tcp_diff[0] + tcp_diff[1] * tcp_diff[1])
         phi = 0.25 * wp.exp(-d_target / length) + 0.75 * wp.exp(-d_hand_xy / length)
         potential_ref = 2 if aligned else 1
     else:
         phi = wp.exp(-d_shape / length)
+    # After the scripted jaw opens, keep hand-XY shaping so PPO still has a
+    # dense signal during the 0.5 s liner settle. Fruit fall is not shaped.
+    if easy_released[world] != 0 and use_basket != 0:
+        phi = wp.exp(-d_hand_xy / length)
+        potential_ref = 3
     shaped = float(0.)
-    if shaping_ref[world] == potential_ref and easy_released[world] == 0:
+    if shaping_ref[world] == potential_ref:
         shaped = guidance[world] * shaping_coef[world] * (gamma_step * phi - previous_potential[world])
     previous_potential[world] = phi
     shaping_ref[world] = potential_ref
@@ -243,8 +249,8 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
                           shaping_length: wp.array(dtype=float),
                           site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
                           xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
-                          chassis: int, basket_center: wp.vec3, hover_offset: wp.vec3,
-                          release_offset: wp.vec3, open_half_xy: wp.vec2,
+                          chassis: int, basket_center: wp.vec3, hover_offset: wp.array(dtype=wp.vec3),
+                          release_offset: wp.array(dtype=wp.vec3), open_half_xy: wp.vec2,
                           shape_hand_fruit: wp.array(dtype=int),
                           fruit_bodies: wp.array(dtype=int), active_fruit: wp.array(dtype=int)):
     world = wp.tid()
@@ -269,7 +275,7 @@ def _masked_seed_distance(mask: wp.array(dtype=wp.uint8), distance: wp.array(dty
                    and wp.abs(local_fruit[1]) < open_half_xy[1]
                    and wp.abs(local_tcp[0]) < open_half_xy[0]
                    and wp.abs(local_tcp[1]) < open_half_xy[1])
-        target_offset = release_offset if aligned else hover_offset
+        target_offset = release_offset[0] if aligned else hover_offset[0]
         target_world = basket_world + rotation @ target_offset
         d_target = wp.length(xpos[world, fruit] - target_world)
         d_hand_xy = wp.sqrt((tcp[0] - basket_world[0]) * (tcp[0] - basket_world[0])
@@ -778,11 +784,14 @@ class FastRuntime:
             if (not np.isfinite(release_inset_x)
                     or abs(release_inset_x) >= float(hx) - 0.04):
                 raise ValueError('release_target_inset_x_m must stay inside the opening')
-            self._hover_offset = wp.vec3(
-                release_inset_x, 0.0,
-                float(SIZE[2] + EASY_PRESET['hover_clearance_m']))
-            self._release_offset = wp.vec3(
-                release_inset_x, 0.0, float(SIZE[2] + release_target))
+            # Device buffers so enable_easy can retarget shaping after the
+            # CUDA graph is captured. Replacing a Python wp.vec3 does not.
+            self._hover_offset = wp.zeros(1, dtype=wp.vec3, device=self.device)
+            self._release_offset = wp.zeros(1, dtype=wp.vec3, device=self.device)
+            self._set_shape_offsets(
+                (release_inset_x, 0.0, float(SIZE[2] + EASY_PRESET['hover_clearance_m'])),
+                (release_inset_x, 0.0, float(SIZE[2] + release_target)),
+            )
             robot = self.manifest['robot']
             tcp_site_name = robot.get('tcp_site', 'hand_tcp')
             if tcp_site_name not in [self.model.site(i).name for i in range(self.model.nsite)]:
@@ -828,6 +837,7 @@ class FastRuntime:
             self._hover_start_index = int(start_qs.shape[0] - 1)
             self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
             self._easy_start_index = wp.zeros(worlds, dtype=int, device=self.device)
+            self._easy_start_index_next = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_hover_cohort = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_released = wp.zeros(worlds, dtype=int, device=self.device)
             self._easy_jaw_hold = wp.zeros(worlds, dtype=float, device=self.device)
@@ -1158,7 +1168,11 @@ class FastRuntime:
         }
 
     def set_carry_progress(self, rng):
-        """Restore a uniform mix of easy/hard catalog rows. Fruit stays free."""
+        """Queue a uniform mix of easy/hard rows for the next reset.
+
+        Does not retarget live worlds: an in-flight IK path keeps its catalog
+        row and waypoint index until that world actually resets. Fruit stays free.
+        """
         if rng is None or not hasattr(rng, 'integers'):
             raise TypeError('rng must be a NumPy Generator')
         n = int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0]))
@@ -1167,26 +1181,58 @@ class FastRuntime:
         idx = sample_carry_start_indices(self.worlds, n, rng)
         close = float(self._chosen_close_frac)
         jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
-        self._easy_start_index.assign(idx)
-        self._waypoint_index.assign(np.zeros(self.worlds, dtype=np.int32))
+        self._easy_start_index_next.assign(idx)
         self._easy_jaw_hold_next.assign(np.full(self.worlds, jaw_hold, dtype=np.float32))
         self._carry_rng = rng
         n_hard = int(getattr(self, '_n_hard_starts', 0))
         n_easy = max(0, n - n_hard)
         hard_hit = idx >= n_easy if n_hard else np.zeros_like(idx, dtype=bool)
+        live_wp = np.asarray(self._waypoint_index.numpy(), dtype=np.int32).reshape(-1)
+        live_idx = np.asarray(self._easy_start_index.numpy(), dtype=np.int32).reshape(-1)
+        live_hard = live_idx >= n_easy if n_hard else np.zeros_like(live_idx, dtype=bool)
         return {
             'easy_far_frac': 1.0,
-            'easy_start_index_max': int(idx.max()) if idx.size else int(n - 1),
-            'easy_start_index_mean': float(idx.mean()) if idx.size else 0.0,
-            'easy_outside_start_worlds': int(idx.size),
+            'easy_start_index_max': int(live_idx.max()) if live_idx.size else int(n - 1),
+            'easy_start_index_mean': float(live_idx.mean()) if live_idx.size else 0.0,
+            'easy_outside_start_worlds': int(live_idx.size),
             'easy_hover_start_worlds': 0,
-            'carry_easy_start_worlds': int(np.count_nonzero(~hard_hit)),
-            'carry_hard_start_worlds': int(np.count_nonzero(hard_hit)),
+            'carry_easy_start_worlds': int(np.count_nonzero(~live_hard)),
+            'carry_hard_start_worlds': int(np.count_nonzero(live_hard)),
+            'carry_queued_easy_start_worlds': int(np.count_nonzero(~hard_hit)),
+            'carry_queued_hard_start_worlds': int(np.count_nonzero(hard_hit)),
+            'carry_waypoint_mean': float(live_wp.mean()) if live_wp.size else 0.0,
+            'carry_waypoint_max': int(live_wp.max()) if live_wp.size else 0,
             'easy_hold_close_mean': close,
             'easy_hold_index_mean': close,
             'easy_hover_cohort_worlds': 0,
             'n_waypoints': int(self._n_waypoints),
         }
+
+    def _set_shape_offsets(self, hover_xyz, release_xyz):
+        """Write captured-graph shape targets. Fruit stays a free body."""
+        hover = np.asarray(hover_xyz, dtype=np.float32).reshape(1, 3)
+        release = np.asarray(release_xyz, dtype=np.float32).reshape(1, 3)
+        if not np.isfinite(hover).all() or not np.isfinite(release).all():
+            raise ValueError('shape offsets must be finite')
+        self._hover_offset.assign(np.ascontiguousarray(hover))
+        self._release_offset.assign(np.ascontiguousarray(release))
+
+    def _commit_queued_carry_starts(self, mask):
+        """Move queued catalog rows onto resetting worlds only."""
+        current = np.asarray(self._easy_start_index.numpy(), dtype=np.int32).reshape(-1)
+        queued = np.asarray(self._easy_start_index_next.numpy(), dtype=np.int32).reshape(-1)
+        if mask is None:
+            hit = np.ones(self.worlds, dtype=bool)
+        else:
+            import torch
+            if isinstance(mask, torch.Tensor):
+                hit = np.asarray(mask.detach().cpu().numpy(), dtype=bool).reshape(-1)
+            else:
+                hit = np.asarray(mask, dtype=bool).reshape(-1)
+        n = int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0]))
+        current, queued = commit_carry_starts(current, queued, hit, self._carry_rng, n)
+        self._easy_start_index.assign(np.ascontiguousarray(current, dtype=np.int32))
+        self._easy_start_index_next.assign(np.ascontiguousarray(queued, dtype=np.int32))
 
     def _sample_grasp_locals(self, mask):
         """Per-world pad-pocket COM. Only worlds in ``mask`` are rewritten."""
@@ -1474,8 +1520,10 @@ class FastRuntime:
             carry_info = self._build_carry_catalog(q0)
             transit_c = float(IK_DEMO_PRESET['transit_clearance_m'])
             release_c = float(IK_DEMO_PRESET['release_clearance_m'])
-            self._hover_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + transit_c))
-            self._release_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + release_c))
+            self._set_shape_offsets(
+                (0.0, 0.0, float(SIZE[2] + transit_c)),
+                (0.0, 0.0, float(SIZE[2] + release_c)),
+            )
         return {
             'easy': self._easy,
             'shaping_coef': coef,
@@ -1638,6 +1686,8 @@ class FastRuntime:
                       inputs=[mask_wp, self._easy_released], device=self.device)
             wp.launch(_clear_masked_int, dim=self.worlds,
                       inputs=[mask_wp, self._waypoint_index], device=self.device)
+            if self._ik_demo:
+                self._commit_queued_carry_starts(mask)
             if self._easy and not self._ik_demo:
                 self._prefer_hover_after_success(mask)
             if self._ik_demo:

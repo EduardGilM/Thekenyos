@@ -282,6 +282,13 @@ class CurriculumTest(unittest.TestCase):
         self.assertIn('def _apply_easy_start', src)
         self.assertIn('def _privileged_carry_action', src)
         self.assertIn('def set_carry_progress', src)
+        self.assertIn('def _commit_queued_carry_starts', src)
+        self.assertIn('_easy_start_index_next', src)
+        self.assertIn('def _set_shape_offsets', src)
+        self.assertIn('hover_offset[0]', src)
+        self.assertIn('potential_ref = 3', src)
+        self.assertNotIn(
+            "self._waypoint_index.assign(np.zeros(self.worlds, dtype=np.int32))", src)
         self.assertIn('def _build_carry_catalog', src)
         self.assertIn('safe_hover_arm_q', src)
         self.assertIn('def _sample_grasp_locals', src)
@@ -404,7 +411,8 @@ class CurriculumTest(unittest.TestCase):
 
     def test_ik_demo_preset_keeps_fruit_free_and_mixes_starts(self):
         from treesim.kiwi_rl.curriculum import (
-            IK_DEMO_PRESET, apply_ik_demo_preset, sample_carry_start_indices,
+            IK_DEMO_PRESET, apply_ik_demo_preset, commit_carry_starts,
+            sample_carry_start_indices,
         )
         preset = apply_ik_demo_preset({'gate_success_rate': 0.90})
         self.assertEqual(preset['demo_updates'], 16)
@@ -423,6 +431,20 @@ class CurriculumTest(unittest.TestCase):
         self.assertEqual(idx.shape, (200,))
         self.assertGreater(int(idx.max()), 10)
         self.assertGreater(int(np.unique(idx).size), 20)
+        current = np.arange(8, dtype=np.int32)
+        queued = np.full(8, 40, dtype=np.int32)
+        mask = np.zeros(8, dtype=bool)
+        mask[1] = True
+        mask[6] = True
+        live, nxt = commit_carry_starts(current, queued, mask, np.random.default_rng(1), 48)
+        self.assertEqual(int(live[0]), 0)
+        self.assertEqual(int(live[1]), 40)
+        self.assertEqual(int(live[6]), 40)
+        self.assertEqual(int(live[7]), 7)
+        self.assertNotEqual(int(nxt[1]), 40)
+        self.assertTrue(0 <= int(nxt[1]) < 48)
+        with self.assertRaises(ValueError):
+            commit_carry_starts([0, 1], [0], [True, False], np.random.default_rng(0), 8)
         with self.assertRaises(ValueError):
             sample_carry_start_indices(0, 8, np.random.default_rng(0))
 
