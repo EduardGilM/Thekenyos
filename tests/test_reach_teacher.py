@@ -312,6 +312,47 @@ class ReachTeacherMathTest(unittest.TestCase):
             damping=.01, max_step=.1)
         self.assertLess(float(step[0]), 0.)
 
+    def test_carry_waypoints_stay_out_of_crate_and_end_at_centre(self):
+        from treesim.basket import CENTER, SIZE
+        from treesim.kiwi_rl.reach_teacher import (
+            carry_waypoints_local_m, crate_interior_contains, downward_approach_local,
+            random_carry_start_local_m, random_grasp_offset_local_m,
+            release_tcp_local_m, wrist_clears_crate,
+        )
+        rng = np.random.default_rng(3)
+        easy = [random_carry_start_local_m(rng, hard=False) for _ in range(8)]
+        hard = [random_carry_start_local_m(rng, hard=True) for _ in range(8)]
+        easy_x = [float(p[0]) for p in easy]
+        hard_x = [float(p[0]) for p in hard]
+        self.assertGreater(float(np.mean(hard_x)), float(np.mean(easy_x)) + 0.08)
+        for pose in easy + hard:
+            self.assertTrue(tcp_outside_basket(pose, margin_m=0.04, above_rim_m=0.0))
+            self.assertFalse(crate_interior_contains(pose))
+            self.assertFalse(tcp_over_opening_above_rim(pose))
+        start = easy[0]
+        waypoints = carry_waypoints_local_m(start)
+        self.assertGreaterEqual(waypoints.shape[0], 5)
+        np.testing.assert_allclose(waypoints[0], start)
+        np.testing.assert_allclose(waypoints[-1][:2], CENTER[:2], atol=1e-9)
+        self.assertAlmostEqual(float(waypoints[-1][2]), float(CENTER[2] + SIZE[2] + 0.16))
+        for point in waypoints:
+            self.assertFalse(crate_interior_contains(point))
+        release = release_tcp_local_m(0.10)
+        self.assertFalse(wrist_clears_crate(release, np.array([-1.0, 0.0, 0.0])))
+        self.assertTrue(wrist_clears_crate(release, downward_approach_local()))
+        tcp = np.array([0.18, 0.0, 0.0], dtype=np.float64)
+        pockets = [random_grasp_offset_local_m(tcp, rng) for _ in range(12)]
+        offsets = [float(np.linalg.norm(p - tcp)) for p in pockets]
+        self.assertGreater(max(offsets) - min(offsets), 0.005)
+        for pocket in pockets:
+            self.assertTrue(grasp_local_near_tcp(pocket, tcp))
+        with self.assertRaises(ValueError):
+            carry_waypoints_local_m(CENTER)
+        with self.assertRaises(ValueError):
+            crate_interior_contains([np.nan, 0.0, 0.0])
+        with self.assertRaises(TypeError):
+            random_grasp_offset_local_m(tcp, None)
+
 
 if __name__ == '__main__':
     unittest.main()

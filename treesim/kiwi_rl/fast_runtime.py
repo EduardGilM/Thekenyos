@@ -16,8 +16,8 @@ import warp as wp
 
 from .control_warp import WarpSpotControl, _set_gait_targets
 from .curriculum import (
-    EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M,
-    sample_easy_start_indices,
+    EASY_PRESET, HOLD_SWEEP_CLEARANCE_M, HOLD_SWEEP_MARGIN_M, IK_DEMO_PRESET,
+    sample_carry_start_indices, sample_easy_start_indices,
 )
 from .fast_task import MAX_FRUITS, _pad_ids
 from .rewards import (
@@ -319,7 +319,8 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
                            targets: wp.array2d(dtype=float), site_xpos: wp.array2d(dtype=wp.vec3),
                            xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
                            fruit_qposadr: wp.array(dtype=int), fruit_dofadr: wp.array(dtype=int),
-                           tcp_site: int, tcp_body: int, grasp_local: wp.vec3, use_pocket: int,
+                           tcp_site: int, tcp_body: int, grasp_locals: wp.array(dtype=wp.vec3),
+                           use_pocket: int,
                            jaw_qposadr: int, deposit_jaw: wp.array(dtype=float), jaw_open: float,
                            equality_index: wp.array(dtype=int),
                            eq_active: wp.array2d(dtype=wp.bool), detached: wp.array(dtype=wp.uint8),
@@ -336,7 +337,7 @@ def _configure_skill_reset(mask: wp.array(dtype=wp.uint8), reset_mode: wp.array(
     target_eq = equality_index[0]
     if mode == 1:
         if use_pocket != 0:
-            pos = xpos[world, tcp_body] + xmat[world, tcp_body] @ grasp_local
+            pos = xpos[world, tcp_body] + xmat[world, tcp_body] @ grasp_locals[world]
         else:
             pos = site_xpos[world, tcp_site]
         qpos[world, fruit_qadr + 0] = pos[0]
@@ -571,6 +572,73 @@ def _privileged_deposit_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d
     out_applied[world, joint] = delta / max_delta
 
 
+@wp.kernel
+def _privileged_carry_action(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33),
+                             chassis: int, fruit_bodies: wp.array(dtype=int),
+                             active_fruit: wp.array(dtype=int), basket_center: wp.vec3,
+                             goal: wp.array(dtype=int), detached: wp.array(dtype=wp.uint8),
+                             targets: wp.array2d(dtype=float),
+                             waypoint_q: wp.array2d(dtype=float),
+                             start_index: wp.array(dtype=int),
+                             waypoint_index: wp.array(dtype=int),
+                             n_waypoints: int, jaw_hold: wp.array(dtype=float),
+                             jaw_open: float, open_xy_m: float, rim_z_m: float,
+                             max_delta: float, advance_rad: float,
+                             site_xpos: wp.array2d(dtype=wp.vec3), tcp_site: int,
+                             release_at_center: wp.array(dtype=int),
+                             release_over_opening: wp.array(dtype=int),
+                             open_half_xy: wp.vec2, open_max_above_rim_m: float,
+                             out_applied: wp.array2d(dtype=float)):
+    """Follow a collision-checked joint path to the basket centre, then open.
+
+    Waypoints were rejected if they touched the liner. This is an IK teacher,
+    not a validated grasp or an RL demonstration by itself.
+    """
+    world, joint = wp.tid()
+    active = 1 if (goal[world] == 0 or detached[world] != 0) else 0
+    if active == 0:
+        out_applied[world, joint] = 0.0
+        return
+    idx = active_fruit[world]
+    if idx < 0 or idx >= MAX_FRUITS:
+        idx = 0
+    fruit = fruit_bodies[idx]
+    basket_world = xpos[world, chassis] + xmat[world, chassis] @ basket_center
+    fruit_pos = xpos[world, fruit]
+    over = _in_release_zone(fruit_pos, site_xpos[world, tcp_site], basket_world,
+                            xmat[world, chassis], open_half_xy,
+                            open_xy_m, rim_z_m, release_at_center[0],
+                            release_over_opening[0], open_max_above_rim_m)
+    start = start_index[world]
+    if start < 0:
+        start = 0
+    wp_idx = waypoint_index[world]
+    if wp_idx < 0:
+        wp_idx = 0
+    if wp_idx >= n_waypoints:
+        wp_idx = n_waypoints - 1
+    row = start * n_waypoints + wp_idx
+    if joint < 6:
+        if over == 1:
+            out_applied[world, joint] = 0.0
+            return
+        desired = waypoint_q[row, joint]
+        current = targets[world, joint + 12]
+    else:
+        desired = jaw_open if over == 1 else jaw_hold[world]
+        current = targets[world, 18]
+    delta = wp.clamp(desired - current, -max_delta, max_delta)
+    out_applied[world, joint] = delta / max_delta
+    if joint == 0 and over == 0:
+        err = float(0.0)
+        for item in range(6):
+            e = wp.abs(waypoint_q[row, item] - targets[world, item + 12])
+            if e > err:
+                err = e
+        if err < advance_rad and wp_idx < n_waypoints - 1:
+            waypoint_index[world] = wp_idx + 1
+
+
 class FastRuntime:
     """Bounded rigid-fruit runtime.
 
@@ -731,7 +799,14 @@ class FastRuntime:
             self._tcp_body = int(self.model.site_bodyid[self.tcp_site])
             self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
             self._grasp_local_host = np.zeros(3, dtype=np.float64)
+            self._grasp_locals = wp.zeros(worlds, dtype=wp.vec3, device=self.device)
             self._use_pocket = 0
+            self._ik_demo = False
+            self._n_waypoints = 1
+            self._n_hard_starts = 0
+            self._waypoint_q = wp.zeros((1, 6), dtype=float, device=self.device)
+            self._waypoint_index = wp.zeros(worlds, dtype=int, device=self.device)
+            self._carry_rng = np.random.default_rng(7)
             self.chassis = self.control.chassis
             from .fast_task import FastHarvestTask
             self.task = FastHarvestTask(self.model, self.data, self.manifest)
@@ -1078,6 +1153,171 @@ class FastRuntime:
             'easy_hover_cohort_worlds': int(np.count_nonzero(cohort)),
         }
 
+    def set_carry_progress(self, rng):
+        """Restore a uniform mix of easy/hard catalog rows. Fruit stays free."""
+        if rng is None or not hasattr(rng, 'integers'):
+            raise TypeError('rng must be a NumPy Generator')
+        n = int(getattr(self, '_easy_catalog_n', self._easy_start_q.shape[0]))
+        if n < 1:
+            raise ValueError('carry start catalog is empty')
+        idx = sample_carry_start_indices(self.worlds, n, rng)
+        close = float(self._chosen_close_frac)
+        jaw_hold = self._jaw_open + close * (self._jaw_closed - self._jaw_open)
+        self._easy_start_index.assign(idx)
+        self._waypoint_index.assign(np.zeros(self.worlds, dtype=np.int32))
+        self._easy_jaw_hold_next.assign(np.full(self.worlds, jaw_hold, dtype=np.float32))
+        self._carry_rng = rng
+        n_hard = int(getattr(self, '_n_hard_starts', 0))
+        n_easy = max(0, n - n_hard)
+        hard_hit = idx >= n_easy if n_hard else np.zeros_like(idx, dtype=bool)
+        return {
+            'easy_far_frac': 1.0,
+            'easy_start_index_max': int(idx.max()) if idx.size else int(n - 1),
+            'easy_start_index_mean': float(idx.mean()) if idx.size else 0.0,
+            'easy_outside_start_worlds': int(idx.size),
+            'easy_hover_start_worlds': 0,
+            'carry_easy_start_worlds': int(np.count_nonzero(~hard_hit)),
+            'carry_hard_start_worlds': int(np.count_nonzero(hard_hit)),
+            'easy_hold_close_mean': close,
+            'easy_hold_index_mean': close,
+            'easy_hover_cohort_worlds': 0,
+            'n_waypoints': int(self._n_waypoints),
+        }
+
+    def _sample_grasp_locals(self, mask):
+        """Per-world pad-pocket COM. Only worlds in ``mask`` are rewritten."""
+        from .reach_teacher import random_grasp_offset_local_m
+        host = np.asarray(self._grasp_locals.numpy(), dtype=np.float64).reshape(self.worlds, 3)
+        if mask is None:
+            hit = np.ones(self.worlds, dtype=bool)
+        else:
+            import torch
+            if isinstance(mask, torch.Tensor):
+                hit = np.asarray(mask.detach().cpu().numpy(), dtype=bool).reshape(-1)
+            else:
+                hit = np.asarray(mask, dtype=bool).reshape(-1)
+        if hit.size != self.worlds:
+            raise ValueError('grasp mask must have one flag per world')
+        rng = getattr(self, '_carry_rng', np.random.default_rng())
+        tcp = np.asarray(self._grasp_local_host, dtype=np.float64).reshape(3)
+        inset = float(IK_DEMO_PRESET['grasp_inset_span_m'])
+        lateral = float(IK_DEMO_PRESET['grasp_lateral_span_m'])
+        for index in np.nonzero(hit)[0]:
+            host[int(index)] = random_grasp_offset_local_m(
+                tcp, rng, inset_span_m=inset, lateral_span_m=lateral)
+        self._grasp_locals.assign(np.ascontiguousarray(host, dtype=np.float32))
+        self._grasp_offset_mean_m = float(np.mean(np.linalg.norm(host - tcp, axis=1)))
+
+    def _build_carry_catalog(self, initial_qpos):
+        """CPU IK catalog: easy/hard starts and a liner-free path to centre."""
+        from .reach_teacher import (
+            arm_basket_contact_pairs, carry_waypoints_local_m, downward_approach_local,
+            plan_carry_joint_path, pose_clears_crate, random_carry_start_local_m,
+            release_tcp_local_m, solve_tcp_axis, solve_tcp_hover, tcp_outside_basket,
+        )
+        contract = self.control.contract
+        qpos = np.asarray(initial_qpos, dtype=np.float64).reshape(-1)
+        qids = np.asarray(contract.qids[12:18], dtype=int)
+        dofs = np.asarray(contract.dofs[12:18], dtype=int)
+        ranges = np.tile(np.array([-np.pi, np.pi], dtype=np.float64), (6, 1))
+        limited = np.asarray(self.model.jnt_limited[contract.joints[12:18]], dtype=bool)
+        ranges[limited] = np.asarray(self.model.jnt_range[contract.joints[12:18]], dtype=np.float64)[limited]
+        import mujoco
+        data = mujoco.MjData(self.model)
+        data.qpos[:] = qpos
+        mujoco.mj_kinematics(self.model, data)
+        chassis_p = np.asarray(data.xpos[self.chassis], dtype=np.float64)
+        chassis_R = np.asarray(data.xmat[self.chassis], dtype=np.float64).reshape(3, 3)
+        q_home = qpos[qids].copy()
+        accept = float(IK_DEMO_PRESET['ik_accept_err_m'])
+        n = int(IK_DEMO_PRESET['n_start_poses'])
+        n_hard = int(round(float(IK_DEMO_PRESET['hard_start_frac']) * n))
+        n_transit = int(IK_DEMO_PRESET['n_transit'])
+        transit_c = float(IK_DEMO_PRESET['transit_clearance_m'])
+        release_c = float(IK_DEMO_PRESET['release_clearance_m'])
+        approach = chassis_R @ downward_approach_local()
+        release_local = release_tcp_local_m(release_c)
+        drop_q, drop_err = solve_tcp_axis(
+            self.model, qpos, self.tcp_site, chassis_p + chassis_R @ release_local,
+            approach, qids, dofs, q_home, ranges)
+        data.qpos[:] = qpos
+        data.qpos[qids] = drop_q
+        if (not np.isfinite(drop_q).all() or not np.isfinite(drop_err)
+                or float(drop_err) > accept or not pose_clears_crate(
+                    self.model, data, self.tcp_site, self.chassis, tcp_local=release_local)):
+            drop_q, drop_err = solve_tcp_hover(
+                self.model, qpos, self.tcp_site, chassis_p + chassis_R @ release_local,
+                qids, dofs, q_home, ranges)
+        drop_q = np.asarray(drop_q, dtype=np.float32).reshape(6)
+        starts, paths, hard_flags = [], [], []
+        rng = np.random.default_rng(11)
+        attempts = 0
+        max_attempts = n * 24
+        q_init = q_home.copy()
+        while len(starts) < n and attempts < max_attempts:
+            attempts += 1
+            want_hard = len([flag for flag in hard_flags if flag]) < n_hard and (
+                len(starts) >= n - n_hard or bool(rng.random() < 0.5))
+            try:
+                local = random_carry_start_local_m(rng, hard=want_hard)
+            except ValueError:
+                continue
+            if not tcp_outside_basket(local, margin_m=0.04, above_rim_m=0.0):
+                continue
+            target = chassis_p + chassis_R @ local
+            arm_q, err = solve_tcp_hover(
+                self.model, qpos, self.tcp_site, target, qids, dofs, q_init, ranges)
+            if not np.isfinite(arm_q).all() or not np.isfinite(err) or float(err) > accept:
+                continue
+            data.qpos[:] = qpos
+            data.qpos[qids] = arm_q
+            if not pose_clears_crate(self.model, data, self.tcp_site, self.chassis, tcp_local=local):
+                continue
+            if arm_basket_contact_pairs(self.model, data):
+                continue
+            try:
+                waypoints = carry_waypoints_local_m(
+                    local, transit_clearance_m=transit_c, release_clearance_m=release_c,
+                    n_transit=n_transit)
+            except ValueError:
+                continue
+            world_wps = chassis_p + (chassis_R @ waypoints.T).T
+            path = plan_carry_joint_path(
+                self.model, qpos, self.tcp_site, self.chassis, arm_q, world_wps,
+                qids, dofs, ranges, approach_world=approach, accept_err_m=accept)
+            if path is None or path.shape[0] != waypoints.shape[0]:
+                continue
+            starts.append(np.asarray(arm_q, dtype=np.float32).reshape(6))
+            paths.append(path.astype(np.float32))
+            hard_flags.append(bool(want_hard))
+            q_init = np.asarray(arm_q, dtype=np.float64)
+        if not starts:
+            raise ValueError('carry IK found no physics-safe start that clears the crate')
+        while len(starts) < n:
+            starts.append(starts[0])
+            paths.append(paths[0])
+            hard_flags.append(hard_flags[0])
+        # Keep easy rows first so hard-index reporting stays a simple split.
+        order = np.argsort(np.asarray(hard_flags, dtype=np.int32))
+        start_qs = np.stack([starts[int(i)] for i in order])
+        path_qs = np.stack([paths[int(i)] for i in order])
+        n_hard = int(np.count_nonzero(np.asarray(hard_flags, dtype=np.int32)[order]))
+        self._easy_catalog_n = int(start_qs.shape[0])
+        self._n_hard_starts = n_hard
+        self._n_waypoints = int(path_qs.shape[1])
+        self._easy_start_q = wp.array(start_qs, dtype=float, device=self.device)
+        self._waypoint_q = wp.array(path_qs.reshape(-1, 6), dtype=float, device=self.device)
+        self._hover_start_index = int(start_qs.shape[0] - 1)
+        self._hover_q = wp.array(drop_q, dtype=float, device=self.device)
+        self.hover_error_m = float(drop_err) if np.isfinite(drop_err) else 1.0
+        self.easy_start_error_m = 0.0
+        return {
+            'n_start_poses': int(start_qs.shape[0]),
+            'n_hard_starts': n_hard,
+            'n_waypoints': int(self._n_waypoints),
+            'hover_error_m': float(self.hover_error_m),
+        }
+
     def snapshot_easy_hover(self):
         """Host copy of start indices and the success hover cohort."""
         return {
@@ -1122,19 +1362,18 @@ class FastRuntime:
         self._easy_hover_cohort.assign(cohort)
         self._easy_start_index.assign(idx)
 
-    def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None):
+    def enable_easy(self, enabled=True, *, shaping_coef=None, open_xy_m=None, ik_demo=False):
         """Kiwi starts in the jaws; a jaw script holds or opens; RL moves the arm.
 
         Does not weld fruit, spawn the arm inside the liner, or write fruit
-        into the liner. Starts begin at the high hover and introduce a bounded
-        outside-crate fraction. Shaping pulls fruit 3D toward the 28 cm hover
-        and hand XY over the hole. The script opens when both XY sit over the
-        opening AABB and the fruit is at most 30 cm above the rim, so the
-        wrist-safe hover can dump without descending into the liner. Eval
-        still sets guidance_weight=0 and must keep teacher_mix at 0. Jaw close
-        fractions are a rigid contact sweep, not a calibrated tissue-safe force.
+        into the liner. Default starts begin at the high hover. ``ik_demo``
+        instead builds a random easy/hard catalog and a liner-free IK path to
+        the true basket centre. Eval still sets guidance_weight=0 and must
+        keep teacher_mix at 0. Jaw close fractions are a rigid contact sweep,
+        not a calibrated tissue-safe force.
         """
         self._easy = bool(enabled)
+        self._ik_demo = bool(enabled) and bool(ik_demo)
         self._easy_pin.assign(np.array([1 if self._easy else 0], dtype=np.int32))
         shape_both = bool(self._easy and EASY_PRESET.get('shape_hand_and_fruit'))
         release_center = bool(self._easy and EASY_PRESET.get('release_at_center'))
@@ -1198,10 +1437,23 @@ class FastRuntime:
             self._grasp_local = wp.vec3(float(self._grasp_local_host[0]),
                                        float(self._grasp_local_host[1]),
                                        float(self._grasp_local_host[2]))
+            broadcast = np.broadcast_to(self._grasp_local_host.astype(np.float32), (self.worlds, 3))
+            self._grasp_locals.assign(np.ascontiguousarray(broadcast))
         else:
             self._use_pocket = 0
             self._grasp_local_host = np.zeros(3, dtype=np.float64)
             self._grasp_local = wp.vec3(0.0, 0.0, 0.0)
+            self._grasp_locals.assign(np.zeros((self.worlds, 3), dtype=np.float32))
+        carry_info = {}
+        if self._ik_demo:
+            from treesim.basket import SIZE
+            host = np.asarray(self._initial_qpos.numpy(), dtype=np.float64)
+            q0 = host[0].copy() if host.ndim == 2 else host.reshape(-1).copy()
+            carry_info = self._build_carry_catalog(q0)
+            transit_c = float(IK_DEMO_PRESET['transit_clearance_m'])
+            release_c = float(IK_DEMO_PRESET['release_clearance_m'])
+            self._hover_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + transit_c))
+            self._release_offset = wp.vec3(0.0, 0.0, float(SIZE[2] + release_c))
         return {
             'easy': self._easy,
             'shaping_coef': coef,
@@ -1241,8 +1493,15 @@ class FastRuntime:
             'release_target_inset_x_m': float(EASY_PRESET['release_target_inset_x_m']),
             'shape_to_hover': shape_both,
             'weld': False,
+            'ik_demo': bool(self._ik_demo),
+            'n_waypoints': int(getattr(self, '_n_waypoints', 1)),
+            'n_hard_starts': int(getattr(self, '_n_hard_starts', 0)),
             'scope': ('kiwi starts in the jaws; scripted hold/open under 15 N; '
-                      'student arm deposits; fruit stays free; no weld'),
+                      'IK-demo follows a liner-free path to the basket centre; '
+                      'fruit stays free; no weld') if self._ik_demo else (
+                          'kiwi starts in the jaws; scripted hold/open under 15 N; '
+                          'student arm deposits; fruit stays free; no weld'),
+            **carry_info,
         }
 
     def _run_hold_sweep(self):
@@ -1287,26 +1546,40 @@ class FastRuntime:
             }
 
     def privileged_deposit_action(self):
-        """Joint increments toward hover, but hold still when fruit XY is over the basket.
+        """Joint increments toward hover or the IK-demo waypoints.
 
         Returns tanh-space applied actions in [-1, 1]. The fruit remains free;
         this is not an oracle demonstration and must stay off during eval.
-        Holding the arm over the opening avoids driving the gripper into the
-        crate after a carried fruit arrives.
+        The carry teacher follows a catalog path that was rejected if it
+        touched the liner.
         """
         import torch
         max_delta = 2.5 * self.control_dt
         with wp.ScopedDevice(self.device):
-            wp.launch(_privileged_deposit_action, dim=(self.worlds, 7), inputs=[
-                self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
-                self.task.active_fruit, self._basket_center, self.task.goal,
-                self.task.detached, self.control.targets, self._hover_q,
-                self._easy_jaw_hold, self._jaw_open, float(self._open_xy_m),
-                float(self._open_rim_z_m), float(max_delta),
-                self.data.site_xpos, int(self.tcp_site), self._release_at_center,
-                self._release_over_opening, self._open_half_xy,
-                float(self._open_max_above_rim_m), self._teacher_applied],
-                device=self.device)
+            if self._ik_demo:
+                wp.launch(_privileged_carry_action, dim=(self.worlds, 7), inputs=[
+                    self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
+                    self.task.active_fruit, self._basket_center, self.task.goal,
+                    self.task.detached, self.control.targets, self._waypoint_q,
+                    self._easy_start_index, self._waypoint_index,
+                    int(self._n_waypoints), self._easy_jaw_hold, self._jaw_open,
+                    float(self._open_xy_m), float(self._open_rim_z_m),
+                    float(max_delta), float(IK_DEMO_PRESET['waypoint_advance_rad']),
+                    self.data.site_xpos, int(self.tcp_site), self._release_at_center,
+                    self._release_over_opening, self._open_half_xy,
+                    float(self._open_max_above_rim_m), self._teacher_applied],
+                    device=self.device)
+            else:
+                wp.launch(_privileged_deposit_action, dim=(self.worlds, 7), inputs=[
+                    self.data.xpos, self.data.xmat, self.chassis, self.task.fruit_body,
+                    self.task.active_fruit, self._basket_center, self.task.goal,
+                    self.task.detached, self.control.targets, self._hover_q,
+                    self._easy_jaw_hold, self._jaw_open, float(self._open_xy_m),
+                    float(self._open_rim_z_m), float(max_delta),
+                    self.data.site_xpos, int(self.tcp_site), self._release_at_center,
+                    self._release_over_opening, self._open_half_xy,
+                    float(self._open_max_above_rim_m), self._teacher_applied],
+                    device=self.device)
         applied = wp.to_torch(self._teacher_applied)
         if tuple(applied.shape) != (self.worlds, 7):
             raise RuntimeError('privileged deposit action has the wrong shape')
@@ -1341,8 +1614,12 @@ class FastRuntime:
                               self._timed_out, self._shaping_ref], device=self.device)
             wp.launch(_clear_masked_int, dim=self.worlds,
                       inputs=[mask_wp, self._easy_released], device=self.device)
-            if self._easy:
+            wp.launch(_clear_masked_int, dim=self.worlds,
+                      inputs=[mask_wp, self._waypoint_index], device=self.device)
+            if self._easy and not self._ik_demo:
                 self._prefer_hover_after_success(mask)
+            if self._ik_demo:
+                self._sample_grasp_locals(mask)
             self.task.reset(mask_wp)
             mw.forward(self.gpu_model, self.data)
             self._refresh(mw)
@@ -1358,7 +1635,7 @@ class FastRuntime:
                 mask_wp, self._reset_mode, self.data.qpos, self.data.qvel, self.control.targets,
                 self.data.site_xpos, self.data.xpos, self.data.xmat,
                 self._fruit_qposadrs, self._fruit_dofadrs, self.tcp_site, self._tcp_body,
-                self._grasp_local, int(self._use_pocket),
+                self._grasp_locals, int(self._use_pocket),
                 self._jaw_qposadr, self._easy_jaw_hold, self._jaw_open, self.task.equality_index,
                 self.task.eq_active, self.task.detached, self.task.grasped, self.task.grasp_paid,
                 self._chassis_qposadr, 1.0, self._randomize_layout, self._layout_dx, self._layout_dy],
