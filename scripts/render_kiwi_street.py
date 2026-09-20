@@ -163,18 +163,28 @@ def ground_texture(floor, xs, ys, seed: int) -> bytes:
     aisle_y = 0.5 * (ys[0] + ys[-1])
 
     grit = _value_field(rng, (n, n), ((8, 1.0), (3, 0.40)))
+    wander = _value_field(rng, (n, n), ((50, 1.0), (20, 0.4)))
     look = np.random.default_rng(seed + 348)
-    # Orchard appearance puts pasillo on pitch centres; soil at ±2.5 m
-    # already matches the two post rows. Pass Y as the row axis.
+    # Wide pitch keeps the mottled grass and drops the extra 5 m soil lattice.
     rgb = _appearance_rgb(
-        v, u, yy, xx, float(SPACING_M), 0.0, 0.40, half, look,
+        v, u, yy, xx, max(4.0 * half, 40.0), 0.0, 0.40, half, look,
     )
+    rgb = np.clip((rgb - 0.5) * 1.18 + 0.48, 0.0, 1.0)
+    soil_w = np.zeros((n, n))
+    for y in ys:
+        edge = 0.16 + 0.22 * (wander - 0.5)
+        soil_w = np.maximum(
+            soil_w, np.clip((0.62 + edge - np.abs(yy - y)) / 0.16, 0.0, 1.0)
+        )
+    soil = np.array([0.46, 0.30, 0.14]) * (0.78 + 0.36 * grit[..., None])
+    soil = soil * (0.88 + 0.18 * wander[..., None]) + np.array([0.22, 0.12, 0.06]) * 0.12
+    rgb = rgb * (1.0 - soil_w)[..., None] + soil_w[..., None] * soil
     track = np.zeros((n, n))
     for side in (-0.64, 0.64):
         d = np.abs(yy - (aisle_y + side))
         track = np.maximum(track, np.clip(1.0 - d / 0.26, 0.0, 1.0) ** 1.2)
-    track *= 0.55 + 0.45 * grit
-    rgb = rgb * (1.0 - 0.55 * track)[..., None] + track[..., None] * np.array(
+    track *= (0.55 + 0.45 * grit) * (1.0 - 0.55 * soil_w)
+    rgb = rgb * (1.0 - 0.50 * track)[..., None] + track[..., None] * np.array(
         [0.28, 0.18, 0.08]
     )
     pads = np.zeros((n, n))
