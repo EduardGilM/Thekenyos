@@ -132,14 +132,16 @@ async function loadOrchard() {
   // Perimeter hedge: an opaque wall of foliage so the flat world has no visible edge.
   {
     const R = half + .9, HGT = 4.2, THK = .8;
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x2e6a1c, roughness: 1 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x4a2c12, roughness: 1 });
     const walls = [[R, 0, THK, 2 * R + THK], [-R, 0, THK, 2 * R + THK], [0, R, 2 * R + THK, THK], [0, -R, 2 * R + THK, THK]];
     for (const [x, y, sx, sy] of walls) {
       const w = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, HGT), wallMat);
       w.position.set(x, y, HGT / 2 - .1); w.receiveShadow = true; scene.add(w);
     }
     const blade = leafMeshes[2].geometry;
-    const perWall = 4800, hedgeLeaves = new THREE.InstancedMesh(blade, leafMat, 4 * perWall);
+    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: .85 });
+    const autumn = [[.66, .34, .10], [.78, .48, .14], [.56, .24, .08], [.84, .60, .20], [.48, .30, .12]];
+    const perWall = 4800, hedgeLeaves = new THREE.InstancedMesh(blade, hedgeMat, 4 * perWall);
     hedgeLeaves.castShadow = true;
     const cols = new Float32Array(4 * perWall * 3);
     const e = new THREE.Euler(), s2 = new THREE.Vector3();
@@ -154,7 +156,7 @@ async function loadOrchard() {
       e.set(Math.PI / 2 + (Math.random() - .5) * 1.4, (Math.random() - .5) * 1.2, face + (Math.random() - .5) * 1.6);
       q.setFromEuler(e); s2.setScalar(scale);
       mats.compose(p, q, s2); hedgeLeaves.setMatrixAt(k, mats);
-      const v = .55 + .5 * Math.random(); cols[k * 3] = v * .9; cols[k * 3 + 1] = v; cols[k * 3 + 2] = v * .85; k++;
+      const c = autumn[Math.floor(Math.random() * autumn.length)], v = .75 + .45 * Math.random(); cols[k * 3] = c[0] * v; cols[k * 3 + 1] = c[1] * v; cols[k * 3 + 2] = c[2] * v; k++;
     }
     hedgeLeaves.instanceColor = new THREE.InstancedBufferAttribute(cols, 3);
     scene.add(hedgeLeaves);
