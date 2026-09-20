@@ -855,10 +855,10 @@ Those in-hand worlds are `DEPOSIT_ONLY` at the last catalog waypoint
 arm parked at the validated robot-side hover, and a deposit-only hover
 teacher so the grasp policy cannot put the wrist back in the liner
 during the 0.5 s settle. Hanging HARVEST worlds stay student-only; eval
-stays hanging-only with `force_pregrasp` and `teacher_mix=0`. Harvest11
-and harvest12 had 512/512 `inside_basket` and liner contact with 0
-harvest: the 16 cm release TCP and the post-release hand-XY pull parked
-the ~20 cm wrist in the opening. Fruit stays free; this is not a weld.
+stays hanging-only with `force_pregrasp` and `teacher_mix=0`. A GPU dump probe then sat in the liner with no hand at 0.12–0.23 m/s:
+the coarse rigid liner never crosses the 0.05 m/s HARVEST dwell, so
+`DEPOSIT_ONLY` accumulates settle below 0.40 m/s. HARVEST eval still
+uses 0.05 m/s. Fruit stays free; this is not a weld.
 Harvest3/4 grasped (eval 49–87 %) but never deposited:
 the 0.32 pin (~5 N) let the kiwi slip under the 8 N pull, the TCP term gave
 no signal once held, and 180 s episodes let a frozen hold run ~35 updates.
