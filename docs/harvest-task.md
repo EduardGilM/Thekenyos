@@ -50,7 +50,16 @@ the stem load toward the 8 N release while the fruit is held and still
 attached (a removable pull cue, not a required angle), and
 arm an optional straight detach→opening breadcrumb line: eight one-shot
 COM spheres from the detach position to the crate opening, paid at most
-once each while the fruit is still held. A slam that breaks the stem
+once each while the fruit is still held. A harvest-continue mix may also
+restore some training worlds already held and detached at the last
+post-pull catalog waypoint, then open the pin, park the arm at the
+robot-side hover, and hold that hover with a deposit-only teacher so
+the wrist stays out of the liner during the 0.5 s settle. Those in-hand
+starts use the DEPOSIT_ONLY jaw-overlap exemption and a 0.40 m/s dwell
+cap because the coarse rigid liner residual sat at 0.12–0.23 m/s;
+hanging HARVEST still uses 0.05 m/s. Hanging worlds stay student-only.
+Evaluation stays hanging-only. A slam that
+breaks the stem
 without the 0.12 s hold is not a pick. That line is
 not a required grasp sequence, not a paper angle, and not part of the
 oracle. Set this weight between episodes; anneal to **zero** as unguided

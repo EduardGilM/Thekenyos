@@ -305,6 +305,19 @@ IK_HARVEST_PRESET = {
     # event. Both are training assists; eval keeps guidance at 0.
     'rl_continue_pull_close_frac': 0.40,
     'rl_continue_detach_reward': 40.0,
+    # Harvest8 finished 48 hanging-only updates at 0 harvest: eval grasp
+    # 94 → 0 % and basket distance stayed ~1.0 m. Harvest9 mixed in-hand
+    # starts but kept HARVEST, so the 0.32 pin (~97 N overlap) failed
+    # those worlds before the 0.5 s no-hand settle. The continue now
+    # restores a fraction already held and detached on a post-pull
+    # waypoint and marks those worlds DEPOSIT_ONLY so the existing jaw-
+    # overlap exemption can settle a liner drop. Hanging worlds stay
+    # HARVEST. Eval stays hanging-only. Fruit stays free; not a weld.
+    'rl_continue_deposit_start_frac': 0.50,
+    'rl_continue_shape_hand_fruit': True,
+    # Deposit-world hover hold only. Hanging HARVEST stays student-only.
+    # Eval stays deterministic with teacher_mix=0. Not a full IK harvest.
+    'rl_continue_deposit_hover_teacher': True,
     'bc_epochs': 6,
     'bc_minibatch_worlds': 64,
     'worlds': 512,
@@ -654,6 +667,9 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out.setdefault('slip_max_close_frac', 0.0)
     out.setdefault('pull_close_frac', 0.0)
     out.setdefault('detach_reward', W_DETACH_HELD)
+    out.setdefault('deposit_start_frac', 0.0)
+    out.setdefault('shape_hand_fruit', False)
+    out.setdefault('deposit_hover_teacher', False)
     if not continuing:
         return out
     entropy = float(out['rl_continue_entropy_coef'])
@@ -683,6 +699,9 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
         raise ValueError('rl_continue_shaping_coef must be finite in [0, 50]')
     if not np.isfinite(line) or not 0.0 < line <= 20.0:
         raise ValueError('rl_continue_carry_line_bonus must be finite in (0, 20]')
+    deposit_frac = float(out['rl_continue_deposit_start_frac'])
+    if not np.isfinite(deposit_frac) or not 0.0 <= deposit_frac <= 0.85:
+        raise ValueError('rl_continue_deposit_start_frac must be finite in [0, 0.85]')
     out['entropy_coef'] = entropy
     out['ppo_lr'] = lr
     out['ppo_epochs'] = epochs
@@ -695,7 +714,84 @@ def harvest_run_knobs(*, continuing: bool) -> dict:
     out['slip_max_close_frac'] = slip_cap
     out['pull_close_frac'] = pull_frac
     out['detach_reward'] = detach_w
+    out['deposit_start_frac'] = deposit_frac
+    out['shape_hand_fruit'] = bool(out['rl_continue_shape_hand_fruit'])
+    out['deposit_hover_teacher'] = bool(out['rl_continue_deposit_hover_teacher'])
     return out
+
+
+def mix_harvest_reset_modes(reset_mode, deposit_frac, rng):
+    """Hanging pregrasp plus a fraction of in-hand deposit starts.
+
+    HARVEST's default reset is the authored hang, which skips the catalog.
+    Training keeps those worlds on RESET_PREGRASP and only then overwrites
+    a fraction to RESET_DEPOSIT. Callers must then run
+    ``assign_harvest_deposit_goals`` so in-hand starts are DEPOSIT_ONLY
+    (jaw-overlap while the pin opens is not a harvest fail). Eval should
+    not call this. Fruit stays a free body.
+    """
+    n = np.asarray(reset_mode, dtype=np.int32).reshape(-1).size
+    modes = np.full(n, RESET_PREGRASP, dtype=np.int32)
+    frac = float(deposit_frac)
+    if not np.isfinite(frac) or not 0.0 <= frac <= 0.85:
+        raise ValueError('deposit_frac must be finite in [0, 0.85]')
+    if not hasattr(rng, 'choice'):
+        raise TypeError('rng must be a NumPy Generator')
+    count = int(round(frac * n))
+    if count:
+        selected = np.asarray(rng.choice(n, size=count, replace=False), dtype=np.int64)
+        modes[selected] = RESET_DEPOSIT
+    return modes
+
+
+def assign_harvest_deposit_goals(goal_id, reset_mode):
+    """Mark in-hand harvest starts DEPOSIT_ONLY. Hanging worlds stay as given.
+
+    The oracle skips the 15 N jaw fail when ``goal==0`` because deposit
+    fruit starts already in the mouth; rigid overlap while it falls past
+    the gripper is not a crush gate. HARVEST (goal 2) still fails that
+    spike, so a RESET_DEPOSIT mix that keeps HARVEST never settles.
+    Eval must not call this. Fruit stays a free body.
+    """
+    goals = np.asarray(goal_id, dtype=np.int32).reshape(-1).copy()
+    modes = np.asarray(reset_mode, dtype=np.int32).reshape(-1)
+    if goals.size != modes.size:
+        raise ValueError('goal_id and reset_mode must have the same length')
+    goals[modes == RESET_DEPOSIT] = np.int32(GOAL_ID['DEPOSIT_ONLY'])
+    return goals
+
+
+def sample_harvest_deposit_waypoints(reset_mode, pull_index, n_waypoints, rng, tail=1):
+    """Opening-end catalog rows for in-hand harvest starts. Hanging worlds stay 0.
+
+    Harvest9/10 sampled the whole post-pull slide: most worlds were still
+    mid-carry, the 0.32 pin stayed closed, and a 2.56 s collect never
+    settled. Default ``tail=1`` is the last waypoint (the liner-free
+    release pose) so a DEPOSIT_ONLY dump starts over the opening. Not a
+    weld.
+    """
+    modes = np.asarray(reset_mode, dtype=np.int32).reshape(-1)
+    pull = int(pull_index)
+    n_wp = int(n_waypoints)
+    n_tail = int(tail)
+    if isinstance(pull_index, bool) or isinstance(n_waypoints, bool) or isinstance(tail, bool):
+        raise ValueError('pull_index, n_waypoints and tail must be integers')
+    if n_wp < 1 or pull < 0 or n_tail < 1:
+        raise ValueError('n_waypoints and tail must be >= 1 and pull_index >= 0')
+    if not hasattr(rng, 'integers'):
+        raise TypeError('rng must be a NumPy Generator')
+    last = n_wp - 1
+    lo = min(last, max(pull + 1, last - n_tail + 1))
+    hi = n_wp
+    if hi <= lo:
+        lo = last
+        hi = n_wp
+    waypoints = np.zeros(modes.size, dtype=np.int32)
+    deposit = modes == RESET_DEPOSIT
+    count = int(deposit.sum())
+    if count:
+        waypoints[deposit] = np.asarray(rng.integers(lo, hi, size=count), dtype=np.int32)
+    return waypoints
 
 
 def sample_carry_start_indices(worlds, catalog_n, rng):

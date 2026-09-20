@@ -12,6 +12,10 @@ from treesim.native_kiwi import RADII_M
 DETACH_FORCE_N = 8.0  # Engineering approximation; not a calibrated stem threshold.
 SETTLE_SPEED_M_S = .05
 SETTLE_JITTER_SPEED_M_S = .10
+# Coarse rigid liner residual on DEPOSIT_ONLY dumps. Harvest13 sat in the
+# liner with no hand at 0.12–0.23 m/s and never crossed 0.05 m/s. HARVEST
+# eval still uses SETTLE_SPEED_M_S. Not a measured rest speed.
+SETTLE_DEPOSIT_SPEED_M_S = .40
 SETTLE_TIME_S = .5
 SETTLE_TIME_EPSILON_STEPS = .5
 JAW_FORCE_LIMIT_N = 15.0
@@ -186,7 +190,8 @@ def _record(
     if inside:
         inside_flag = wp.uint8(1)
     inside_basket[world] = inside_flag
-    if contained_contact and relative_speed < SETTLE_SPEED_M_S:
+    speed_limit = SETTLE_DEPOSIT_SPEED_M_S if goal[world] == 0 else SETTLE_SPEED_M_S
+    if contained_contact and relative_speed < speed_limit:
         settle_time[world] += dt
     elif (detached[world] != 0 and hand_contact[world] == 0 and near_inside
           and relative_speed < SETTLE_JITTER_SPEED_M_S):

@@ -10,10 +10,10 @@ from train_physical_smoke import build_policy as build_compact_policy
 from treesim.kiwi_rl.training_log import TrainingLog, add_training_log_args
 from treesim.kiwi_rl.training_monitor import LiveDashboard, add_monitor_args, spawn_progress_video
 from treesim.kiwi_rl.curriculum import (
-    EASY_PRESET, IK_DEMO_PRESET, IK_GRASP_PRESET, IK_HARVEST_PRESET,
-    RESET_PREGRASP, apply_easy_preset, apply_ik_demo_preset,
+    EASY_PRESET, GOAL_ID, IK_DEMO_PRESET, IK_GRASP_PRESET, IK_HARVEST_PRESET,
+    RESET_DEPOSIT, RESET_PREGRASP, apply_easy_preset, apply_ik_demo_preset,
     apply_ik_grasp_preset, apply_ik_harvest_preset, apply_speedrun_preset,
-    harvest_run_knobs,
+    assign_harvest_deposit_goals, harvest_run_knobs, mix_harvest_reset_modes,
     easy_start_far_frac, easy_teacher_mix, evaluate_skills,
     evaluation_horizon_steps, fruit_block_reason, idle_locomotion_mask,
     next_stage, promotion_ready, sample_world_skills, stage_named,
@@ -272,6 +272,16 @@ def collect(runtime, policy, gait, steps, camera_every, *, deterministic=False, 
                     teacher_applied = runtime.privileged_grasp_action()
                 else:
                     teacher_applied = runtime.privileged_deposit_action()
+                raw = mix_privileged_actions(raw, teacher_applied, mask)
+                teacher_used += int(mask.sum().item())
+            elif (not deterministic and getattr(runtime, '_deposit_hover_teacher', False)):
+                # Harvest continue: hold the robot-side hover on DEPOSIT_ONLY
+                # dump worlds so the grasp policy cannot put the wrist back
+                # in the liner. Hanging HARVEST stays student-only. Eval
+                # is deterministic and never enters this branch.
+                teacher_applied = runtime.privileged_deposit_action()
+                import warp as wp
+                mask = wp.to_torch(runtime.task.goal).reshape(-1) == 0
                 raw = mix_privileged_actions(raw, teacher_applied, mask)
                 teacher_used += int(mask.sum().item())
             logp = tanh_logprob(raw, mean, logstd, dim_mask=dim_mask)
@@ -802,8 +812,15 @@ def evaluate(runtime, policy, gait, steps, camera_every, *, stage=None):
 
 
 def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False,
-                force_pregrasp=False, train_timeout_s=None):
-    """Write per-world skills. ``train_timeout_s`` shortens training episodes only."""
+                force_pregrasp=False, deposit_start_frac=None, train_timeout_s=None):
+    """Write per-world skills. ``train_timeout_s`` shortens training episodes only.
+
+    ``deposit_start_frac`` restores a held, already detached kiwi on a
+    catalog carry waypoint and marks those worlds DEPOSIT_ONLY so the
+    scripted-pin overlap is not a 15 N harvest fail. Hanging worlds stay
+    HARVEST. Eval must keep ``force_pregrasp`` so the score stays
+    hanging-only.
+    """
     if evaluate_only:
         skills = evaluate_skills(stage, runtime.worlds)
     else:
@@ -811,6 +828,11 @@ def apply_stage(runtime, stage, rng, *, evaluate_only=False, primary_only=False,
     import numpy as np
     if force_pregrasp:
         skills['reset_mode'] = np.full(runtime.worlds, int(RESET_PREGRASP), dtype=np.int32)
+    elif deposit_start_frac is not None and not evaluate_only:
+        skills['reset_mode'] = mix_harvest_reset_modes(
+            skills['reset_mode'], deposit_start_frac, rng)
+        skills['goal_id'] = assign_harvest_deposit_goals(
+            skills['goal_id'], skills['reset_mode'])
     if train_timeout_s is not None and not evaluate_only:
         timeout = float(train_timeout_s)
         if not np_finite(timeout) or not 5.0 <= timeout <= 900.0:
@@ -861,6 +883,18 @@ def run(args):
         knobs = EASY_PRESET
     # Shorter training episodes for the harvest continue only; eval keeps its horizon.
     train_timeout_s = knobs.get('train_timeout_s') if ik_harvest else None
+    harvest_continuing = bool(ik_harvest and demo_updates == 0)
+    deposit_start_frac = knobs.get('deposit_start_frac') if harvest_continuing else None
+
+    def stage_kwargs(*, evaluate_only=False, after_eval=False):
+        if evaluate_only:
+            return dict(evaluate_only=True, force_pregrasp=bool(ik_harvest))
+        return dict(
+            primary_only=(ik_harvest if after_eval else (ik_grasp or ik_harvest)),
+            force_pregrasp=bool(ik_harvest and not harvest_continuing),
+            deposit_start_frac=deposit_start_frac,
+            train_timeout_s=train_timeout_s,
+        )
     blocked_reason = fruit_block_reason(stage, n_fruits)
     config = dict(vars(args), approximations=manifest['approximation'],
                   scope='TK-RL-003 task curriculum on the rigid fast runtime; not field harvest',
@@ -999,6 +1033,8 @@ def run(args):
             config['slip_max_close_frac'] = harvest_info.get('slip_max_close_frac')
             config['pull_close_frac'] = harvest_info.get('pull_close_frac')
             config['detach_reward'] = harvest_info.get('detach_reward')
+            config['deposit_start_frac'] = deposit_start_frac
+            config['shape_hand_fruit'] = bool(harvest_info.get('shape_hand_fruit'))
             config['scripted_jaw'] = True
             config['weld'] = False
             config['ppo_lr'] = float(knobs['ppo_lr'])
@@ -1017,8 +1053,7 @@ def run(args):
         optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_lr)
         dim_mask = policy_dim_mask(stage, 'cuda:0', mask_idle,
                                    scripted_jaw=(easy or ik_grasp or ik_harvest))
-        apply_stage(runtime, stage, numpy_rng, primary_only=(ik_grasp or ik_harvest),
-                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
+        apply_stage(runtime, stage, numpy_rng, **stage_kwargs())
         warmup_mix = easy_teacher_mix(0, start_mix=teacher_mix) if easy else teacher_mix
         collect(runtime, policy, gait, 4, args.camera_every, reset_all=True, dim_mask=dim_mask,
                 teacher_mix=warmup_mix)
@@ -1032,7 +1067,7 @@ def run(args):
             dict(schema='fast-curriculum-rgbd-r84/v1', camera='hand_color_sensor',
                  model_sha256=manifest['model_sha256'], config=config, completed_updates=0,
                  curriculum_stage=stage.name))
-        apply_stage(runtime, stage, numpy_rng, evaluate_only=True, force_pregrasp=ik_harvest)
+        apply_stage(runtime, stage, numpy_rng, **stage_kwargs(evaluate_only=True))
         baseline = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
                                     control_dt=runtime.control_dt, eval_profile=eval_profile)
         torch.cuda.empty_cache()
@@ -1049,8 +1084,7 @@ def run(args):
         best_checkpoint = str(last_checkpoint)
         carry = {}
         teacher_anneal_after = None
-        apply_stage(runtime, stage, numpy_rng, primary_only=(ik_grasp or ik_harvest),
-                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
+        apply_stage(runtime, stage, numpy_rng, **stage_kwargs())
         for iteration in range(args.updates):
             began = time.monotonic()
             demo_phase = bool((ik_demo or ik_grasp or ik_harvest) and iteration < demo_updates)
@@ -1144,6 +1178,15 @@ def run(args):
                 ik_harvest=int(ik_harvest),
                 carry_easy_start_worlds=int(start_info.get('carry_easy_start_worlds', 0)),
                 carry_hard_start_worlds=int(start_info.get('carry_hard_start_worlds', 0)),
+                deposit_start_worlds=int((np.asarray(runtime._reset_mode.numpy()).reshape(-1) == RESET_DEPOSIT).sum())
+                if ik_harvest else 0,
+                pregrasp_start_worlds=int((np.asarray(runtime._reset_mode.numpy()).reshape(-1) == RESET_PREGRASP).sum())
+                if ik_harvest else 0,
+                deposit_only_worlds=int((np.asarray(runtime.task.goal.numpy()).reshape(-1) == GOAL_ID['DEPOSIT_ONLY']).sum())
+                if ik_harvest else 0,
+                deposit_start_frac=float(deposit_start_frac or 0.0),
+                deposit_waypoint_mean=float(getattr(runtime, '_deposit_waypoint_mean', 0.0)),
+                deposit_waypoint_max=int(getattr(runtime, '_deposit_waypoint_max', 0)),
                 carry_waypoint_mean=float(start_info.get('carry_waypoint_mean', 0.0)),
                 carry_waypoint_max=int(start_info.get('carry_waypoint_max', 0)),
                 catalog_grasp_tcp_err_mean_m=start_info.get('catalog_grasp_tcp_err_mean_m'),
@@ -1215,7 +1258,7 @@ def run(args):
             del rows, bootstrap
             promoted = False
             if (iteration+1) % args.eval_every == 0 or iteration+1 == args.updates:
-                apply_stage(runtime, stage, numpy_rng, evaluate_only=True, force_pregrasp=ik_harvest)
+                apply_stage(runtime, stage, numpy_rng, **stage_kwargs(evaluate_only=True))
                 eval_metrics = evaluate_mission(runtime, policy, gait, args.camera_every, stage=stage,
                                                 control_dt=runtime.control_dt, eval_profile=eval_profile)
                 evaluations.append(dict(update=iteration+1, **eval_metrics))
@@ -1229,8 +1272,7 @@ def run(args):
                         metrics['curriculum_promoted'] = False
                         metrics['curriculum_blocked'] = 1
                         metrics['curriculum_blocked_reason'] = fruit_block_reason(nxt, n_fruits)
-                        apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                    force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
+                        apply_stage(runtime, stage, numpy_rng, **stage_kwargs(after_eval=True))
                         carry = {}
                     else:
                         metrics['curriculum_promoted'] = True
@@ -1249,14 +1291,12 @@ def run(args):
                             eval_success_rates = []
                             eval_episodes = 0
                             carry = {}
-                            apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                        force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
+                            apply_stage(runtime, stage, numpy_rng, **stage_kwargs(after_eval=True))
                             metrics['curriculum_stage'] = stage.name
                             metrics['curriculum_index'] = stage.index
                             metrics['idle_locomotion_masked'] = int(dim_mask is not None)
                 else:
-                    apply_stage(runtime, stage, numpy_rng, primary_only=ik_harvest,
-                                force_pregrasp=ik_harvest, train_timeout_s=train_timeout_s)
+                    apply_stage(runtime, stage, numpy_rng, **stage_kwargs(after_eval=True))
                     carry = {}
             persist = should_persist_checkpoint(
                 iteration + 1, updates=args.updates, eval_every=args.eval_every,
