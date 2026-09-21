@@ -21,6 +21,8 @@ CKPT=${HARVEST_INIT:-/workspace/training/runs/frozen/harvest5-checkpoint-0008.pt
 SCENE=${HARVEST_SCENE:-/workspace/training/scenes/fast-gripper-5}
 GAIT=${HARVEST_GAIT:-/workspace/training/gait/g1-cuda-fp32.pt}
 OUT=${HARVEST_OUT:-/workspace/training/runs/fast-5090-curriculum-s03-3072w-harvest15}
+LOG=${HARVEST_LOG:-/workspace/training/runs/harvest15.log}
+HUB=${MONITOR_HUB:-/workspace/training/monitor-live}
 
 if [ ! -x "$PY" ]; then
   echo "missing trainer python: $PY" >&2
@@ -35,11 +37,19 @@ case "$CKPT" in
   *harvest14*) echo 'refusing harvest14 init; use harvest5-checkpoint-0008.pt' >&2; exit 2 ;;
 esac
 
+if pgrep -f 'scripts/train_fast.py' >/dev/null 2>&1; then
+  echo 'train_fast already running; not starting a second job' >&2
+  exit 3
+fi
+
+jupyter_before=$(ss -ltnp 2>/dev/null | grep ':8080' || true)
+
 export PYTHONPATH=$SRC
 export ORCHARDBENCH_SOURCE=$SRC
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+mkdir -p "$(dirname "$OUT")" "$(dirname "$LOG")"
 cd "$SRC"
-exec "$PY" -B scripts/train_fast.py \
+nohup "$PY" -B scripts/train_fast.py \
   --scene "$SCENE" \
   --gait-checkpoint "$GAIT" \
   --output "$OUT" \
@@ -48,4 +58,24 @@ exec "$PY" -B scripts/train_fast.py \
   --worlds "$WORLD" --steps "$STEPS" --minibatch-worlds "$MB" \
   --eval-profile speedrun --ik-harvest --demo-updates 0 \
   --video-every 0 --seed 7 \
-  --monitor-hub /workspace/training/monitor-live
+  --monitor-hub "$HUB" \
+  >"$LOG" 2>&1 &
+echo $! > /workspace/training/runs/harvest15.pid
+echo "train_fast pid=$(cat /workspace/training/runs/harvest15.pid) log=$LOG"
+
+# Retarget the dashboard watcher only. Never touch Jupyter 8080.
+for pid in $(pgrep -f 'scripts/watch_training.py' || true); do
+  kill "$pid" || true
+done
+nohup "$PY" -B scripts/watch_training.py \
+  --run "$OUT" --hub "$HUB" --http-port 8090 --video-every 0 --poll-seconds 2 \
+  >/workspace/training/runs/harvest15-watch.log 2>&1 &
+echo "watch_training pid=$!"
+
+jupyter_after=$(ss -ltnp 2>/dev/null | grep ':8080' || true)
+if [ -n "$jupyter_before" ] && [ -z "$jupyter_after" ]; then
+  echo 'Jupyter 8080 disappeared; this launcher must not kill it' >&2
+  exit 4
+fi
+echo "jupyter_8080=${jupyter_after:-unchanged_or_absent}"
+nvidia-smi --query-gpu=name,memory.used,utilization.gpu --format=csv,noheader || true
