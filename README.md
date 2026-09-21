@@ -845,12 +845,16 @@ gait drift cannot walk the TCP off a world-fixed kiwi. It does **not** imply
 skips IK (`demo_updates=0`) and runs 48 teacher-off PPO updates. Harvest8
 kept every world on a hanging start: eval grasp 94 → 0 % and
 `harvest_successes` stayed 0 because a held detach was ~1 % and the
-carry never began. The continue still uses entropy 0.004 and lr `3e-4`
+carry never began. Harvest14 then restored **half** the worlds as
+`DEPOSIT_ONLY` jackpots (`deposit_start_frac=0.50` on 1024 worlds): every
+update logged 512 crate starts and eval grasp 0.93 → 0 with harvest still
+0. The continue now restores **20 %** in-hand so hanging HARVEST stays the
+majority. The continue still uses entropy 0.004 and lr `3e-4`
 with two clipped epochs (harvest6/7 forgot the grasp at lr `5e-4`, four
-epochs and unclipped positive advantages). Training now restores half
-the worlds already held and detached on a post-pull catalog waypoint
-(high slide through the opening) so carry and release get a gradient.
-Those in-hand worlds are `DEPOSIT_ONLY` at the last catalog waypoint
+epochs and unclipped positive advantages). Those in-hand worlds are already
+held and detached on a post-pull catalog waypoint (high slide through the
+opening) so carry and release get a gradient, and they are `DEPOSIT_ONLY`
+at the last catalog waypoint
 (the liner-free release pose) with the scripted pin already open, the
 arm parked at the validated robot-side hover, and a deposit-only hover
 teacher so the grasp policy cannot put the wrist back in the liner
@@ -890,6 +894,20 @@ python scripts/train_fast.py --scene /path/to/fast-scene \
   --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-harvest-run \
   --stage stationary_harvest --worlds 512 --steps 256 --minibatch-worlds 64 \
   --eval-profile speedrun --ik-harvest --video-every 0 --seed 7
+```
+
+The live continue profile is 3072 worlds × 64 steps × 384 minibatch from a
+hanging-fruit checkpoint (`harvest5-checkpoint-0008`, not harvest14). Pass
+those three numbers explicitly: CLI `--worlds` default 4096 and `--minibatch-worlds`
+default 512 are sentinels that rewrite the job. `--steps` 64 is also the
+CLI default; with worlds 3072 it is kept. Do not launch 4096/512.
+
+```bash
+python scripts/train_fast.py --scene /path/to/fast-scene \
+  --gait-checkpoint /path/to/verified-gait.pt --output /path/to/ik-harvest-continue \
+  --initialize-from /path/to/harvest5-checkpoint-0008.pt \
+  --stage stationary_harvest --worlds 3072 --steps 64 --minibatch-worlds 384 \
+  --eval-profile speedrun --ik-harvest --demo-updates 0 --video-every 0 --seed 7
 ```
 
 ```bash
