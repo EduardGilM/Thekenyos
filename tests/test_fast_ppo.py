@@ -231,7 +231,20 @@ class FastTrainerCLITest(unittest.TestCase):
         self.assertAlmostEqual(continued_harvest.shaping_coef, 15.0)
         from treesim.kiwi_rl.curriculum import harvest_run_knobs
         continued_knobs = harvest_run_knobs(continuing=True)
-        self.assertAlmostEqual(continued_knobs['deposit_start_frac'], 0.50)
+        self.assertAlmostEqual(continued_knobs['deposit_start_frac'], 0.20)
+        live = apply_ik_harvest_cli(argparse.Namespace(
+            ik_harvest=True, teacher_mix=None, shaping_coef=None,
+            entropy_coef=0.01, ppo_epochs=2, eval_every=50, checkpoint_every=1,
+            initialize_from='/tmp/harvest5-checkpoint-0008.pt', demo_updates=0,
+            easy=False, ik_demo=False, ik_grasp=False, worlds=3072, steps=64,
+            minibatch_worlds=384, stage='stationary_harvest'))
+        self.assertFalse(live.easy)
+        self.assertEqual(live.worlds, 3072)
+        self.assertEqual(live.steps, 64)
+        self.assertEqual(live.minibatch_worlds, 384)
+        self.assertEqual(live.demo_updates, 0)
+        self.assertNotEqual(live.worlds, 4096)
+        self.assertNotEqual(live.minibatch_worlds, 512)
         self.assertTrue(continued_knobs['shape_hand_fruit'])
         self.assertIn('catalog_grasp_tcp_err_mean_m', run_src)
         self.assertIn('catalog_fruit_source', run_src)
