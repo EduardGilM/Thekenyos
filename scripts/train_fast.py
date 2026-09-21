@@ -110,7 +110,10 @@ def apply_ik_harvest_cli(args):
     args.ppo_epochs = int(knobs['ppo_epochs'])
     if int(getattr(args, 'worlds', 4096)) == 4096:
         args.worlds = int(preset['worlds'])
-    if int(getattr(args, 'steps', 64)) == 64:
+    # CLI default --steps 64 is also the live 3072/384 profile. Only fill
+    # preset steps when worlds was left at the 4096 sentinel (do not launch
+    # 4096/512; that sentinel must not clobber an explicit 3072x64 job).
+    if int(getattr(args, 'worlds', 4096)) == 4096 and int(getattr(args, 'steps', 64)) == 64:
         args.steps = int(preset['steps'])
     if int(getattr(args, 'minibatch_worlds', 512)) == 512:
         args.minibatch_worlds = int(preset['bc_minibatch_worlds'])

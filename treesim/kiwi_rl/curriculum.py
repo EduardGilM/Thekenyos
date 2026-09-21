@@ -308,12 +308,13 @@ IK_HARVEST_PRESET = {
     # Harvest8 finished 48 hanging-only updates at 0 harvest: eval grasp
     # 94 → 0 % and basket distance stayed ~1.0 m. Harvest9 mixed in-hand
     # starts but kept HARVEST, so the 0.32 pin (~97 N overlap) failed
-    # those worlds before the 0.5 s no-hand settle. The continue now
-    # restores a fraction already held and detached on a post-pull
-    # waypoint and marks those worlds DEPOSIT_ONLY so the existing jaw-
-    # overlap exemption can settle a liner drop. Hanging worlds stay
-    # HARVEST. Eval stays hanging-only. Fruit stays free; not a weld.
-    'rl_continue_deposit_start_frac': 0.50,
+    # those worlds before the 0.5 s no-hand settle. Harvest14 then set
+    # this fraction to 0.50: 512/1024 worlds were DEPOSIT_ONLY jackpots
+    # every update and eval grasp 0.93 → 0 with harvest still 0. Keep
+    # hanging HARVEST as the majority so continue does not overwrite the
+    # pick; 0.20 still gives crate practice. Eval stays hanging-only.
+    # Fruit stays free; not a weld.
+    'rl_continue_deposit_start_frac': 0.20,
     'rl_continue_shape_hand_fruit': True,
     # Deposit-world hover hold only. Hanging HARVEST stays student-only.
     # Eval stays deterministic with teacher_mix=0. Not a full IK harvest.
