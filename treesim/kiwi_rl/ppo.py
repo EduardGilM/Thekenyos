@@ -254,11 +254,12 @@ def _publish_new(path, payload):
             stream.flush()
             os.fsync(stream.fileno())
         os.link(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == 'posix':
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

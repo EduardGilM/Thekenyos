@@ -96,6 +96,15 @@ def run(args):
             policy.mean.bias.zero_()
             policy.logstd.fill_(-1.)
         optimizer = torch.optim.Adam(policy.parameters(), lr=args.learning_rate)
+        if args.initialize_from:
+            # Weights-only transfer: fresh Adam/RNG/curriculum, so this is a new
+            # run initialized from a checkpoint, not a resume. The checkpoint's
+            # model_sha256 must match this scene (use a transplant when the
+            # source run trained on an identical-geometry scene elsewhere).
+            load_checkpoint(args.initialize_from, {'teacher': policy}, expected_meta={
+                'role': 'teacher', 'schema': SEQUENCE_SCHEMA,
+                'model_sha256': runtime.manifest['model_sha256']})
+            config['initialization'] = f'checkpoint:{args.initialize_from}'
         if args.resume_from:
             saved = load_checkpoint(args.resume_from, {'teacher': policy}, {'teacher': optimizer},
                 expected_meta={'schema': SEQUENCE_SCHEMA, 'model_sha256': runtime.manifest['model_sha256']})
@@ -256,6 +265,8 @@ def main():
     for name in ('scene', 'eval-scene', 'gait-checkpoint', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--resume-from', type=Path)
+    p.add_argument('--initialize-from', type=Path,
+                   help='Start a fresh run from checkpoint weights only (no optimizer, RNG or run state)')
     p.add_argument('--wandb-run-id')
     p.add_argument('--worlds', type=int, default=1024)
     p.add_argument('--eval-worlds', type=int, default=32)
@@ -288,6 +299,8 @@ def main():
             and 1 <= a.stall_seconds < a.max_episode_seconds <= 60 and 0 < a.arm_speed_rad_s <= 2.5 and -1.5708 <= a.initial_jaw_rad <= 0 and 0 < a.jaw_rate_rad_s <= 5 and 0 <= a.fruit_damping <= .05 and 1 <= a.max_level <= 5
             and 0 < a.learning_rate <= 1e-3 and 0 <= a.gae_lambda <= 1 and 0 <= a.entropy_coef <= .1):
         p.error('Invalid training configuration')
+    if a.resume_from and a.initialize_from:
+        p.error('Choose either --resume-from (continue a run) or --initialize-from (fresh warm start)')
     if a.resume_from and a.wandb_mode == 'online' and not a.wandb_run_id and a.resume_from.resolve().parent == a.output.resolve():
         p.error('Online resume in place requires the existing W&B run ID')
     if a.wandb_run_id and not a.resume_from:
