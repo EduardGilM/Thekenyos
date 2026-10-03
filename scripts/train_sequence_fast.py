@@ -52,6 +52,7 @@ def run(args):
         raise ValueError('Completed runs cannot resume in place')
     args.output.mkdir(parents=True, exist_ok=bool(args.resume_from))
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    config['scene'] = [str(scene) for scene in args.scene]
     config.update(role='teacher', reward_profile=SEQUENCE_PROFILE, reward_gamma=SEQUENCE_GAMMA,
         initialization='random', cti=False, solver_iterations=100, jaw_cap_Nm=JAW_CAP_NM, absolute_jaw=True, initial_jaw_rad=args.initial_jaw_rad, jaw_rate_rad_s=args.jaw_rate_rad_s,
         position_hold_s=POSITION_HOLD_S, stall_terminal=True, carry_reward=CARRY_REWARD_VERSION, fruit_damping=args.fruit_damping, max_level=args.max_level, fruit_jitter_m=list(args.fruit_jitter_m), fruit_reach_fraction=list(args.fruit_reach_fraction), fruit_sector_deg=args.fruit_sector_deg,
@@ -75,17 +76,25 @@ def run(args):
     best_path = None
     try:
         gait = load_gait_artifact(args.gait_checkpoint).cuda().eval()
-        runtimes = [FastRuntime(scene, worlds=worlds, camera=None, task_profile=SEQUENCE_PROFILE,
+        scenes = list(args.scene)
+        fast_kwargs = dict(camera=None, task_profile=SEQUENCE_PROFILE,
             arm_speed_rad_s=args.arm_speed_rad_s, solver_iterations=100, jaw_cap_Nm=JAW_CAP_NM, absolute_jaw=True,
             initial_jaw_rad=args.initial_jaw_rad, jaw_rate_rad_s=args.jaw_rate_rad_s, fruit_damping=args.fruit_damping,
             fruit_jitter_m=tuple(args.fruit_jitter_m), fruit_reach_fraction=tuple(args.fruit_reach_fraction), fruit_sector_deg=args.fruit_sector_deg)
-            for scene, worlds in ((args.scene, args.worlds), (args.scene, args.eval_worlds),
-                                  (args.eval_scene, args.eval_worlds))]
-        runtime = runtimes[0]
+        training_runtimes = [FastRuntime(scene, worlds=args.worlds // len(scenes), **fast_kwargs)
+            for scene in scenes]
+        eval_runtimes = [
+            FastRuntime(scenes[0], worlds=args.eval_worlds, **fast_kwargs),
+            FastRuntime(args.eval_scene, worlds=args.eval_worlds, **fast_kwargs)]
+        runtimes = training_runtimes + eval_runtimes
+        runtime = training_runtimes[0]
         if not all(target.manifest.get('fixed_base') for target in runtimes):
             raise ValueError('Sequence training requires exported fixed-base scenes for frozen legs')
-        if runtime.manifest['model_sha256'] == runtimes[2].manifest['model_sha256']:
+        if any(target.manifest['model_sha256'] == eval_runtimes[1].manifest['model_sha256']
+               for target in training_runtimes):
             raise ValueError('Use a distinct held-out scene')
+        config['training_scenes'] = [str(scene) for scene in scenes]
+        config['training_scene_sha256'] = [target.manifest['model_sha256'] for target in training_runtimes]
         for target in runtimes:
             target.prepare_settled_reset(gait)
             target.freeze_legs = True
@@ -127,9 +136,11 @@ def run(args):
                 raise ValueError('Resume must use the latest logged checkpoint')
             torch.set_rng_state(saved['rng']['torch'])
             torch.cuda.set_rng_state_all(saved['rng']['cuda'])
-        collector = HarvestCollector(runtime, role='teacher', reward_profile=SEQUENCE_PROFILE,
-            curriculum_stage=curriculum.level, stall_seconds=args.stall_seconds,
-            max_episode_seconds=args.max_episode_seconds, rehearse=True)
+        def make_collector(target):
+            return HarvestCollector(target, role='teacher', reward_profile=SEQUENCE_PROFILE,
+                curriculum_stage=curriculum.level, stall_seconds=args.stall_seconds,
+                max_episode_seconds=args.max_episode_seconds, rehearse=True)
+        collectors = [make_collector(target) for target in training_runtimes]
         started = time.monotonic() - elapsed_offset
         last_eval = time.monotonic()
         def checkpoint(render_objective=None):
@@ -151,9 +162,24 @@ def run(args):
             log.log(dict(update=0, elapsed_seconds=0., transitions=0, **{'curriculum/level':1}), step=0)
         (args.output/'active-process.json').write_text(json.dumps(dict(pid=os.getpid(), status='running', phase='sequence-ppo')))
         (args.output/'run.json').write_text(json.dumps(dict(wandb_url=log.url, config=config), indent=2)+'\n')
+        def merge(items):
+            first = items[0]
+            if isinstance(first, torch.Tensor):
+                return torch.cat(items, dim=0)
+            if isinstance(first, dict):
+                return {k: merge([item[k] for item in items]) for k in first}
+            return first
+        def merge_rows(per_scene_rows):
+            return [merge(list(step_rows)) for step_rows in zip(*per_scene_rows)]
         while time.monotonic()-started < args.train_seconds:
             tick = time.monotonic()
-            rows, bootstrap, episodes = collector.collect(policy, gait, args.steps)
+            per_scene = [collector.collect(policy, gait, args.steps) for collector in collectors]
+            rows = merge_rows([scene_rows for scene_rows, _, _ in per_scene])
+            bootstrap = torch.cat([scene_bootstrap for _, scene_bootstrap, _ in per_scene], dim=0)
+            for i, (_, _, scene_episodes) in enumerate(per_scene):
+                for episode in scene_episodes:
+                    episode['scene'] = i
+            episodes = [episode for _, _, scene_episodes in per_scene for episode in scene_episodes]
             metrics, steps_taken, reused = {}, 0, 0
             for epoch in range(3):
                 result = update(policy, optimizer, rows, bootstrap, args.minibatch_worlds,
@@ -202,8 +228,8 @@ def run(args):
             if time.monotonic()-last_eval >= args.eval_every_seconds:
                 eval_round += 1
                 evaluations = [evaluate(target, policy, gait, args, curriculum.level,
-                    args.seed + 10000 + 100*eval_round + i) for i, target in enumerate(runtimes[1:])]
-                validation = [evaluations[0], evaluate(runtimes[1], policy, gait, args,
+                    args.seed + 10000 + 100*eval_round + i) for i, target in enumerate(eval_runtimes)]
+                validation = [evaluations[0], evaluate(eval_runtimes[0], policy, gait, args,
                     curriculum.level, args.seed + 10000 + 100*eval_round + 17)]
                 training_result = {k: (sum(r[k] for r in validation) if k == 'episodes' or k.startswith('entries/')
                     else sum(r[k] for r in validation)/len(validation)) for k in validation[0]}
@@ -229,9 +255,7 @@ def run(args):
                 if curriculum.consider(validation):
                     # A batch boundary: discard unfinished old-objective episodes;
                     # retain the learned policy, critic and Adam states.
-                    collector = HarvestCollector(runtime, role='teacher', reward_profile=SEQUENCE_PROFILE,
-                        curriculum_stage=curriculum.level, stall_seconds=args.stall_seconds,
-                        max_episode_seconds=args.max_episode_seconds, rehearse=True)
+                    collectors = [make_collector(target) for target in training_runtimes]
                     with (args.output/'curriculum-events.jsonl').open('a') as stream:
                         stream.write(json.dumps(dict(update=index, level=curriculum.level,
                             elapsed_seconds=time.monotonic()-started, evaluations=evaluations))+'\n')
@@ -262,8 +286,9 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for name in ('scene', 'eval-scene', 'gait-checkpoint', 'output'):
+    for name in ('eval-scene', 'gait-checkpoint', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
+    p.add_argument('--scene', type=Path, nargs='+', required=True)
     p.add_argument('--resume-from', type=Path)
     p.add_argument('--initialize-from', type=Path,
                    help='Start a fresh run from checkpoint weights only (no optimizer, RNG or run state)')
@@ -300,6 +325,8 @@ def main():
             and 1 <= a.stall_seconds < a.max_episode_seconds <= 60 and 0 < a.arm_speed_rad_s <= 2.5 and -1.5708 <= a.initial_jaw_rad <= 0 and 0 < a.jaw_rate_rad_s <= 5 and 0 <= a.fruit_damping <= .05 and 1 <= a.start_level <= a.max_level <= 5
             and 0 < a.learning_rate <= 1e-3 and 0 <= a.gae_lambda <= 1 and 0 <= a.entropy_coef <= .1):
         p.error('Invalid training configuration')
+    if a.worlds % len(a.scene):
+        p.error('--worlds must be divisible by the number of --scene entries')
     if a.resume_from and a.initialize_from:
         p.error('Choose either --resume-from (continue a run) or --initialize-from (fresh warm start)')
     if a.resume_from and a.wandb_mode == 'online' and not a.wandb_run_id and a.resume_from.resolve().parent == a.output.resolve():
