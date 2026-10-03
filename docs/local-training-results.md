@@ -161,3 +161,31 @@ Videos: `output/videos/{base800,l3-507}-{success,failure}/rollout.mp4`
 (see `output/videos/README.md`). Visual observations: l3-507's success is fast
 (9.5 s vs 20 s); its failure mode on seed 1 was never reaching position — i.e.
 variance across fruit poses, not grasp mechanics.
+
+## 8. Full orchard demo (walk + harvest + deposit, 6 kiwis, free-base `demo-multi-003`)
+
+`scripts/demo_orchard_harvest.py` + `render_demo_timelapse.py` (MUJOCO_GL=glfw).
+
+| Policy | Kiwis in basket | sim time | video |
+|---|---|---|---|
+| jp's recorded run (ckpt-800, Sep 20) | 3 / 6 | 199 s | checkpoints/demo/demo-roll-800-report.json |
+| baseline ckpt-800, local | 2 / 6 | 178 s | `output/demo-base800-video/timelapse.mp4` |
+| **seq-l3-001 ckpt-507** | **4 / 6** | 266 s | `output/demo-l3-507-video/timelapse.mp4` |
+
+Single episode each — illustrative, not a statistic. ckpt-507 cleared fruits 0, 5, 2, 3;
+failed 4 (never engaged, closest 0.99 m — stand geometry) and 1 (positioned+gripped,
+then physical failure on 3 attempts). Baseline failed 4 of 6 with mostly physical
+failures at the fruit.
+
+### What did not work: demo default `--fruit-damping 0.05` blows up the solver
+On the kiwi-flex-gpu stack, the demo's default fruit joint damping (0.05) produces
+solver-iteration overflow → NONFINITE within ~90 control steps of the first harvest
+attempt, with absurd loads (stem 128 N, hand 1945 N) at zero contact. Checkpoint-,
+scene- (bundled and freshly exported), rolling-friction- and leg-freeze-independent.
+**`--fruit-damping 0` fixes it completely** (training also used 0). Always pass
+`--fruit-damping 0` on this machine. Not root-caused inside MuJoCo-Warp 3.13.0 —
+jp's run used the same flag default and did not blow up, so it may be a 3.13 vs jp
+stack difference; recorded as an open stack question, not a scene bug.
+
+Also: every mesh `.obj` hash differs from jp's manifest purely because of CRLF
+checkout; content is identical after LF normalization (verified on body.obj).
