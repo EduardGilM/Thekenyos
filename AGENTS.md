@@ -18,7 +18,11 @@ rigid-fruit pilot while its rigid/flex contact agreement gate fails. Real-fruit
 calibration remains separate from numerical and literature consistency.
 
 Read README.md, then the files affected by the task. For material changes read
-docs/kiwi-material-evidence.md. Check git status before editing; preserve work
+docs/kiwi-material-evidence.md. Before any training or evaluation work on the
+Windows RTX 4070 workstation, read docs/local-training-results.md: it records
+every local run, what failed and why, the current best checkpoint, and the
+decision-grade evaluation protocol. Append results there after each run.
+Check git status before editing; preserve work
 already present. State a short plan before substantial implementation.
 
 ## Correctness rules

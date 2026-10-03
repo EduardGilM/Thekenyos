@@ -68,7 +68,7 @@ def run(args):
         approximations='rigid fruit, 200 Hz; uncalibrated 8 N stem and 15 N damage thresholds')
     log = TrainingLog(args.output, config, wandb_mode=args.wandb_mode, wandb_run_id=args.wandb_run_id,
                       wandb_project='Thekenyos', wandb_entity='juampab', wandb_name=args.output.name)
-    curriculum = Curriculum(max_level=args.max_level)
+    curriculum = Curriculum(level=args.start_level, max_level=args.max_level)
     index = transitions = total_episodes = total_optimizer_steps = eval_round = 0
     elapsed_offset = 0.
     best = None
@@ -287,6 +287,7 @@ def main():
                    help='Randomise the kiwi horizontally (height fixed) so shoulder distance is within these fractions of full arm extension')
     p.add_argument('--fruit-sector-deg', type=float, default=70., help='Half-angle of the horizontal sector in front of the shoulder')
     p.add_argument('--max-level', type=int, default=3, help='Highest curriculum objective to train (carry and deposit are scripted)')
+    p.add_argument('--start-level', type=int, default=1, help='Objective to start on (use with --initialize-from for a policy that already masters the prefix)')
     p.add_argument('--learning-rate', type=float, default=1e-4)
     p.add_argument('--gae-lambda', type=float, default=.99)
     p.add_argument('--entropy-coef', type=float, default=.001)
@@ -296,7 +297,7 @@ def main():
     if not (1 <= a.worlds <= 4096 and 32 <= a.eval_worlds <= 256 and 2 <= a.steps <= 256
             and 1 <= a.minibatch_worlds <= a.worlds and 1 <= a.train_seconds <= 28800
             and a.eval_every_seconds >= 1 and 0 <= a.reset_jitter_rad <= .5
-            and 1 <= a.stall_seconds < a.max_episode_seconds <= 60 and 0 < a.arm_speed_rad_s <= 2.5 and -1.5708 <= a.initial_jaw_rad <= 0 and 0 < a.jaw_rate_rad_s <= 5 and 0 <= a.fruit_damping <= .05 and 1 <= a.max_level <= 5
+            and 1 <= a.stall_seconds < a.max_episode_seconds <= 60 and 0 < a.arm_speed_rad_s <= 2.5 and -1.5708 <= a.initial_jaw_rad <= 0 and 0 < a.jaw_rate_rad_s <= 5 and 0 <= a.fruit_damping <= .05 and 1 <= a.start_level <= a.max_level <= 5
             and 0 < a.learning_rate <= 1e-3 and 0 <= a.gae_lambda <= 1 and 0 <= a.entropy_coef <= .1):
         p.error('Invalid training configuration')
     if a.resume_from and a.initialize_from:
